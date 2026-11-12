@@ -107,13 +107,32 @@ export class LinuxCliBackend implements DesktopBackend {
   private wmctrlAvailable = false;
   private lastKnownMouse: Point = { x: 0, y: 0 };
   private cachedScreenSize: { width: number; height: number } | null = null;
+  private initialized = false;
+  private initPromise: Promise<void> | null = null;
 
   async init(): Promise<void> {
+    return this.ensureReady();
+  }
+
+  private async ensureReady(): Promise<void> {
+    if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
+    const p = this.doInit().finally(() => {
+      if (this.initPromise === p) {
+        this.initPromise = null;
+      }
+    });
+    this.initPromise = p;
+    return p;
+  }
+
+  private async doInit(): Promise<void> {
     const isWayland = Boolean(process.env.WAYLAND_DISPLAY);
     const screenshotCandidates: Array<"grim" | "maim" | "scrot" | "import" | "gnome-screenshot"> = isWayland
       ? ["grim", "gnome-screenshot", "maim", "scrot", "import"]
       : ["maim", "scrot", "import", "gnome-screenshot", "grim"];
 
+    this.screenshotTool = null;
     for (const candidate of screenshotCandidates) {
       if (await commandExists(candidate)) {
         this.screenshotTool = candidate;
@@ -121,6 +140,7 @@ export class LinuxCliBackend implements DesktopBackend {
       }
     }
 
+    this.inputTool = null;
     const inputCandidates: Array<"xdotool" | "ydotool"> = isWayland ? ["ydotool", "xdotool"] : ["xdotool", "ydotool"];
     for (const candidate of inputCandidates) {
       if (await commandExists(candidate)) {
@@ -130,11 +150,13 @@ export class LinuxCliBackend implements DesktopBackend {
     }
     this.wtypeAvailable = await commandExists("wtype");
     this.wmctrlAvailable = await commandExists("wmctrl");
+    this.initialized = true;
   }
 
   async close(): Promise<void> {}
 
   async getDisplays(): Promise<DisplayInfo[]> {
+    await this.ensureReady();
     if (!this.cachedScreenSize) {
       try {
         const frame = await this.captureScreen();
@@ -158,6 +180,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async listWindows(): Promise<WindowInfo[]> {
+    await this.ensureReady();
     if (this.wmctrlAvailable) {
       try {
         const { stdout } = await execFileAsync("wmctrl", ["-lG"], { timeout: 3000 });
@@ -199,6 +222,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async getActiveWindow(): Promise<WindowInfo | null> {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       try {
         const { stdout: idOut } = await execFileAsync("xdotool", ["getactivewindow"], { timeout: 2000 });
@@ -234,13 +258,25 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async focusWindow(query: { title?: string; app?: string; id?: string | number }): Promise<boolean> {
-    if (query.id !== undefined && this.inputTool === "xdotool") {
-      try {
-        await execFileAsync("xdotool", ["windowactivate", "--sync", String(query.id)], { timeout: 3000 });
-        return true;
-      } catch {
-        // continue
+    await this.ensureReady();
+    if (query.id !== undefined) {
+      if (this.inputTool === "xdotool") {
+        try {
+          await execFileAsync("xdotool", ["windowactivate", "--sync", String(query.id)], { timeout: 3000 });
+          return true;
+        } catch {
+          // try wmctrl -i -a
+        }
       }
+      if (this.wmctrlAvailable) {
+        try {
+          await execFileAsync("wmctrl", ["-i", "-a", String(query.id)], { timeout: 3000 });
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      return false;
     }
     const needle = query.title ?? query.app;
     if (!needle) return false;
@@ -272,6 +308,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async getMousePosition(): Promise<Point> {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       const { stdout } = await execFileAsync("xdotool", ["getmouselocation", "--shell"], { timeout: 3000 });
       const xm = /^X=(-?\d+)/m.exec(stdout);
@@ -284,6 +321,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async moveMouse(x: number, y: number): Promise<void> {
+    await this.ensureReady();
     const rx = Math.round(x);
     const ry = Math.round(y);
     if (this.inputTool === "xdotool") {
@@ -306,6 +344,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async mouseDown(button: MouseButton): Promise<void> {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       await execFileAsync("xdotool", ["mousedown", this.buttonNum(button)], { timeout: 3000 });
     } else if (this.inputTool === "ydotool") {
@@ -317,6 +356,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async mouseUp(button: MouseButton): Promise<void> {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       await execFileAsync("xdotool", ["mouseup", this.buttonNum(button)], { timeout: 3000 });
     } else if (this.inputTool === "ydotool") {
@@ -328,6 +368,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async scroll(deltaX: number, deltaY: number): Promise<void> {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       const vSteps = Math.round(Math.abs(deltaY));
       if (vSteps > 0) {
@@ -353,6 +394,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async keyDown(key: string): Promise<void> {
+    await this.ensureReady();
     const parsed = parseKeyChord(key, [], "linux");
     if (this.inputTool === "xdotool") {
       await execFileAsync("xdotool", ["keydown", toXdotoolKey(parsed.key)], { timeout: 3000 });
@@ -362,6 +404,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async keyUp(key: string): Promise<void> {
+    await this.ensureReady();
     const parsed = parseKeyChord(key, [], "linux");
     if (this.inputTool === "xdotool") {
       await execFileAsync("xdotool", ["keyup", toXdotoolKey(parsed.key)], { timeout: 3000 });
@@ -371,6 +414,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async keyTap(key: string, modifiers: ConcreteModifier[] = []): Promise<void> {
+    await this.ensureReady();
     const xdoKey = [...modifiers.map((m) => toXdotoolKey(m)), toXdotoolKey(key)].join("+");
     if (this.inputTool === "xdotool") {
       await execFileAsync("xdotool", ["key", "--clearmodifiers", xdoKey], { timeout: 3000 });
@@ -392,6 +436,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async typeText(text: string): Promise<void> {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       await execFileAsync("xdotool", ["type", "--clearmodifiers", "--delay", "8", "--", text], { timeout: 10000 });
       return;
@@ -408,6 +453,7 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async captureScreen(options: { display?: number; region?: Region } = {}): Promise<RawFrame> {
+    await this.ensureReady();
     if (!this.screenshotTool) {
       throw new Error("No Linux screenshot utility found (grim, maim, scrot, import, or gnome-screenshot).");
     }
@@ -504,7 +550,8 @@ export class LinuxCliBackend implements DesktopBackend {
   }
 
   async doctor(): Promise<DoctorCheck[]> {
-    await this.init();
+    this.initialized = false;
+    await this.ensureReady();
     return [
       {
         name: "Linux Screenshot Tool",

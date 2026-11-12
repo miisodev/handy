@@ -71,6 +71,38 @@ describe("PermissionStore & Live On/Off Toggle", () => {
 
     // User CLI can turn Handy back ON
     expect(store.setEnabled(true, { updatedBy: "cli" }).enabled).toBe(true);
+
+    // MCP cannot escalate view_only -> full or clear/extend a user-set TTL
+    store.setEnabled(true, { mode: "view_only", ttlMs: 60_000, updatedBy: "cli" });
+    const initialExp = store.getState().expiresAt!;
+    expect(initialExp).toBeTruthy();
+    expect(() => store.setEnabled(true, { mode: "full", updatedBy: "mcp" })).toThrow(HandyPermissionError);
+
+    // Calling MCP with view_only and no ttlMs must preserve the user's TTL expiration
+    const preserved = store.setEnabled(true, { mode: "view_only", updatedBy: "mcp" });
+    expect(preserved.mode).toBe("view_only");
+    expect(preserved.expiresAt).toBe(initialExp);
+  });
+
+  it("aborts visual polling loops (wait_for_settled) immediately when permission is revoked mid-poll", async () => {
+    const backend = new VirtualDesktopBackend();
+    const controller = new HandyController({ backend, permissions: store });
+
+    setTimeout(() => {
+      store.setEnabled(false, { updatedBy: "cli" });
+    }, 35);
+
+    await expect(
+      controller.act({
+        actions: [
+          { type: "mouse_down", x: 780, y: 180 },
+          { type: "wait_for_settled", quietMs: 400, pollMs: 25, timeoutMs: 1500 },
+        ],
+      }),
+    ).rejects.toBeInstanceOf(HandyPermissionError);
+
+    expect(backend.state.draggingCard).toBe(false);
+    await controller.close();
   });
 
   it("aborts an in-flight chained action immediately when toggled OFF mid-chain and releases held inputs", async () => {

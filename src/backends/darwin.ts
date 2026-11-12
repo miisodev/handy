@@ -157,11 +157,17 @@ function handleCmd(cmd) {
     const aNeedle = cmd.app ? String(cmd.app).toLowerCase() : "";
     const targetId = cmd.windowId !== undefined ? String(cmd.windowId) : "";
     let pid = 0;
-    for (let i = 0; i < wins.length; i++) {
-      const w = wins[i];
-      if (targetId && String(w.id) === targetId) { pid = w.pid || 0; break; }
-      if (tNeedle && String(w.title || "").toLowerCase().indexOf(tNeedle) !== -1) { pid = w.pid || 0; break; }
-      if (aNeedle && String(w.app || "").toLowerCase().indexOf(aNeedle) !== -1) { pid = w.pid || 0; break; }
+    if (targetId) {
+      for (let i = 0; i < wins.length; i++) {
+        const w = wins[i];
+        if (String(w.id) === targetId) { pid = w.pid || 0; break; }
+      }
+    } else {
+      for (let i = 0; i < wins.length; i++) {
+        const w = wins[i];
+        if (tNeedle && String(w.title || "").toLowerCase().indexOf(tNeedle) !== -1) { pid = w.pid || 0; break; }
+        if (aNeedle && String(w.app || "").toLowerCase().indexOf(aNeedle) !== -1) { pid = w.pid || 0; break; }
+      }
     }
     if (pid > 0) {
       const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
@@ -170,7 +176,7 @@ function handleCmd(cmd) {
         return { id: cmd.id, ok: true, focused: ok };
       }
     }
-    if (aNeedle || tNeedle) {
+    if (!targetId && (aNeedle || tNeedle)) {
       const needle = aNeedle || tNeedle;
       const apps = $.NSWorkspace.sharedWorkspace.runningApplications;
       for (let j = 0; j < apps.count; j++) {

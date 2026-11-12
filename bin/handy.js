@@ -28002,11 +28002,17 @@ function handleCmd(cmd) {
     const aNeedle = cmd.app ? String(cmd.app).toLowerCase() : "";
     const targetId = cmd.windowId !== undefined ? String(cmd.windowId) : "";
     let pid = 0;
-    for (let i = 0; i < wins.length; i++) {
-      const w = wins[i];
-      if (targetId && String(w.id) === targetId) { pid = w.pid || 0; break; }
-      if (tNeedle && String(w.title || "").toLowerCase().indexOf(tNeedle) !== -1) { pid = w.pid || 0; break; }
-      if (aNeedle && String(w.app || "").toLowerCase().indexOf(aNeedle) !== -1) { pid = w.pid || 0; break; }
+    if (targetId) {
+      for (let i = 0; i < wins.length; i++) {
+        const w = wins[i];
+        if (String(w.id) === targetId) { pid = w.pid || 0; break; }
+      }
+    } else {
+      for (let i = 0; i < wins.length; i++) {
+        const w = wins[i];
+        if (tNeedle && String(w.title || "").toLowerCase().indexOf(tNeedle) !== -1) { pid = w.pid || 0; break; }
+        if (aNeedle && String(w.app || "").toLowerCase().indexOf(aNeedle) !== -1) { pid = w.pid || 0; break; }
+      }
     }
     if (pid > 0) {
       const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
@@ -28015,7 +28021,7 @@ function handleCmd(cmd) {
         return { id: cmd.id, ok: true, focused: ok };
       }
     }
-    if (aNeedle || tNeedle) {
+    if (!targetId && (aNeedle || tNeedle)) {
       const needle = aNeedle || tNeedle;
       const apps = $.NSWorkspace.sharedWorkspace.runningApplications;
       for (let j = 0; j < apps.count; j++) {
@@ -28451,15 +28457,33 @@ var LinuxCliBackend = class {
   wmctrlAvailable = false;
   lastKnownMouse = { x: 0, y: 0 };
   cachedScreenSize = null;
+  initialized = false;
+  initPromise = null;
   async init() {
+    return this.ensureReady();
+  }
+  async ensureReady() {
+    if (this.initialized) return;
+    if (this.initPromise) return this.initPromise;
+    const p = this.doInit().finally(() => {
+      if (this.initPromise === p) {
+        this.initPromise = null;
+      }
+    });
+    this.initPromise = p;
+    return p;
+  }
+  async doInit() {
     const isWayland = Boolean(process.env.WAYLAND_DISPLAY);
     const screenshotCandidates = isWayland ? ["grim", "gnome-screenshot", "maim", "scrot", "import"] : ["maim", "scrot", "import", "gnome-screenshot", "grim"];
+    this.screenshotTool = null;
     for (const candidate of screenshotCandidates) {
       if (await commandExists(candidate)) {
         this.screenshotTool = candidate;
         break;
       }
     }
+    this.inputTool = null;
     const inputCandidates = isWayland ? ["ydotool", "xdotool"] : ["xdotool", "ydotool"];
     for (const candidate of inputCandidates) {
       if (await commandExists(candidate)) {
@@ -28469,10 +28493,12 @@ var LinuxCliBackend = class {
     }
     this.wtypeAvailable = await commandExists("wtype");
     this.wmctrlAvailable = await commandExists("wmctrl");
+    this.initialized = true;
   }
   async close() {
   }
   async getDisplays() {
+    await this.ensureReady();
     if (!this.cachedScreenSize) {
       try {
         const frame = await this.captureScreen();
@@ -28495,6 +28521,7 @@ var LinuxCliBackend = class {
     ];
   }
   async listWindows() {
+    await this.ensureReady();
     if (this.wmctrlAvailable) {
       try {
         const { stdout } = await execFileAsync2("wmctrl", ["-lG"], { timeout: 3e3 });
@@ -28533,6 +28560,7 @@ var LinuxCliBackend = class {
     return active ? [active] : [];
   }
   async getActiveWindow() {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       try {
         const { stdout: idOut } = await execFileAsync2("xdotool", ["getactivewindow"], { timeout: 2e3 });
@@ -28564,12 +28592,24 @@ var LinuxCliBackend = class {
     return null;
   }
   async focusWindow(query) {
-    if (query.id !== void 0 && this.inputTool === "xdotool") {
-      try {
-        await execFileAsync2("xdotool", ["windowactivate", "--sync", String(query.id)], { timeout: 3e3 });
-        return true;
-      } catch {
+    await this.ensureReady();
+    if (query.id !== void 0) {
+      if (this.inputTool === "xdotool") {
+        try {
+          await execFileAsync2("xdotool", ["windowactivate", "--sync", String(query.id)], { timeout: 3e3 });
+          return true;
+        } catch {
+        }
       }
+      if (this.wmctrlAvailable) {
+        try {
+          await execFileAsync2("wmctrl", ["-i", "-a", String(query.id)], { timeout: 3e3 });
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      return false;
     }
     const needle = query.title ?? query.app;
     if (!needle) return false;
@@ -28597,6 +28637,7 @@ var LinuxCliBackend = class {
     await writeLinuxClipboard(text);
   }
   async getMousePosition() {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       const { stdout } = await execFileAsync2("xdotool", ["getmouselocation", "--shell"], { timeout: 3e3 });
       const xm = /^X=(-?\d+)/m.exec(stdout);
@@ -28608,6 +28649,7 @@ var LinuxCliBackend = class {
     return { ...this.lastKnownMouse };
   }
   async moveMouse(x, y) {
+    await this.ensureReady();
     const rx = Math.round(x);
     const ry = Math.round(y);
     if (this.inputTool === "xdotool") {
@@ -28628,6 +28670,7 @@ var LinuxCliBackend = class {
     return button === "left" ? "1" : button === "middle" ? "2" : "3";
   }
   async mouseDown(button) {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       await execFileAsync2("xdotool", ["mousedown", this.buttonNum(button)], { timeout: 3e3 });
     } else if (this.inputTool === "ydotool") {
@@ -28638,6 +28681,7 @@ var LinuxCliBackend = class {
     }
   }
   async mouseUp(button) {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       await execFileAsync2("xdotool", ["mouseup", this.buttonNum(button)], { timeout: 3e3 });
     } else if (this.inputTool === "ydotool") {
@@ -28648,6 +28692,7 @@ var LinuxCliBackend = class {
     }
   }
   async scroll(deltaX, deltaY) {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       const vSteps = Math.round(Math.abs(deltaY));
       if (vSteps > 0) {
@@ -28672,6 +28717,7 @@ var LinuxCliBackend = class {
     }
   }
   async keyDown(key) {
+    await this.ensureReady();
     const parsed = parseKeyChord(key, [], "linux");
     if (this.inputTool === "xdotool") {
       await execFileAsync2("xdotool", ["keydown", toXdotoolKey(parsed.key)], { timeout: 3e3 });
@@ -28680,6 +28726,7 @@ var LinuxCliBackend = class {
     throw new Error("keyDown requires xdotool or native X11 backend.");
   }
   async keyUp(key) {
+    await this.ensureReady();
     const parsed = parseKeyChord(key, [], "linux");
     if (this.inputTool === "xdotool") {
       await execFileAsync2("xdotool", ["keyup", toXdotoolKey(parsed.key)], { timeout: 3e3 });
@@ -28688,6 +28735,7 @@ var LinuxCliBackend = class {
     throw new Error("keyUp requires xdotool or native X11 backend.");
   }
   async keyTap(key, modifiers = []) {
+    await this.ensureReady();
     const xdoKey = [...modifiers.map((m) => toXdotoolKey(m)), toXdotoolKey(key)].join("+");
     if (this.inputTool === "xdotool") {
       await execFileAsync2("xdotool", ["key", "--clearmodifiers", xdoKey], { timeout: 3e3 });
@@ -28708,6 +28756,7 @@ var LinuxCliBackend = class {
     throw new Error("No Linux keyboard tool found (install xdotool or wtype).");
   }
   async typeText(text) {
+    await this.ensureReady();
     if (this.inputTool === "xdotool") {
       await execFileAsync2("xdotool", ["type", "--clearmodifiers", "--delay", "8", "--", text], { timeout: 1e4 });
       return;
@@ -28723,6 +28772,7 @@ var LinuxCliBackend = class {
     throw new Error("No Linux typing tool found (install xdotool, wtype, or ydotool).");
   }
   async captureScreen(options = {}) {
+    await this.ensureReady();
     if (!this.screenshotTool) {
       throw new Error("No Linux screenshot utility found (grim, maim, scrot, import, or gnome-screenshot).");
     }
@@ -28807,7 +28857,8 @@ var LinuxCliBackend = class {
     };
   }
   async doctor() {
-    await this.init();
+    this.initialized = false;
+    await this.ensureReady();
     return [
       {
         name: "Linux Screenshot Tool",
@@ -28944,10 +28995,22 @@ var LinuxX11Backend = class {
   scratchKeycode = 254;
   atomCache = /* @__PURE__ */ new Map();
   initialized = false;
+  initPromise = null;
   constructor(options = {}) {
     this.displayStr = options.display ?? process.env.DISPLAY ?? ":0";
   }
   async init() {
+    if (this.initialized && this.socket && !this.socket.destroyed) return;
+    if (this.initPromise) return this.initPromise;
+    const p = this.doInit().finally(() => {
+      if (this.initPromise === p) {
+        this.initPromise = null;
+      }
+    });
+    this.initPromise = p;
+    return p;
+  }
+  async doInit() {
     if (this.initialized && this.socket && !this.socket.destroyed) return;
     const target = parseX11Display(this.displayStr);
     const socket = await new Promise((resolve2, reject) => {
@@ -29276,6 +29339,7 @@ var LinuxX11Backend = class {
   }
   async close() {
     this.initialized = false;
+    this.initPromise = null;
     if (this.socket) {
       this.socket.destroy();
       this.socket = null;
@@ -29526,8 +29590,7 @@ var LinuxX11Backend = class {
     const windows = await this.listWindows();
     const titleNeedle = query.title?.toLowerCase();
     const appNeedle = query.app?.toLowerCase();
-    const target = windows.find((w) => {
-      if (query.id !== void 0 && String(w.id) === String(query.id)) return true;
+    const target = query.id !== void 0 ? windows.find((w) => String(w.id) === String(query.id)) : windows.find((w) => {
       if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
       if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
       return false;
@@ -30162,8 +30225,7 @@ var VirtualDesktopBackend = class _VirtualDesktopBackend {
     const wins = await this.listWindows();
     const titleNeedle = query.title?.toLowerCase();
     const appNeedle = query.app?.toLowerCase();
-    const match = wins.find((w) => {
-      if (query.id !== void 0 && String(w.id) === String(query.id)) return true;
+    const match = query.id !== void 0 ? wins.find((w) => String(w.id) === String(query.id)) : wins.find((w) => {
       if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
       if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
       return false;
@@ -31208,8 +31270,7 @@ var Win32Backend = class {
     const wins = await this.listWindows();
     const titleNeedle = query.title?.toLowerCase();
     const appNeedle = query.app?.toLowerCase();
-    const match = wins.find((w) => {
-      if (query.id !== void 0 && String(w.id) === String(query.id)) return true;
+    const match = query.id !== void 0 ? wins.find((w) => String(w.id) === String(query.id)) : wins.find((w) => {
       if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
       if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
       return false;
@@ -31806,11 +31867,20 @@ var PermissionStore = class {
   setEnabled(enabled, options = {}) {
     const updatedBy = options.updatedBy ?? "cli";
     const current = this.getState();
-    if (updatedBy === "mcp" && enabled && !current.enabled && !this.allowMcpEnable) {
-      throw new HandyPermissionError(
-        "Handy is currently turned OFF by user permission controls and cannot re-enable itself via MCP. Ask the user to run `handy on` (or `/handy:on`).",
-        current
-      );
+    if (updatedBy === "mcp" && enabled && !this.allowMcpEnable) {
+      if (!current.enabled) {
+        throw new HandyPermissionError(
+          "Handy is currently turned OFF by user permission controls and cannot re-enable itself via MCP. Ask the user to run `handy on` (or `/handy:on`).",
+          current
+        );
+      }
+      const requestedMode = options.mode ?? current.mode ?? "full";
+      if (current.mode === "view_only" && requestedMode === "full") {
+        throw new HandyPermissionError(
+          "Handy is in VIEW-ONLY mode and cannot escalate to full control via MCP. Ask the user to run `handy on` (without --view-only).",
+          current
+        );
+      }
     }
     if (enabled && parseBoolEnv(process.env.HANDY_ENABLED) === false && updatedBy === "mcp") {
       throw new HandyPermissionError(
@@ -31819,10 +31889,19 @@ var PermissionStore = class {
       );
     }
     const now = Date.now();
+    const requestedExpiresMs = enabled && options.ttlMs && options.ttlMs > 0 ? now + options.ttlMs : null;
+    let expiresAt = requestedExpiresMs !== null ? new Date(requestedExpiresMs).toISOString() : null;
+    if (enabled && updatedBy === "mcp" && !this.allowMcpEnable && current.expiresAt) {
+      const existingExpMs = Date.parse(current.expiresAt);
+      if (!Number.isNaN(existingExpMs)) {
+        const clampedMs = requestedExpiresMs !== null ? Math.min(existingExpMs, requestedExpiresMs) : existingExpMs;
+        expiresAt = new Date(clampedMs).toISOString();
+      }
+    }
     const next = {
       enabled,
       mode: options.mode ?? current.mode ?? "full",
-      expiresAt: enabled && options.ttlMs && options.ttlMs > 0 ? new Date(now + options.ttlMs).toISOString() : null,
+      expiresAt,
       updatedAt: new Date(now).toISOString(),
       updatedBy
     };
@@ -32058,8 +32137,7 @@ var HandyController = class _HandyController {
     const [windows, displays] = await Promise.all([this.backend.listWindows(), this.backend.getDisplays()]);
     const titleNeedle = q.title?.toLowerCase();
     const appNeedle = q.app?.toLowerCase();
-    const match = windows.find((w) => {
-      if (q.id !== void 0 && String(w.id) === String(q.id)) return true;
+    const match = q.id !== void 0 ? windows.find((w) => String(w.id) === String(q.id)) : windows.find((w) => {
       if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
       if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
       return false;
@@ -32569,6 +32647,7 @@ var HandyController = class _HandyController {
             let matchedDiff = null;
             while (performance.now() < deadline) {
               await sleepAbortable(pollMs, options.signal);
+              this.permissions.assertCanControl();
               await this.checkFailsafe(failsafeEnabled);
               const next = await this.backend.captureScreen({
                 display: options.display,
@@ -32605,6 +32684,7 @@ var HandyController = class _HandyController {
             let settled = false;
             while (performance.now() < deadline) {
               await sleepAbortable(pollMs, options.signal);
+              this.permissions.assertCanControl();
               await this.checkFailsafe(failsafeEnabled);
               const curr = await this.backend.captureScreen({
                 display: options.display,
@@ -32655,6 +32735,8 @@ var HandyController = class _HandyController {
             let lastHex = null;
             let lastDist = null;
             while (true) {
+              this.permissions.assertCanControl();
+              await this.checkFailsafe(failsafeEnabled);
               const frame = await this.backend.captureScreen({
                 display: options.display,
                 region: sampleRegion

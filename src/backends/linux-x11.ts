@@ -175,12 +175,25 @@ export class LinuxX11Backend implements DesktopBackend {
   private scratchKeycode = 254;
   private atomCache = new Map<string, number>();
   private initialized = false;
+  private initPromise: Promise<void> | null = null;
 
   constructor(options: { display?: string } = {}) {
     this.displayStr = options.display ?? process.env.DISPLAY ?? ":0";
   }
 
   async init(): Promise<void> {
+    if (this.initialized && this.socket && !this.socket.destroyed) return;
+    if (this.initPromise) return this.initPromise;
+    const p = this.doInit().finally(() => {
+      if (this.initPromise === p) {
+        this.initPromise = null;
+      }
+    });
+    this.initPromise = p;
+    return p;
+  }
+
+  private async doInit(): Promise<void> {
     if (this.initialized && this.socket && !this.socket.destroyed) return;
 
     const target = parseX11Display(this.displayStr);
@@ -562,6 +575,7 @@ export class LinuxX11Backend implements DesktopBackend {
 
   async close(): Promise<void> {
     this.initialized = false;
+    this.initPromise = null;
     if (this.socket) {
       this.socket.destroy();
       this.socket = null;
@@ -853,12 +867,14 @@ export class LinuxX11Backend implements DesktopBackend {
     const windows = await this.listWindows();
     const titleNeedle = query.title?.toLowerCase();
     const appNeedle = query.app?.toLowerCase();
-    const target = windows.find((w) => {
-      if (query.id !== undefined && String(w.id) === String(query.id)) return true;
-      if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
-      if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
-      return false;
-    });
+    const target =
+      query.id !== undefined
+        ? windows.find((w) => String(w.id) === String(query.id))
+        : windows.find((w) => {
+            if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
+            if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
+            return false;
+          });
     if (!target) return false;
 
     const winId = typeof target.id === "number" ? target.id : Number(target.id);

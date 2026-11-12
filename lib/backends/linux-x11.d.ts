@@ -26,10 +26,12 @@ export declare class LinuxX11Backend implements DesktopBackend {
     private scratchKeycode;
     private atomCache;
     private initialized;
+    private initPromise;
     constructor(options?: {
         display?: string;
     });
     init(): Promise<void>;
+    private doInit;
     private parseSetupBody;
     private drainIncoming;
     private nextSeq;

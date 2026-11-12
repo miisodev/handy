@@ -13,6 +13,8 @@ jobs:
   release:
     name: Verify, Publish to npm & Create GitHub Release
     runs-on: ubuntu-latest
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

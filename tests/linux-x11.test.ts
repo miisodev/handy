@@ -125,4 +125,18 @@ describe("LinuxX11Backend (Real X11 binary wire protocol)", () => {
     expect(focusRes.activeWindow?.title).toBe("X11 Terminal");
     expect(x11Server.activeWindowId).toBe(0x00200002);
   });
+
+  it("shares in-flight X11 socket initialization across concurrent see() calls and honors explicit window ID", async () => {
+    // Call see() first on a brand-new controller so captureScreen, getMousePosition, and getActiveWindow race init()
+    const shot = await controller.see();
+    expect(shot.imageWidth).toBe(800);
+
+    // Even when passing the first window's title alongside the second window's explicit ID, ID wins exclusively
+    const focusById = await controller.focusWindow({ id: 0x00200002, title: "X11 Workbench" });
+    expect(focusById.focused).toBe(true);
+    expect(x11Server.activeWindowId).toBe(0x00200002);
+
+    // Closing the controller leaves zero open client sockets on the X11 server
+    await controller.close();
+  });
 });

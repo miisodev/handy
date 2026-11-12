@@ -132,11 +132,20 @@ export class PermissionStore {
     const updatedBy = options.updatedBy ?? "cli";
     const current = this.getState();
 
-    if (updatedBy === "mcp" && enabled && !current.enabled && !this.allowMcpEnable) {
-      throw new HandyPermissionError(
-        "Handy is currently turned OFF by user permission controls and cannot re-enable itself via MCP. Ask the user to run `handy on` (or `/handy:on`).",
-        current,
-      );
+    if (updatedBy === "mcp" && enabled && !this.allowMcpEnable) {
+      if (!current.enabled) {
+        throw new HandyPermissionError(
+          "Handy is currently turned OFF by user permission controls and cannot re-enable itself via MCP. Ask the user to run `handy on` (or `/handy:on`).",
+          current,
+        );
+      }
+      const requestedMode = options.mode ?? current.mode ?? "full";
+      if (current.mode === "view_only" && requestedMode === "full") {
+        throw new HandyPermissionError(
+          "Handy is in VIEW-ONLY mode and cannot escalate to full control via MCP. Ask the user to run `handy on` (without --view-only).",
+          current,
+        );
+      }
     }
 
     if (enabled && parseBoolEnv(process.env.HANDY_ENABLED) === false && updatedBy === "mcp") {
@@ -147,10 +156,22 @@ export class PermissionStore {
     }
 
     const now = Date.now();
+    const requestedExpiresMs = enabled && options.ttlMs && options.ttlMs > 0 ? now + options.ttlMs : null;
+    let expiresAt: string | null = requestedExpiresMs !== null ? new Date(requestedExpiresMs).toISOString() : null;
+
+    // Never allow unprivileged MCP calls to clear or extend an existing user-configured TTL
+    if (enabled && updatedBy === "mcp" && !this.allowMcpEnable && current.expiresAt) {
+      const existingExpMs = Date.parse(current.expiresAt);
+      if (!Number.isNaN(existingExpMs)) {
+        const clampedMs = requestedExpiresMs !== null ? Math.min(existingExpMs, requestedExpiresMs) : existingExpMs;
+        expiresAt = new Date(clampedMs).toISOString();
+      }
+    }
+
     const next: PermissionState = {
       enabled,
       mode: options.mode ?? current.mode ?? "full",
-      expiresAt: enabled && options.ttlMs && options.ttlMs > 0 ? new Date(now + options.ttlMs).toISOString() : null,
+      expiresAt,
       updatedAt: new Date(now).toISOString(),
       updatedBy,
     };

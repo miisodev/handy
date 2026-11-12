@@ -137,12 +137,14 @@ export class VirtualDesktopBackend implements DesktopBackend {
     const wins = await this.listWindows();
     const titleNeedle = query.title?.toLowerCase();
     const appNeedle = query.app?.toLowerCase();
-    const match = wins.find((w) => {
-      if (query.id !== undefined && String(w.id) === String(query.id)) return true;
-      if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
-      if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
-      return false;
-    });
+    const match =
+      query.id !== undefined
+        ? wins.find((w) => String(w.id) === String(query.id))
+        : wins.find((w) => {
+            if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
+            if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
+            return false;
+          });
     if (!match) return false;
     this.state.activeWindowId = match.id as "workbench" | "scratchpad";
     if (this.state.activeWindowId === "scratchpad") {

@@ -197,12 +197,14 @@ export class HandyController {
     const [windows, displays] = await Promise.all([this.backend.listWindows(), this.backend.getDisplays()]);
     const titleNeedle = q.title?.toLowerCase();
     const appNeedle = q.app?.toLowerCase();
-    const match = windows.find((w) => {
-      if (q.id !== undefined && String(w.id) === String(q.id)) return true;
-      if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
-      if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
-      return false;
-    });
+    const match =
+      q.id !== undefined
+        ? windows.find((w) => String(w.id) === String(q.id))
+        : windows.find((w) => {
+            if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
+            if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
+            return false;
+          });
     if (!match || !match.bounds) {
       const label = typeof query === "string" ? query : (query.title ?? query.app ?? String(query.id ?? ""));
       throw new Error(`No visible window with bounds matched "${label}".`);
@@ -807,6 +809,7 @@ export class HandyController {
 
             while (performance.now() < deadline) {
               await sleepAbortable(pollMs, options.signal);
+              this.permissions.assertCanControl();
               await this.checkFailsafe(failsafeEnabled);
               const next = await this.backend.captureScreen({
                 display: options.display,
@@ -847,6 +850,7 @@ export class HandyController {
 
             while (performance.now() < deadline) {
               await sleepAbortable(pollMs, options.signal);
+              this.permissions.assertCanControl();
               await this.checkFailsafe(failsafeEnabled);
               const curr = await this.backend.captureScreen({
                 display: options.display,
@@ -905,6 +909,8 @@ export class HandyController {
             let lastDist: number | null = null;
 
             while (true) {
+              this.permissions.assertCanControl();
+              await this.checkFailsafe(failsafeEnabled);
               const frame = await this.backend.captureScreen({
                 display: options.display,
                 region: sampleRegion,

@@ -11,7 +11,11 @@ export declare class LinuxCliBackend implements DesktopBackend {
     private wmctrlAvailable;
     private lastKnownMouse;
     private cachedScreenSize;
+    private initialized;
+    private initPromise;
     init(): Promise<void>;
+    private ensureReady;
+    private doInit;
     close(): Promise<void>;
     getDisplays(): Promise<DisplayInfo[]>;
     listWindows(): Promise<WindowInfo[]>;
