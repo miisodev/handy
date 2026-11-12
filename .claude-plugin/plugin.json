@@ -1,0 +1,30 @@
+{
+  "name": "handy",
+  "version": "1.0.0",
+  "description": "Real-time native mouse, keyboard, and coordinate-mapped screen control via stdio MCP with permission toggle.",
+  "author": {
+    "name": "Kevin Miiso Novo",
+    "email": "miisodev@gmail.com",
+    "url": "https://github.com/miisodev"
+  },
+  "homepage": "https://github.com/miisodev/handy",
+  "repository": "https://github.com/miisodev/handy",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "computer-use",
+    "mouse",
+    "keyboard",
+    "screen-capture",
+    "automation",
+    "gui-agent"
+  ],
+  "commands": "./commands/",
+  "skills": "./skills/",
+  "mcpServers": {
+    "handy": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bin/handy.js", "mcp"]
+    }
+  }
+}

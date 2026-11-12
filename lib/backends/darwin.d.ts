@@ -1,0 +1,39 @@
+import { type ConcreteModifier } from "../keys.js";
+import type { DesktopBackend, DisplayInfo, DoctorCheck, MouseButton, Point, RawFrame, Region } from "../types.js";
+import { type JsonlWorkerOptions } from "./jsonl-worker.js";
+/**
+ * Persistent macOS JXA (JavaScript for Automation) CoreGraphics worker.
+ * Runs on every Mac out of the box via /usr/bin/osascript without requiring Xcode CLT.
+ */
+export declare const DARWIN_JXA_SCRIPT = "\nObjC.import(\"Foundation\");\nObjC.import(\"CoreGraphics\");\nObjC.import(\"AppKit\");\nObjC.import(\"ApplicationServices\");\n\nconst stdin = $.NSFileHandle.fileHandleWithStandardInput;\nconst stdout = $.NSFileHandle.fileHandleWithStandardOutput;\n\nfunction writeJson(obj) {\n  const str = JSON.stringify(obj) + \"\\n\";\n  const ns = $(str);\n  const data = ns.dataUsingEncoding($.NSUTF8StringEncoding);\n  stdout.writeData(data);\n}\n\nfunction getMousePos() {\n  const ev = $.CGEventCreate($());\n  const loc = $.CGEventGetLocation(ev);\n  return { x: Math.round(loc.x), y: Math.round(loc.y) };\n}\n\nfunction flagsForMods(mods) {\n  let flags = 0;\n  if (!mods) return 0;\n  for (let i = 0; i < mods.length; i++) {\n    const m = mods[i];\n    if (m === \"meta\") flags |= (1 << 20);\n    else if (m === \"shift\") flags |= (1 << 17);\n    else if (m === \"alt\") flags |= (1 << 19);\n    else if (m === \"ctrl\") flags |= (1 << 18);\n  }\n  return flags;\n}\n\nlet heldLeft = false;\nlet lastClickCount = 1;\n\nfunction handleCmd(cmd) {\n  const op = cmd.op;\n  if (op === \"doctor\") {\n    let ax = true;\n    let screen = true;\n    try { ax = Boolean($.AXIsProcessTrusted()); } catch (_) {}\n    try { screen = Boolean($.CGPreflightScreenCaptureAccess()); } catch (_) {}\n    return { id: cmd.id, ok: true, accessibility: ax, screenRecording: screen };\n  }\n  if (op === \"displays\") {\n    const screens = $.NSScreen.screens;\n    const count = screens.count;\n    const primaryH = count > 0 ? screens.objectAtIndex(0).frame.size.height : 0;\n    const list = [];\n    for (let i = 0; i < count; i++) {\n      const s = screens.objectAtIndex(i);\n      const f = s.frame;\n      const scale = Number(s.backingScaleFactor) || 1;\n      // Convert Cocoa bottom-left origin to CoreGraphics top-left origin\n      const cgY = primaryH - (f.origin.y + f.size.height);\n      list.push({\n        id: i,\n        name: \"macOS Display \" + (i + 1),\n        x: Math.round(f.origin.x),\n        y: Math.round(cgY),\n        width: Math.round(f.size.width),\n        height: Math.round(f.size.height),\n        scaleFactor: scale,\n        primary: i === 0\n      });\n    }\n    return { id: cmd.id, ok: true, displays: list };\n  }\n  if (op === \"mouse_pos\") {\n    const p = getMousePos();\n    return { id: cmd.id, ok: true, x: p.x, y: p.y };\n  }\n  if (op === \"move\") {\n    const pt = { x: cmd.x, y: cmd.y };\n    const evType = heldLeft ? $.kCGEventLeftMouseDragged : $.kCGEventMouseMoved;\n    const ev = $.CGEventCreateMouseEvent($(), evType, pt, $.kCGMouseButtonLeft);\n    $.CGEventPost($.kCGHIDEventTap, ev);\n    return { id: cmd.id, ok: true };\n  }\n  if (op === \"mouse_down\" || op === \"mouse_up\") {\n    const p = getMousePos();\n    const isDown = op === \"mouse_down\";\n    const btn = cmd.button || \"left\";\n    let evType = isDown ? $.kCGEventLeftMouseDown : $.kCGEventLeftMouseUp;\n    let cgBtn = $.kCGMouseButtonLeft;\n    if (btn === \"right\") {\n      evType = isDown ? $.kCGEventRightMouseDown : $.kCGEventRightMouseUp;\n      cgBtn = $.kCGMouseButtonRight;\n    } else if (btn === \"middle\") {\n      evType = isDown ? $.kCGEventOtherMouseDown : $.kCGEventOtherMouseUp;\n      cgBtn = $.kCGMouseButtonCenter;\n    } else {\n      heldLeft = isDown;\n    }\n    const ev = $.CGEventCreateMouseEvent($(), evType, p, cgBtn);\n    const clickState = cmd.clickCount || lastClickCount || 1;\n    lastClickCount = isDown ? clickState : 1;\n    $.CGEventSetIntegerValueField(ev, $.kCGMouseEventClickState, clickState);\n    if (cmd.modifiers && cmd.modifiers.length) {\n      $.CGEventSetFlags(ev, flagsForMods(cmd.modifiers));\n    }\n    $.CGEventPost($.kCGHIDEventTap, ev);\n    return { id: cmd.id, ok: true };\n  }\n  if (op === \"scroll\") {\n    const ev = $.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitLine, 2, -Math.round(cmd.dy || 0), -Math.round(cmd.dx || 0));\n    $.CGEventPost($.kCGHIDEventTap, ev);\n    return { id: cmd.id, ok: true };\n  }\n  if (op === \"key_event\") {\n    const ev = $.CGEventCreateKeyboardEvent($(), cmd.code, Boolean(cmd.down));\n    if (cmd.modifiers && cmd.modifiers.length) {\n      $.CGEventSetFlags(ev, flagsForMods(cmd.modifiers));\n    }\n    $.CGEventPost($.kCGHIDEventTap, ev);\n    return { id: cmd.id, ok: true };\n  }\n  if (op === \"type_text\" || op === \"type_char\") {\n    const str = String(cmd.text !== undefined ? cmd.text : (cmd.char || \"\"));\n    let i = 0;\n    while (i < str.length) {\n      // Batch up to 16 UTF-16 code units per CGEventKeyboardSetUnicodeString call\n      const end = Math.min(str.length, i + 16);\n      const codes = [];\n      for (let j = i; j < end; j++) codes.push(str.charCodeAt(j));\n      const down = $.CGEventCreateKeyboardEvent($(), 0, true);\n      const up = $.CGEventCreateKeyboardEvent($(), 0, false);\n      $.CGEventKeyboardSetUnicodeString(down, codes.length, codes);\n      $.CGEventKeyboardSetUnicodeString(up, codes.length, codes);\n      $.CGEventPost($.kCGHIDEventTap, down);\n      $.CGEventPost($.kCGHIDEventTap, up);\n      i = end;\n    }\n    return { id: cmd.id, ok: true };\n  }\n  return { id: cmd.id, ok: false, error: \"Unknown op: \" + op };\n}\n\nlet buffer = \"\";\nwhile (true) {\n  const data = stdin.availableData;\n  if (!data || data.length === 0) break;\n  const chunk = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding)) || \"\";\n  buffer += chunk;\n  let nl;\n  while ((nl = buffer.indexOf(\"\\n\")) !== -1) {\n    const line = buffer.slice(0, nl).trim();\n    buffer = buffer.slice(nl + 1);\n    if (!line) continue;\n    try {\n      const cmd = JSON.parse(line);\n      writeJson(handleCmd(cmd));\n    } catch (err) {\n      writeJson({ id: -1, ok: false, error: String(err) });\n    }\n  }\n}\n";
+export interface DarwinBackendOptions {
+    workerOptions?: JsonlWorkerOptions;
+    capturePng?: (args: {
+        display: DisplayInfo;
+        region?: Region;
+    }) => Promise<Buffer>;
+}
+export declare class DarwinBackend implements DesktopBackend {
+    readonly name = "darwin-coregraphics";
+    readonly platform: "darwin";
+    private readonly worker;
+    private readonly customCapturePng?;
+    constructor(options?: DarwinBackendOptions);
+    init(): Promise<void>;
+    close(): Promise<void>;
+    getDisplays(): Promise<DisplayInfo[]>;
+    getMousePosition(): Promise<Point>;
+    moveMouse(x: number, y: number): Promise<void>;
+    mouseDown(button: MouseButton, clickCount?: number, modifiers?: ConcreteModifier[]): Promise<void>;
+    mouseUp(button: MouseButton, clickCount?: number, modifiers?: ConcreteModifier[]): Promise<void>;
+    scroll(deltaX: number, deltaY: number): Promise<void>;
+    keyDown(key: string): Promise<void>;
+    keyUp(key: string): Promise<void>;
+    keyTap(key: string, modifiers?: ConcreteModifier[]): Promise<void>;
+    typeText(text: string): Promise<void>;
+    captureScreen(options?: {
+        display?: number;
+        region?: Region;
+    }): Promise<RawFrame>;
+    doctor(): Promise<DoctorCheck[]>;
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.miisodev/handy",
+  "description": "Native mouse, keyboard, and coordinate-mapped screen control for LLMs via stdio MCP.",
+  "version": "1.0.0",
+  "websiteUrl": "https://github.com/miisodev/handy",
+  "repository": {
+    "url": "https://github.com/miisodev/handy",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@miisodev/handy",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "HANDY_ENABLED",
+          "description": "Master on/off permission toggle (true or false). Overrides ~/.handy/permissions.json when false.",
+          "isRequired": false,
+          "format": "boolean",
+          "default": "true"
+        },
+        {
+          "name": "HANDY_BACKEND",
+          "description": "Optional backend override: auto (default), linux-x11, linux-cli, darwin, win32, or virtual.",
+          "isRequired": false,
+          "format": "string",
+          "default": "auto"
+        }
+      ]
+    }
+  ]
+}
