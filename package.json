@@ -1,0 +1,92 @@
+{
+  "name": "@miisodev/handy",
+  "version": "1.2.0",
+  "mcpName": "io.github.miisodev/handy",
+  "description": "Real-time native mouse, keyboard, and coordinate-mapped screen control for LLMs via stdio MCP.",
+  "type": "module",
+  "author": "Kevin Miiso Novo <miisodev@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/miisodev/handy.git"
+  },
+  "homepage": "https://github.com/miisodev/handy#readme",
+  "bugs": {
+    "url": "https://github.com/miisodev/handy/issues"
+  },
+  "funding": [
+    "https://github.com/sponsors/miisodev",
+    "https://paypal.me/miisodev"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "computer-use",
+    "mouse",
+    "keyboard",
+    "screen-capture",
+    "gui-agent",
+    "automation",
+    "claude",
+    "llm",
+    "agent",
+    "plugin"
+  ],
+  "bin": {
+    "handy": "bin/handy.js"
+  },
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "import": "./lib/index.js"
+    }
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "skills/",
+    "commands/",
+    ".claude-plugin/",
+    ".mcp.json",
+    "public/",
+    "manifest.json",
+    "server.json",
+    "README.md",
+    "CHANGELOG.md",
+    "PRIVACY.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "validate": "node --import tsx scripts/validate-release.ts",
+    "start": "node bin/handy.js mcp",
+    "prepublishOnly": "npm run build && npm test && npm run validate"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.0"
+  }
+}

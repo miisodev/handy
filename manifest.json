@@ -1,0 +1,53 @@
+{
+  "manifest_version": "0.3",
+  "name": "handy",
+  "display_name": "Handy",
+  "version": "1.2.0",
+  "description": "Real-time native mouse, keyboard, window, clipboard, and coordinate-mapped screen control for LLMs.",
+  "long_description": "Handy lets agents and LLMs natively control a computer's mouse, keyboard, clipboard, and desktop windows in real-time — including multi-step chained actions such as focus_window, move, click, paste, and smart visual waits (wait_for_change / wait_for_settled / wait_for_color) in a single call, plus window-relative coordinates — while seeing the live screen or a single window annotated with dual-contrast mapped (x, y) coordinates, numbered action trails, active window info, pixel hex under cursor, and frame-to-frame visual diffs (highlightDiff). Includes an instant on/off permission toggle, live SSE web Control Panel, and top-left (0,0) corner-slam failsafe.",
+  "author": {
+    "name": "Kevin Miiso Novo",
+    "email": "miisodev@gmail.com",
+    "url": "https://github.com/miisodev"
+  },
+  "homepage": "https://github.com/miisodev/handy",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/miisodev/handy.git"
+  },
+  "support": "https://github.com/miisodev/handy/issues",
+  "license": "MIT",
+  "keywords": [
+    "mcp",
+    "computer-use",
+    "mouse",
+    "keyboard",
+    "screen",
+    "automation"
+  ],
+  "icon": "public/handy.png",
+  "server": {
+    "type": "node",
+    "entry_point": "bin/handy.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/bin/handy.js", "mcp"],
+      "env": {
+        "HANDY_ENABLED": "${user_config.enabled}"
+      }
+    }
+  },
+  "tools_generated": true,
+  "user_config": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Enable Computer Control (On/Off)",
+      "description": "Master permission toggle allowing LLMs to view the screen and control mouse and keyboard.",
+      "default": true,
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"]
+  }
+}

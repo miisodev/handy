@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "handy": {
+      "command": "node",
+      "args": ["bin/handy.js", "mcp"]
+    }
+  }
+}

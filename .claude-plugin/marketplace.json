@@ -1,0 +1,23 @@
+{
+  "name": "handy",
+  "owner": {
+    "name": "miisodev"
+  },
+  "metadata": {
+    "description": "Real-time native mouse, keyboard, window, clipboard, and coordinate-mapped screen control MCP plugin for LLMs.",
+    "version": "1.2.0"
+  },
+  "plugins": [
+    {
+      "name": "handy",
+      "description": "Control mouse, keyboard, clipboard, and windows natively in real-time with chained actions, view the live screen or single windows with mapped (x, y) coordinates and frame diffing, and toggle permissions on/off.",
+      "source": "./",
+      "strict": false,
+      "version": "1.2.0",
+      "license": "MIT",
+      "skills": [
+        "./skills/handy"
+      ]
+    }
+  ]
+}
