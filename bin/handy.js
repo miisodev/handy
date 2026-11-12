@@ -8781,6 +8781,15 @@ function parseX11Display(displayEnv) {
       screenNum: 0
     };
   }
+  const tcpMatch = /^tcp:([^:]+):(\d+)$/.exec(displayEnv.trim());
+  if (tcpMatch) {
+    return {
+      host: tcpMatch[1],
+      port: Number(tcpMatch[2]),
+      displayNum: 0,
+      screenNum: 0
+    };
+  }
   const match = /^([a-zA-Z0-9._-]*):(\d+)(?:\.(\d+))?$/.exec(displayEnv.trim());
   if (!match) {
     throw new Error(`Invalid X11 DISPLAY "${displayEnv}". Expected format like ":0" or "127.0.0.1:0".`);
@@ -42084,7 +42093,7 @@ ${HELP_TEXT}`);
 var isDirectEntry = (() => {
   const argv1 = process.argv[1];
   if (!argv1) return false;
-  return argv1.endsWith("handy.js") || argv1.endsWith("cli.ts") || argv1.endsWith("cli.js") || argv1.endsWith("/handy");
+  return argv1.endsWith("handy.js") || argv1.endsWith("cli.ts") || argv1.endsWith("cli.js") || /[/\\]handy(?:\.cmd|\.exe)?$/i.test(argv1);
 })();
 if (isDirectEntry) {
   runCli().then(

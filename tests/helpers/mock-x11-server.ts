@@ -20,7 +20,7 @@ export class MockX11Server {
   readonly height: number;
   readonly tempDir: string;
   readonly socketPath: string;
-  readonly displayString: string;
+  displayString: string;
 
   mouse = { x: 100, y: 100 };
   focusedInput = false;
@@ -84,7 +84,17 @@ export class MockX11Server {
 
     await new Promise<void>((resolve, reject) => {
       this.server!.once("error", reject);
-      this.server!.listen(this.socketPath, () => resolve());
+      if (process.platform === "win32") {
+        this.server!.listen(0, "127.0.0.1", () => {
+          const addr = this.server!.address();
+          if (addr && typeof addr === "object") {
+            this.displayString = `tcp:127.0.0.1:${addr.port}`;
+          }
+          resolve();
+        });
+      } else {
+        this.server!.listen(this.socketPath, () => resolve());
+      }
     });
   }
 

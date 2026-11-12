@@ -463,7 +463,12 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<nu
 const isDirectEntry = (() => {
   const argv1 = process.argv[1];
   if (!argv1) return false;
-  return argv1.endsWith("handy.js") || argv1.endsWith("cli.ts") || argv1.endsWith("cli.js") || argv1.endsWith("/handy");
+  return (
+    argv1.endsWith("handy.js") ||
+    argv1.endsWith("cli.ts") ||
+    argv1.endsWith("cli.js") ||
+    /[/\\]handy(?:\.cmd|\.exe)?$/i.test(argv1)
+  );
 })();
 
 if (isDirectEntry) {

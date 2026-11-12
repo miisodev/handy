@@ -91,12 +91,19 @@ describe("CLI Commands & Packaged Plugin Tarball Integrity", () => {
     expect(pkg.scripts?.postinstall).toBeUndefined();
     expect(pkg.scripts?.install).toBeUndefined();
 
-    const { stdout } = await execFileAsync("npm", ["pack", "--dry-run", "--json"], {
-      cwd: process.cwd(),
-      timeout: 15_000,
-    });
+    const npmCli = process.env.npm_execpath;
+    const { stdout } = npmCli
+      ? await execFileAsync(process.execPath, [npmCli, "pack", "--dry-run", "--json"], {
+          cwd: process.cwd(),
+          timeout: 20_000,
+        })
+      : await execFileAsync(process.platform === "win32" ? "npm.cmd" : "npm", ["pack", "--dry-run", "--json"], {
+          cwd: process.cwd(),
+          timeout: 20_000,
+          shell: process.platform === "win32",
+        });
     const packed = JSON.parse(stdout) as Array<{ files: Array<{ path: string }> }>;
-    const filePaths = packed[0]!.files.map((f) => f.path);
+    const filePaths = packed[0]!.files.map((f) => f.path.replace(/\\/g, "/"));
 
     expect(filePaths).toContain("bin/handy.js");
     expect(filePaths).toContain("lib/index.js");

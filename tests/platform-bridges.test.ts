@@ -148,4 +148,20 @@ describe("Cross-Platform Native Bridges (macOS CoreGraphics & Windows SendInput)
       rmSync(configDir, { recursive: true, force: true });
     }
   });
+
+  it.runIf(process.platform === "win32")(
+    "compiles and initializes real Win32 C# SendInput/GDI bridge on native Windows",
+    async () => {
+      const realWin = new Win32Backend();
+      try {
+        const checks = await realWin.doctor();
+        expect(checks[0]?.ok).toBe(true);
+        const displays = await realWin.getDisplays();
+        expect(displays.length).toBeGreaterThanOrEqual(1);
+      } finally {
+        await realWin.close();
+      }
+    },
+    20_000,
+  );
 });

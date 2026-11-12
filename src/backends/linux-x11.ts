@@ -19,10 +19,19 @@ export interface X11DisplayTarget {
 }
 
 export function parseX11Display(displayEnv: string): X11DisplayTarget {
-  // Support custom explicit unix path for isolated testing, e.g. "unix:/tmp/custom.sock"
+  // Support custom explicit unix path or tcp host:port for isolated testing
   if (displayEnv.startsWith("unix:/") && !/^unix:\d/.test(displayEnv)) {
     return {
       socketPath: displayEnv.slice("unix:".length),
+      displayNum: 0,
+      screenNum: 0,
+    };
+  }
+  const tcpMatch = /^tcp:([^:]+):(\d+)$/.exec(displayEnv.trim());
+  if (tcpMatch) {
+    return {
+      host: tcpMatch[1]!,
+      port: Number(tcpMatch[2]),
       displayNum: 0,
       screenNum: 0,
     };

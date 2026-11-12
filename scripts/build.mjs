@@ -1,17 +1,21 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 // 1. Clean & compile TypeScript declarations + ESM library modules to lib/
 rmSync(resolve(rootDir, "lib"), { recursive: true, force: true });
-execFileSync(resolve(rootDir, "node_modules/.bin/tsc"), ["-p", resolve(rootDir, "tsconfig.json")], {
-  cwd: rootDir,
-  stdio: "inherit",
-});
+execFileSync(
+  process.execPath,
+  [resolve(rootDir, "node_modules/typescript/bin/tsc"), "-p", resolve(rootDir, "tsconfig.json")],
+  {
+    cwd: rootDir,
+    stdio: "inherit",
+  },
+);
 
 // 2. Bundle self-contained CLI + stdio MCP binary into bin/handy.js
 mkdirSync(resolve(rootDir, "bin"), { recursive: true });
@@ -40,8 +44,10 @@ chmodSync(outBin, 0o755);
 
 // 3. Generate crisp 512x512 public/handy.png icon for MCPB manifest.json
 mkdirSync(resolve(rootDir, "public"), { recursive: true });
-const { encodePng } = await import(resolve(rootDir, "lib/png.js"));
-const { drawCircleRing, drawLine, fillRect, strokeRect } = await import(resolve(rootDir, "lib/font.js"));
+const { encodePng } = await import(pathToFileURL(resolve(rootDir, "lib/png.js")).href);
+const { drawCircleRing, drawLine, fillRect, strokeRect } = await import(
+  pathToFileURL(resolve(rootDir, "lib/font.js")).href
+);
 
 const size = 512;
 const rgba = new Uint8Array(size * size * 4);

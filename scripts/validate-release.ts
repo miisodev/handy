@@ -202,7 +202,7 @@ for (const dir of skillDirs) {
     problems.push(`skills/${dir.name}/SKILL.md missing`);
     continue;
   }
-  const text = readFileSync(skillFile, "utf8");
+  const text = readFileSync(skillFile, "utf8").replace(/\r\n/g, "\n");
   const fmMatch = /^---\n([\s\S]*?)\n---\n/.exec(text);
   if (!fmMatch) {
     problems.push(`skills/${dir.name}/SKILL.md missing YAML frontmatter`);
@@ -247,7 +247,7 @@ if (cmdFiles.length === 0) {
   problems.push("No plugin commands found under commands/");
 } else {
   for (const file of cmdFiles) {
-    const content = readFileSync(resolve(cmdRoot, file), "utf8");
+    const content = readFileSync(resolve(cmdRoot, file), "utf8").replace(/\r\n/g, "\n");
     if (!/^---\n[\s\S]*?description:\s*\S+/m.test(content)) {
       problems.push(`commands/${file} missing frontmatter description`);
     }
