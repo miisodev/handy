@@ -54,7 +54,7 @@ export interface RawFrame {
 }
 export type MouseButton = "left" | "right" | "middle";
 export type ModifierKey = "ctrl" | "alt" | "shift" | "meta" | "mod";
-export type CoordinateSpace = "screen" | "normalized";
+export type CoordinateSpace = "screen" | "normalized" | "window";
 export declare const MouseButtonSchema: z.ZodEnum<{
     left: "left";
     right: "right";
@@ -70,6 +70,7 @@ export declare const ModifierKeySchema: z.ZodEnum<{
 export declare const CoordinateSpaceSchema: z.ZodEnum<{
     screen: "screen";
     normalized: "normalized";
+    window: "window";
 }>;
 export declare const RegionSchema: z.ZodObject<{
     x: z.ZodNumber;
@@ -87,6 +88,7 @@ export declare const MoveStepSchema: z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>;
 export declare const ClickStepSchema: z.ZodObject<{
@@ -109,6 +111,7 @@ export declare const ClickStepSchema: z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>;
 export declare const DoubleClickStepSchema: z.ZodObject<{
@@ -130,6 +133,7 @@ export declare const DoubleClickStepSchema: z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>;
 export declare const TripleClickStepSchema: z.ZodObject<{
@@ -146,6 +150,7 @@ export declare const TripleClickStepSchema: z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>;
 export declare const RightClickStepSchema: z.ZodObject<{
@@ -162,6 +167,7 @@ export declare const RightClickStepSchema: z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>;
 export declare const MouseDownStepSchema: z.ZodObject<{
@@ -176,6 +182,7 @@ export declare const MouseDownStepSchema: z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>;
 export declare const MouseUpStepSchema: z.ZodObject<{
@@ -190,6 +197,7 @@ export declare const MouseUpStepSchema: z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>;
 export declare const DragStepSchema: z.ZodObject<{
@@ -208,6 +216,7 @@ export declare const DragStepSchema: z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>;
 export declare const ScrollStepSchema: z.ZodObject<{
@@ -226,6 +235,7 @@ export declare const ScrollStepSchema: z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>;
 export declare const TypeStepSchema: z.ZodObject<{
@@ -295,6 +305,20 @@ export declare const WaitForSettledStepSchema: z.ZodObject<{
     pollMs: z.ZodOptional<z.ZodNumber>;
     threshold: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
+export declare const WaitForColorStepSchema: z.ZodObject<{
+    type: z.ZodLiteral<"wait_for_color">;
+    x: z.ZodNumber;
+    y: z.ZodNumber;
+    color: z.ZodString;
+    tolerance: z.ZodOptional<z.ZodNumber>;
+    timeoutMs: z.ZodOptional<z.ZodNumber>;
+    pollMs: z.ZodOptional<z.ZodNumber>;
+    coordinateSpace: z.ZodOptional<z.ZodEnum<{
+        screen: "screen";
+        normalized: "normalized";
+        window: "window";
+    }>>;
+}, z.core.$strip>;
 export declare const ScreenshotStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"screenshot">;
     region: z.ZodOptional<z.ZodObject<{
@@ -303,8 +327,10 @@ export declare const ScreenshotStepSchema: z.ZodObject<{
         width: z.ZodNumber;
         height: z.ZodNumber;
     }, z.core.$strip>>;
+    window: z.ZodOptional<z.ZodString>;
     grid: z.ZodOptional<z.ZodBoolean>;
     showMouse: z.ZodOptional<z.ZodBoolean>;
+    highlightDiff: z.ZodOptional<z.ZodBoolean>;
     maxWidth: z.ZodOptional<z.ZodNumber>;
     label: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
@@ -318,6 +344,7 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"click">;
@@ -339,6 +366,7 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"double_click">;
@@ -359,6 +387,7 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"triple_click">;
@@ -374,6 +403,7 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"right_click">;
@@ -389,6 +419,7 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"mouse_down">;
@@ -402,6 +433,7 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"mouse_up">;
@@ -415,6 +447,7 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"drag">;
@@ -432,6 +465,7 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"scroll">;
@@ -449,6 +483,7 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
         screen: "screen";
         normalized: "normalized";
+        window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"type">;
@@ -509,6 +544,19 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     pollMs: z.ZodOptional<z.ZodNumber>;
     threshold: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"wait_for_color">;
+    x: z.ZodNumber;
+    y: z.ZodNumber;
+    color: z.ZodString;
+    tolerance: z.ZodOptional<z.ZodNumber>;
+    timeoutMs: z.ZodOptional<z.ZodNumber>;
+    pollMs: z.ZodOptional<z.ZodNumber>;
+    coordinateSpace: z.ZodOptional<z.ZodEnum<{
+        screen: "screen";
+        normalized: "normalized";
+        window: "window";
+    }>>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"screenshot">;
     region: z.ZodOptional<z.ZodObject<{
         x: z.ZodNumber;
@@ -516,8 +564,10 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         width: z.ZodNumber;
         height: z.ZodNumber;
     }, z.core.$strip>>;
+    window: z.ZodOptional<z.ZodString>;
     grid: z.ZodOptional<z.ZodBoolean>;
     showMouse: z.ZodOptional<z.ZodBoolean>;
+    highlightDiff: z.ZodOptional<z.ZodBoolean>;
     maxWidth: z.ZodOptional<z.ZodNumber>;
     label: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>], "type">;
@@ -525,9 +575,15 @@ export type ActionStep = z.infer<typeof ActionStepSchema>;
 export interface SeeOptions {
     display?: number;
     region?: Region;
+    window?: string | {
+        title?: string;
+        app?: string;
+        id?: string | number;
+    };
     grid?: boolean;
     gridStep?: number;
     showMouse?: boolean;
+    highlightDiff?: boolean;
     maxWidth?: number;
     trail?: TrailMarker[];
 }
@@ -560,6 +616,7 @@ export interface ActOptions {
     stepDelayMs?: number;
     screenshotAfter?: boolean;
     showTrail?: boolean;
+    highlightDiff?: boolean;
     settleMs?: number;
     display?: number;
     maxWidth?: number;

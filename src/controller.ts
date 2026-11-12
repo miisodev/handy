@@ -1,5 +1,5 @@
 import { DarwinBackend } from "./backends/darwin.js";
-import { computeFrameDiff, samplePixelHex } from "./diff.js";
+import { computeFrameDiff, hexColorDistance, samplePixelHex } from "./diff.js";
 import { parseKeyChord, resolveModifier } from "./keys.js";
 import { renderScreenOverlay } from "./overlay.js";
 import { PermissionStore } from "./permissions.js";
@@ -16,6 +16,7 @@ import type {
   MouseButton,
   Point,
   RawFrame,
+  Region,
   SeeOptions,
   SeeResult,
   StepReceipt,
@@ -185,12 +186,52 @@ export class HandyController {
     await this.backend.setClipboardText(text);
   }
 
+  private async resolveWindowRegion(
+    query: NonNullable<SeeOptions["window"]>,
+    displayIndex?: number,
+  ): Promise<Region> {
+    if (!this.backend.listWindows) {
+      throw new Error(`Window-scoped capture is not supported by backend "${this.backend.name}".`);
+    }
+    const q = typeof query === "string" ? { title: query, app: query } : query;
+    const [windows, displays] = await Promise.all([this.backend.listWindows(), this.backend.getDisplays()]);
+    const titleNeedle = q.title?.toLowerCase();
+    const appNeedle = q.app?.toLowerCase();
+    const match = windows.find((w) => {
+      if (q.id !== undefined && String(w.id) === String(q.id)) return true;
+      if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
+      if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
+      return false;
+    });
+    if (!match || !match.bounds) {
+      const label = typeof query === "string" ? query : (query.title ?? query.app ?? String(query.id ?? ""));
+      throw new Error(`No visible window with bounds matched "${label}".`);
+    }
+    const disp = displays.find((d) => d.id === (displayIndex ?? 0)) ?? displays[0];
+    if (!disp) return match.bounds;
+
+    const x1 = Math.max(disp.x, match.bounds.x);
+    const y1 = Math.max(disp.y, match.bounds.y);
+    const x2 = Math.min(disp.x + disp.width, match.bounds.x + match.bounds.width);
+    const y2 = Math.min(disp.y + disp.height, match.bounds.y + match.bounds.height);
+    return {
+      x: x1,
+      y: y1,
+      width: Math.max(1, x2 - x1),
+      height: Math.max(1, y2 - y1),
+    };
+  }
+
   async see(options: SeeOptions & { trail?: TrailMarker[] } = {}): Promise<SeeResult> {
     this.permissions.assertCanSee();
     const t0 = performance.now();
 
+    const effectiveRegion =
+      options.region ??
+      (options.window !== undefined ? await this.resolveWindowRegion(options.window, options.display) : undefined);
+
     const [frame, mouse, activeWindow] = await Promise.all([
-      this.backend.captureScreen({ display: options.display, region: options.region }),
+      this.backend.captureScreen({ display: options.display, region: effectiveRegion }),
       this.backend.getMousePosition(),
       this.backend.getActiveWindow ? this.backend.getActiveWindow().catch(() => null) : Promise.resolve(null),
     ]);
@@ -238,6 +279,7 @@ export class HandyController {
       gridStep: options.gridStep,
       showMouse: options.showMouse ?? true,
       trail: options.trail,
+      diffBounds: options.highlightDiff && screenDiff?.changedBounds ? screenDiff.changedBounds : null,
     });
 
     const pngBuffer = encodePng(outWidth, outHeight, rgba, { compressionLevel: 3 });
@@ -335,6 +377,23 @@ export class HandyController {
   ): Promise<{ point: Point; displays: DisplayInfo[] | null }> {
     if (!space || space === "screen") {
       return { point: { x: Math.round(x), y: Math.round(y) }, displays: cachedDisplays };
+    }
+
+    if (space === "window") {
+      if (!this.backend.getActiveWindow) {
+        throw new Error(`Coordinate space "window" is not supported by backend "${this.backend.name}".`);
+      }
+      const win = await this.backend.getActiveWindow();
+      if (!win || !win.bounds) {
+        throw new Error('Cannot resolve coordinateSpace "window": no active window with bounds is available.');
+      }
+      return {
+        point: {
+          x: Math.round(win.bounds.x + x),
+          y: Math.round(win.bounds.y + y),
+        },
+        displays: cachedDisplays,
+      };
     }
 
     const displays = cachedDisplays ?? (await this.backend.getDisplays());
@@ -811,13 +870,74 @@ export class HandyController {
             break;
           }
 
+          case "wait_for_color": {
+            const timeoutMs = step.timeoutMs ?? 5000;
+            const pollMs = step.pollMs ?? 80;
+            const tolerance = step.tolerance ?? 24;
+            const resolved = await this.resolvePoint(
+              step.x,
+              step.y,
+              step.coordinateSpace,
+              options.display,
+              cachedDisplays,
+            );
+            cachedDisplays = resolved.displays ?? (await this.backend.getDisplays());
+            const disp =
+              cachedDisplays.find((d) => d.id === (options.display ?? 0)) ?? cachedDisplays[0];
+
+            let sampleRegion: Region | undefined;
+            if (disp) {
+              const rx1 = Math.max(disp.x, resolved.point.x - 1);
+              const ry1 = Math.max(disp.y, resolved.point.y - 1);
+              const rx2 = Math.min(disp.x + disp.width, resolved.point.x + 2);
+              const ry2 = Math.min(disp.y + disp.height, resolved.point.y + 2);
+              sampleRegion = {
+                x: rx1,
+                y: ry1,
+                width: Math.max(1, rx2 - rx1),
+                height: Math.max(1, ry2 - ry1),
+              };
+            }
+
+            const deadline = performance.now() + timeoutMs;
+            let matched = false;
+            let lastHex: string | null = null;
+            let lastDist: number | null = null;
+
+            while (true) {
+              const frame = await this.backend.captureScreen({
+                display: options.display,
+                region: sampleRegion,
+              });
+              lastHex = samplePixelHex(frame, resolved.point);
+              if (lastHex) {
+                lastDist = Math.round(hexColorDistance(lastHex, step.color) * 10) / 10;
+                if (lastDist <= tolerance) {
+                  matched = true;
+                  break;
+                }
+              }
+              if (performance.now() >= deadline) {
+                break;
+              }
+              await sleepAbortable(Math.min(pollMs, Math.max(1, deadline - performance.now())), options.signal);
+            }
+
+            detail = matched
+              ? `matched ${lastHex} near ${step.color} (dist ${lastDist}) at (${resolved.point.x}, ${resolved.point.y})`
+              : `timeout (${timeoutMs}ms) waiting for ${step.color} at (${resolved.point.x}, ${resolved.point.y}); last ${lastHex ?? "none"}`;
+            break;
+          }
+
           case "screenshot": {
             const shot = await this.see({
               display: options.display,
               region: step.region,
+              window: step.window,
               grid: step.grid ?? options.grid ?? true,
               showMouse: step.showMouse ?? options.showMouse ?? true,
               maxWidth: step.maxWidth ?? options.maxWidth,
+              highlightDiff: step.highlightDiff ?? options.highlightDiff,
               trail: showTrail && trail.length > 0 ? trail : undefined,
             });
             if (step.label) shot.label = step.label;
@@ -841,6 +961,7 @@ export class HandyController {
           step.type !== "wait" &&
           step.type !== "wait_for_change" &&
           step.type !== "wait_for_settled" &&
+          step.type !== "wait_for_color" &&
           step.type !== "screenshot"
         ) {
           await sleepAbortable(stepDelayMs, options.signal);
@@ -857,6 +978,7 @@ export class HandyController {
           grid: options.grid ?? true,
           showMouse: options.showMouse ?? true,
           maxWidth: options.maxWidth,
+          highlightDiff: options.highlightDiff,
           trail: showTrail && trail.length > 0 ? trail : undefined,
         });
         postShot.label = "after";
@@ -1092,12 +1214,30 @@ export function parseChainInput(input: string): ActionStep[] {
         const quietMs = tokens[2] ? Number(tokens[2]) : undefined;
         return { type: "wait_for_settled", timeoutMs, quietMs };
       }
+      case "wait_for_color": {
+        const x = Number(tokens[1]);
+        const y = Number(tokens[2]);
+        const color = tokens[3];
+        if (
+          Number.isNaN(x) ||
+          Number.isNaN(y) ||
+          !color ||
+          !/^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color)
+        ) {
+          throw new Error(
+            `Invalid wait_for_color step "${seg}". Expected: wait_for_color <x> <y> <#rrggbb> [timeoutMs] [tolerance]`,
+          );
+        }
+        const timeoutMs = tokens[4] ? Number(tokens[4]) : undefined;
+        const tolerance = tokens[5] ? Number(tokens[5]) : undefined;
+        return { type: "wait_for_color", x, y, color, timeoutMs, tolerance };
+      }
       case "screenshot":
       case "see":
         return { type: "screenshot" };
       default:
         throw new Error(
-          `Unknown step "${cmd}" in "${seg}". Supported steps: move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, screenshot.`,
+          `Unknown step "${cmd}" in "${seg}". Supported steps: move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, wait_for_color, screenshot.`,
         );
     }
   });

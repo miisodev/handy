@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-12
+
+### Added
+- **Window-Scoped Screen Capture (`window`)**: `handy_see` and `handy see --window <title>` can now capture a single visible desktop window by title, app, or ID at 1:1 resolution while keeping global OS `(x, y)` coordinates on the rulers and grid badges.
+- **Window-Relative Coordinate Space (`coordinateSpace: "window"`)**: Action steps in `handy_act` now accept `coordinateSpace: "window"`, offsetting `(x, y)` automatically relative to the active window's `{ x, y }` screen origin so scripts and reusable workflows stay accurate even if the user drags the window elsewhere on screen.
+- **Pixel-Color Visual Synchronization (`wait_for_color`)**: New `wait_for_color` step in `handy_act` (and `wait_for_color <x> <y> <#rrggbb> [timeoutMs] [tolerance]` CLI shorthand) polls a tiny `3x3` patch around `(x, y)` and continues as soon as the pixel color matches within Euclidean RGB `tolerance` — ideal for waiting on status badges, loading spinners, or active button states.
+- **Visual Diff Highlighting (`highlightDiff`)**: `handy_see`, `handy_act`, `handy see --highlight-diff`, and `handy ui` can draw a crisp emerald `CHANGED` bounding box around pixels modified since the previous frame.
+- **Real-Time SSE Control Panel Push (`GET /api/events`)**: `handy ui` now streams live permission-state updates over Server-Sent Events (`EventSource`) whenever `handy on` / `handy off` / `handy toggle` or MCP changes permissions, updating the dashboard instantaneously without polling lag.
+- **Per-Monitor Win32 DPI Scale Detection**: `Win32Backend` queries `MonitorFromPoint` + `GetDpiForMonitor` (`shcore.dll`) to report accurate per-monitor `scaleFactor` (`1.25x`, `1.5x`, `2.0x`) on multi-DPI Windows setups.
+- **Expanded Slash Commands & Release Pipeline**: Added `/handy:doctor` and `/handy:windows` plugin slash commands, upgraded GitHub Actions CI to Node 24-native `actions/checkout@v7` + `actions/setup-node@v7`, and added `.github/workflows/release.yml` for tag-verified npm provenance publishing and GitHub Releases.
+
 ## [1.1.0] - 2026-11-12
 
 ### Added

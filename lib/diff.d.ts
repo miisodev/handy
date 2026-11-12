@@ -1,4 +1,6 @@
 import type { FrameDiff, Point, RawFrame } from "./types.js";
+export declare function parseHexRgb(hex: string): [number, number, number];
+export declare function hexColorDistance(hexA: string, hexB: string): number;
 /**
  * Samples the exact #rrggbb hex color at global logical coordinate (mouse.x, mouse.y)
  * from a raw frame BEFORE any rulers or reticles are drawn on top of it.

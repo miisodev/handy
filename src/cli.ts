@@ -58,6 +58,8 @@ Usage:
 Options for 'see':
   --out, -o <path>       Save annotated PNG screenshot to file (default: ./handy-screen.png)
   --region <x,y,w,h>     Zoom into a rectangular screen region (keeps global coordinates)
+  --window <title>       Capture a specific visible window by title/app substring
+  --highlight-diff       Outline changed pixels since the previous capture
   --display <index>      Target monitor index (default: 0)
   --max-width <px>       Max output image width (default: 1280)
   --grid-step <px>       Custom major coordinate grid spacing
@@ -68,6 +70,7 @@ Options for 'see':
 Options for 'act':
   --step-delay <ms>      Delay in ms between chained steps (default: 15)
   --screenshot-after <f> Save post-chain annotated PNG screenshot (with numbered trail) to path
+  --highlight-diff       Outline changed pixels on --screenshot-after
   --no-trail             Omit numbered action-trail markers on --screenshot-after
   --no-failsafe          Disable top-left (0,0) corner-slam failsafe
   --backend <kind>       Override backend (auto, virtual, linux-x11, linux-cli, darwin, win32)
@@ -106,6 +109,7 @@ function parseArgv(argv: string[]): ParsedFlags {
     "no-mouse",
     "no-trail",
     "no-failsafe",
+    "highlight-diff",
     "submit",
     "right",
     "middle",
@@ -453,13 +457,24 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<nu
           typeof flags.get("out") === "string" ? (flags.get("out") as string) : "handy-screen.png",
         );
         const region = typeof flags.get("region") === "string" ? parseRegionFlag(flags.get("region") as string) : undefined;
+        const windowQuery = typeof flags.get("window") === "string" ? (flags.get("window") as string) : undefined;
         const display = typeof flags.get("display") === "string" ? Number(flags.get("display")) : undefined;
         const maxWidth = typeof flags.get("max-width") === "string" ? Number(flags.get("max-width")) : undefined;
         const gridStep = typeof flags.get("grid-step") === "string" ? Number(flags.get("grid-step")) : undefined;
         const grid = flags.get("no-grid") === true ? false : true;
         const showMouse = flags.get("no-mouse") === true ? false : true;
+        const highlightDiff = flags.get("highlight-diff") === true;
 
-        const shot = await controller.see({ display, region, maxWidth, gridStep, grid, showMouse });
+        const shot = await controller.see({
+          display,
+          region,
+          window: windowQuery,
+          maxWidth,
+          gridStep,
+          grid,
+          showMouse,
+          highlightDiff,
+        });
         writeFileSync(outPath, shot.pngBuffer);
 
         const payload = {
@@ -559,12 +574,14 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<nu
         typeof flags.get("screenshot-after") === "string" ? resolve(flags.get("screenshot-after") as string) : undefined;
       const showTrail = flags.get("no-trail") !== true;
       const failsafe = flags.get("no-failsafe") !== true;
+      const highlightDiff = flags.get("highlight-diff") === true;
 
       const result = await controller.act({
         actions: steps,
         stepDelayMs,
         screenshotAfter: Boolean(afterPath),
         showTrail,
+        highlightDiff,
         failsafe,
       });
 

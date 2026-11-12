@@ -8,7 +8,7 @@ export {
   type BackendKind,
 } from "./backends/index.js";
 export { HandyController, parseChainInput } from "./controller.js";
-export { computeFrameDiff, samplePixelHex } from "./diff.js";
+export { computeFrameDiff, hexColorDistance, parseHexRgb, samplePixelHex } from "./diff.js";
 export {
   buildHandyMcpEntry,
   installHandyToHosts,
@@ -53,6 +53,7 @@ export {
   TripleClickStepSchema,
   TypeStepSchema,
   WaitForChangeStepSchema,
+  WaitForColorStepSchema,
   WaitForSettledStepSchema,
   WaitStepSchema,
   type ActionStep,

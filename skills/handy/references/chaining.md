@@ -2,7 +2,7 @@
 
 `handy_act` executes an ordered array of `actions` sequentially inside a serialized lock, checking the user's permission toggle and top-left `(0, 0)` human failsafe before every step and automatically releasing any held mouse buttons or modifier keys if a chain aborts.
 
-## Supported Step Types (19 Variants)
+## Supported Step Types (20 Variants)
 
 - **Window Focus**:
   - `{ "type": "focus_window", "title": "Visual Studio Code" }` (or match by `"app"` or `"id"` from `handy_windows`)
@@ -31,8 +31,9 @@
 - **Smart Visual Synchronization & Checkpoints**:
   - `{ "type": "wait_for_change", "timeoutMs": 5000, "thresholdPercent": 0.25, "region": { ... } }` — continues the instant the screen (or region) visibly updates!
   - `{ "type": "wait_for_settled", "timeoutMs": 5000, "quietMs": 250, "region": { ... } }` — waits until animations, transitions, or smooth scrolling finish settling!
+  - `{ "type": "wait_for_color", "x": 420, "y": 260, "color": "#10b981", "tolerance": 24, "timeoutMs": 5000 }` — polls a tiny `3x3` patch around `(x, y)` until the pixel matches the target hex color!
   - `{ "type": "wait", "ms": 250 }`
-  - `{ "type": "screenshot", "label": "menu-open", "region": { "x": 100, "y": 40, "width": 320, "height": 400 } }`
+  - `{ "type": "screenshot", "label": "menu-open", "window": "Code", "highlightDiff": true }`
 
 ## High-Reliability Recipes
 

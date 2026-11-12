@@ -79,7 +79,7 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
         prompts: {},
       },
       instructions:
-        "Handy provides real-time computer screen vision with mapped (x, y) coordinates, active window metadata, pixel-under-cursor color, and frame-to-frame visual diffs (`handy_see`), plus real-time native mouse, keyboard, clipboard, and window control supporting chained multi-step actions (`handy_act`, `handy_windows`, `handy_clipboard`). Always call `handy_see` before clicking unfamiliar UI elements, prefer `paste` for long or multi-line text, use `wait_for_change` / `wait_for_settled` instead of blind sleeps, and chain sequential steps in a single `handy_act` call.",
+        "Handy provides real-time computer screen vision with mapped (x, y) coordinates, window-scoped capture (`window`), active window metadata, pixel-under-cursor color, and frame-to-frame visual diffs (`handy_see`), plus real-time native mouse, keyboard, clipboard, and window control supporting chained multi-step actions and window-relative coordinates (`handy_act`, `handy_windows`, `handy_clipboard`). Always call `handy_see` before clicking unfamiliar UI elements, prefer `paste` for long or multi-line text, use `wait_for_change` / `wait_for_settled` / `wait_for_color` instead of blind sleeps, and chain sequential steps in a single `handy_act` call.",
     },
   );
 
@@ -96,12 +96,18 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
   server.registerTool(
     "handy_see",
     {
-      title: "See Computer Screen (Mapped Coordinates + Mouse + Diff)",
+      title: "See Computer Screen (Mapped Coordinates + Window Zoom + Diff)",
       description:
-        "Capture the computer screen in real-time with mapped (x, y) coordinate rulers, dual-contrast grid labels, live mouse reticle, hex color under cursor, active window info, and visual diff since the previous capture (`changedPercent`, `changedBounds`). Use `region` to zoom into dense UI areas at 1:1 resolution while preserving global screen coordinates.",
+        "Capture the computer screen (or a single desktop window via `window`) in real-time with mapped (x, y) coordinate rulers, dual-contrast grid labels, live mouse reticle, hex color under cursor, active window info, and visual diff since the previous capture (`changedPercent`, `changedBounds`). Use `region` or `window` to zoom into dense UI areas at 1:1 resolution while preserving global screen coordinates, and set `highlightDiff: true` to outline changed pixels.",
       inputSchema: {
         display: z.number().int().min(0).max(16).optional().describe("Monitor index (default: 0 primary)"),
         region: RegionSchema.optional().describe("Optional screen rectangle { x, y, width, height } to zoom into"),
+        window: z
+          .string()
+          .min(1)
+          .max(500)
+          .optional()
+          .describe("Optional window title or app substring to capture at 1:1 resolution while keeping global coordinates"),
         grid: z.boolean().optional().describe("Overlay mapped coordinate rulers and grid (default: true)"),
         gridStep: z
           .number()
@@ -111,6 +117,10 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
           .optional()
           .describe("Custom major grid spacing in screen pixels"),
         showMouse: z.boolean().optional().describe("Overlay live mouse reticle and (x, y) badge (default: true)"),
+        highlightDiff: z
+          .boolean()
+          .optional()
+          .describe("Draw an emerald CHANGED bounding box around pixels that changed since the previous capture"),
         maxWidth: z
           .number()
           .int()
@@ -133,9 +143,11 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
         const shot = await controller.see({
           display: args.display,
           region: args.region,
+          window: args.window,
           grid: args.grid,
           gridStep: args.gridStep,
           showMouse: args.showMouse,
+          highlightDiff: args.highlightDiff,
           maxWidth: args.maxWidth,
         });
 
@@ -194,14 +206,14 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
     {
       title: "Control Mouse & Keyboard (Single or Chained)",
       description:
-        'Execute native mouse, keyboard, clipboard-paste, window-focus, and smart visual-wait controls in real-time. Supports chaining multiple steps sequentially in one call — e.g. [{ "type": "focus_window", "title": "Code" }, { "type": "click", "x": 420, "y": 260 }, { "type": "paste", "text": "Hello!" }, { "type": "wait_for_settled" }]. Set `screenshotAfter: true` to receive an updated coordinate-mapped screenshot with numbered action-trail markers.',
+        'Execute native mouse, keyboard, clipboard-paste, window-focus, and smart visual-wait controls in real-time. Supports chaining multiple steps sequentially in one call — e.g. [{ "type": "focus_window", "title": "Code" }, { "type": "click", "x": 420, "y": 260 }, { "type": "paste", "text": "Hello!" }, { "type": "wait_for_settled" }]. Steps support `coordinateSpace: "screen" | "normalized" | "window"`. Set `screenshotAfter: true` to receive an updated coordinate-mapped screenshot with numbered action-trail markers.',
       inputSchema: {
         actions: z
           .array(ActionStepSchema)
           .min(1)
           .max(100)
           .describe(
-            "Ordered array of steps (move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, screenshot)",
+            "Ordered array of steps (move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, wait_for_color, screenshot)",
           ),
         stepDelayMs: z
           .number()
@@ -217,6 +229,10 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
           .boolean()
           .optional()
           .describe("Draw numbered amber markers (#1, #2, drag lines) on post-action screenshots (default: true)"),
+        highlightDiff: z
+          .boolean()
+          .optional()
+          .describe("Outline changed pixels since the previous capture on post-action screenshots (default: false)"),
         failsafe: z
           .boolean()
           .optional()
@@ -254,6 +270,7 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
           stepDelayMs: args.stepDelayMs,
           screenshotAfter: args.screenshotAfter,
           showTrail: args.showTrail,
+          highlightDiff: args.highlightDiff,
           failsafe: args.failsafe,
           settleMs: args.settleMs,
           display: args.display,

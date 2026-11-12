@@ -30691,6 +30691,12 @@ public static class HandyWin32 {
     [DllImport("user32.dll")]
     public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
+
+    [DllImport("shcore.dll")]
+    private static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool OpenClipboard(IntPtr hWndNewOwner);
 
@@ -30812,6 +30818,23 @@ public static class HandyWin32 {
         } catch {
             try { SetProcessDPIAware(); } catch { }
         }
+    }
+
+    public static double GetMonitorScale(int centerX, int centerY) {
+        try {
+            POINT pt = new POINT();
+            pt.X = centerX;
+            pt.Y = centerY;
+            IntPtr hMon = MonitorFromPoint(pt, 2);
+            if (hMon != IntPtr.Zero) {
+                uint dpiX = 96;
+                uint dpiY = 96;
+                if (GetDpiForMonitor(hMon, 0, out dpiX, out dpiY) == 0 && dpiX > 0) {
+                    return Math.Round((double)dpiX / 96.0, 2);
+                }
+            }
+        } catch { }
+        return 1.0;
     }
 
     public static void MoveMouseAbs(int x, int y) {
@@ -31015,6 +31038,9 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
             for ($i = 0; $i -lt $screens.Length; $i++) {
                 $s = $screens[$i]
                 $b = $s.Bounds
+                $cx = [int]($b.X + ($b.Width / 2))
+                $cy = [int]($b.Y + ($b.Height / 2))
+                $scale = [double]([HandyWin32]::GetMonitorScale($cx, $cy))
                 $list += @{
                     id = $i
                     name = [string]$s.DeviceName
@@ -31022,7 +31048,7 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
                     y = [int]$b.Y
                     width = [int]$b.Width
                     height = [int]$b.Height
-                    scaleFactor = 1
+                    scaleFactor = $scale
                     primary = [bool]$s.Primary
                 }
             }
@@ -31304,7 +31330,7 @@ var Win32Backend = class {
       originY: ry,
       logicalWidth: decoded.width,
       logicalHeight: decoded.height,
-      scaleFactor: 1,
+      scaleFactor: disp.scaleFactor || 1,
       displayId: disp.id
     };
   }
@@ -31366,6 +31392,27 @@ function createBackend(options = {}) {
 }
 
 // src/diff.ts
+function parseHexRgb(hex3) {
+  const clean = hex3.trim().replace(/^#/, "");
+  if (/^[0-9a-fA-F]{3}$/.test(clean)) {
+    const r = Number.parseInt(clean[0] + clean[0], 16);
+    const g = Number.parseInt(clean[1] + clean[1], 16);
+    const b = Number.parseInt(clean[2] + clean[2], 16);
+    return [r, g, b];
+  }
+  if (/^[0-9a-fA-F]{6}$/.test(clean)) {
+    const r = Number.parseInt(clean.slice(0, 2), 16);
+    const g = Number.parseInt(clean.slice(2, 4), 16);
+    const b = Number.parseInt(clean.slice(4, 6), 16);
+    return [r, g, b];
+  }
+  throw new Error(`Invalid hex color "${hex3}". Expected #rrggbb or #rgb.`);
+}
+function hexColorDistance(hexA, hexB) {
+  const [r1, g1, b1] = parseHexRgb(hexA);
+  const [r2, g2, b2] = parseHexRgb(hexB);
+  return Math.hypot(r1 - r2, g1 - g2, b1 - b2);
+}
 function samplePixelHex(frame, point) {
   const relX = point.x - frame.originX;
   const relY = point.y - frame.originY;
@@ -31545,6 +31592,22 @@ function renderScreenOverlay(rgba, imageWidth, imageHeight, options) {
     drawBadge(rgba, imageWidth, imageHeight, 2, 2, `${options.originX},${options.originY}`, {
       bg: [2, 132, 199, 240],
       fg: [255, 255, 255, 255],
+      padX: 3,
+      padY: 2
+    });
+  }
+  if (options.diffBounds && options.diffBounds.width > 0 && options.diffBounds.height > 0) {
+    const db = options.diffBounds;
+    const x1 = Math.max(0, Math.min(imageWidth - 2, toImgX(db.x)));
+    const y1 = Math.max(0, Math.min(imageHeight - 2, toImgY(db.y)));
+    const x2 = Math.max(x1 + 2, Math.min(imageWidth, toImgX(db.x + db.width)));
+    const y2 = Math.max(y1 + 2, Math.min(imageHeight, toImgY(db.y + db.height)));
+    strokeRect(rgba, imageWidth, imageHeight, x1, y1, x2 - x1, y2 - y1, [16, 185, 129, 225], 2);
+    const labelY = y1 >= 28 ? y1 - 13 : Math.min(imageHeight - 14, y2 + 2);
+    drawBadge(rgba, imageWidth, imageHeight, Math.min(imageWidth - 58, Math.max(36, x1)), labelY, "CHANGED", {
+      bg: [6, 78, 59, 230],
+      fg: [167, 243, 208, 255],
+      border: [16, 185, 129, 255],
       padX: 3,
       padY: 2
     });
@@ -31987,11 +32050,43 @@ var HandyController = class _HandyController {
     }
     await this.backend.setClipboardText(text);
   }
+  async resolveWindowRegion(query, displayIndex) {
+    if (!this.backend.listWindows) {
+      throw new Error(`Window-scoped capture is not supported by backend "${this.backend.name}".`);
+    }
+    const q = typeof query === "string" ? { title: query, app: query } : query;
+    const [windows, displays] = await Promise.all([this.backend.listWindows(), this.backend.getDisplays()]);
+    const titleNeedle = q.title?.toLowerCase();
+    const appNeedle = q.app?.toLowerCase();
+    const match = windows.find((w) => {
+      if (q.id !== void 0 && String(w.id) === String(q.id)) return true;
+      if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
+      if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
+      return false;
+    });
+    if (!match || !match.bounds) {
+      const label = typeof query === "string" ? query : query.title ?? query.app ?? String(query.id ?? "");
+      throw new Error(`No visible window with bounds matched "${label}".`);
+    }
+    const disp = displays.find((d) => d.id === (displayIndex ?? 0)) ?? displays[0];
+    if (!disp) return match.bounds;
+    const x1 = Math.max(disp.x, match.bounds.x);
+    const y1 = Math.max(disp.y, match.bounds.y);
+    const x2 = Math.min(disp.x + disp.width, match.bounds.x + match.bounds.width);
+    const y2 = Math.min(disp.y + disp.height, match.bounds.y + match.bounds.height);
+    return {
+      x: x1,
+      y: y1,
+      width: Math.max(1, x2 - x1),
+      height: Math.max(1, y2 - y1)
+    };
+  }
   async see(options = {}) {
     this.permissions.assertCanSee();
     const t0 = performance.now();
+    const effectiveRegion = options.region ?? (options.window !== void 0 ? await this.resolveWindowRegion(options.window, options.display) : void 0);
     const [frame, mouse, activeWindow] = await Promise.all([
-      this.backend.captureScreen({ display: options.display, region: options.region }),
+      this.backend.captureScreen({ display: options.display, region: effectiveRegion }),
       this.backend.getMousePosition(),
       this.backend.getActiveWindow ? this.backend.getActiveWindow().catch(() => null) : Promise.resolve(null)
     ]);
@@ -32023,7 +32118,8 @@ var HandyController = class _HandyController {
       grid: options.grid ?? true,
       gridStep: options.gridStep,
       showMouse: options.showMouse ?? true,
-      trail: options.trail
+      trail: options.trail,
+      diffBounds: options.highlightDiff && screenDiff?.changedBounds ? screenDiff.changedBounds : null
     });
     const pngBuffer = encodePng(outWidth, outHeight, rgba, { compressionLevel: 3 });
     const captureMs = Math.round((performance.now() - t0) * 10) / 10;
@@ -32101,6 +32197,22 @@ var HandyController = class _HandyController {
   async resolvePoint(x, y, space, displayIndex, cachedDisplays) {
     if (!space || space === "screen") {
       return { point: { x: Math.round(x), y: Math.round(y) }, displays: cachedDisplays };
+    }
+    if (space === "window") {
+      if (!this.backend.getActiveWindow) {
+        throw new Error(`Coordinate space "window" is not supported by backend "${this.backend.name}".`);
+      }
+      const win = await this.backend.getActiveWindow();
+      if (!win || !win.bounds) {
+        throw new Error('Cannot resolve coordinateSpace "window": no active window with bounds is available.');
+      }
+      return {
+        point: {
+          x: Math.round(win.bounds.x + x),
+          y: Math.round(win.bounds.y + y)
+        },
+        displays: cachedDisplays
+      };
     }
     const displays = cachedDisplays ?? await this.backend.getDisplays();
     const disp = displays.find((d) => d.id === (displayIndex ?? 0)) ?? displays[0];
@@ -32512,13 +32624,66 @@ var HandyController = class _HandyController {
             detail = settled ? `screen settled (${quietMs}ms quiet)` : `timeout (${timeoutMs}ms) reached while waiting for settle`;
             break;
           }
+          case "wait_for_color": {
+            const timeoutMs = step.timeoutMs ?? 5e3;
+            const pollMs = step.pollMs ?? 80;
+            const tolerance = step.tolerance ?? 24;
+            const resolved = await this.resolvePoint(
+              step.x,
+              step.y,
+              step.coordinateSpace,
+              options.display,
+              cachedDisplays
+            );
+            cachedDisplays = resolved.displays ?? await this.backend.getDisplays();
+            const disp = cachedDisplays.find((d) => d.id === (options.display ?? 0)) ?? cachedDisplays[0];
+            let sampleRegion;
+            if (disp) {
+              const rx1 = Math.max(disp.x, resolved.point.x - 1);
+              const ry1 = Math.max(disp.y, resolved.point.y - 1);
+              const rx2 = Math.min(disp.x + disp.width, resolved.point.x + 2);
+              const ry2 = Math.min(disp.y + disp.height, resolved.point.y + 2);
+              sampleRegion = {
+                x: rx1,
+                y: ry1,
+                width: Math.max(1, rx2 - rx1),
+                height: Math.max(1, ry2 - ry1)
+              };
+            }
+            const deadline = performance.now() + timeoutMs;
+            let matched = false;
+            let lastHex = null;
+            let lastDist = null;
+            while (true) {
+              const frame = await this.backend.captureScreen({
+                display: options.display,
+                region: sampleRegion
+              });
+              lastHex = samplePixelHex(frame, resolved.point);
+              if (lastHex) {
+                lastDist = Math.round(hexColorDistance(lastHex, step.color) * 10) / 10;
+                if (lastDist <= tolerance) {
+                  matched = true;
+                  break;
+                }
+              }
+              if (performance.now() >= deadline) {
+                break;
+              }
+              await sleepAbortable(Math.min(pollMs, Math.max(1, deadline - performance.now())), options.signal);
+            }
+            detail = matched ? `matched ${lastHex} near ${step.color} (dist ${lastDist}) at (${resolved.point.x}, ${resolved.point.y})` : `timeout (${timeoutMs}ms) waiting for ${step.color} at (${resolved.point.x}, ${resolved.point.y}); last ${lastHex ?? "none"}`;
+            break;
+          }
           case "screenshot": {
             const shot = await this.see({
               display: options.display,
               region: step.region,
+              window: step.window,
               grid: step.grid ?? options.grid ?? true,
               showMouse: step.showMouse ?? options.showMouse ?? true,
               maxWidth: step.maxWidth ?? options.maxWidth,
+              highlightDiff: step.highlightDiff ?? options.highlightDiff,
               trail: showTrail && trail.length > 0 ? trail : void 0
             });
             if (step.label) shot.label = step.label;
@@ -32534,7 +32699,7 @@ var HandyController = class _HandyController {
           durationMs: stepDurationMs,
           detail
         });
-        if (i < options.actions.length - 1 && stepDelayMs > 0 && step.type !== "wait" && step.type !== "wait_for_change" && step.type !== "wait_for_settled" && step.type !== "screenshot") {
+        if (i < options.actions.length - 1 && stepDelayMs > 0 && step.type !== "wait" && step.type !== "wait_for_change" && step.type !== "wait_for_settled" && step.type !== "wait_for_color" && step.type !== "screenshot") {
           await sleepAbortable(stepDelayMs, options.signal);
         }
       }
@@ -32548,6 +32713,7 @@ var HandyController = class _HandyController {
           grid: options.grid ?? true,
           showMouse: options.showMouse ?? true,
           maxWidth: options.maxWidth,
+          highlightDiff: options.highlightDiff,
           trail: showTrail && trail.length > 0 ? trail : void 0
         });
         postShot.label = "after";
@@ -32763,12 +32929,25 @@ function parseChainInput(input2) {
         const quietMs = tokens[2] ? Number(tokens[2]) : void 0;
         return { type: "wait_for_settled", timeoutMs, quietMs };
       }
+      case "wait_for_color": {
+        const x = Number(tokens[1]);
+        const y = Number(tokens[2]);
+        const color = tokens[3];
+        if (Number.isNaN(x) || Number.isNaN(y) || !color || !/^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color)) {
+          throw new Error(
+            `Invalid wait_for_color step "${seg}". Expected: wait_for_color <x> <y> <#rrggbb> [timeoutMs] [tolerance]`
+          );
+        }
+        const timeoutMs = tokens[4] ? Number(tokens[4]) : void 0;
+        const tolerance = tokens[5] ? Number(tokens[5]) : void 0;
+        return { type: "wait_for_color", x, y, color, timeoutMs, tolerance };
+      }
       case "screenshot":
       case "see":
         return { type: "screenshot" };
       default:
         throw new Error(
-          `Unknown step "${cmd}" in "${seg}". Supported steps: move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, screenshot.`
+          `Unknown step "${cmd}" in "${seg}". Supported steps: move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, wait_for_color, screenshot.`
         );
     }
   });
@@ -42624,7 +42803,7 @@ var StdioServerTransport = class {
 // src/types.ts
 var MouseButtonSchema = external_exports.enum(["left", "right", "middle"]);
 var ModifierKeySchema = external_exports.enum(["ctrl", "alt", "shift", "meta", "mod"]);
-var CoordinateSpaceSchema = external_exports.enum(["screen", "normalized"]);
+var CoordinateSpaceSchema = external_exports.enum(["screen", "normalized", "window"]);
 var RegionSchema = external_exports.object({
   x: external_exports.number().int().describe("Left X coordinate in screen pixels"),
   y: external_exports.number().int().describe("Top Y coordinate in screen pixels"),
@@ -42759,11 +42938,23 @@ var WaitForSettledStepSchema = external_exports.object({
   pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
   threshold: external_exports.number().min(1e-3).max(100).optional().describe("Max changed pixel percentage treated as settled (default: 0.05)")
 });
+var WaitForColorStepSchema = external_exports.object({
+  type: external_exports.literal("wait_for_color"),
+  x: external_exports.number().int().describe("Target X coordinate of pixel to inspect"),
+  y: external_exports.number().int().describe("Target Y coordinate of pixel to inspect"),
+  color: external_exports.string().regex(/^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/).describe("Expected hex color (#rrggbb or #rgb)"),
+  tolerance: external_exports.number().min(0).max(442).optional().describe("Allowed Euclidean RGB distance 0..442 (default: 24)"),
+  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 5000)"),
+  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
 var ScreenshotStepSchema = external_exports.object({
   type: external_exports.literal("screenshot"),
   region: RegionSchema.optional(),
+  window: external_exports.string().max(256).optional().describe("Optional window title substring to capture at 1:1 resolution"),
   grid: external_exports.boolean().optional(),
   showMouse: external_exports.boolean().optional(),
+  highlightDiff: external_exports.boolean().optional(),
   maxWidth: external_exports.number().int().min(320).max(3840).optional(),
   label: external_exports.string().max(120).optional().describe("Optional label identifying this mid-chain capture")
 });
@@ -42786,13 +42977,14 @@ var ActionStepSchema = external_exports.discriminatedUnion("type", [
   WaitStepSchema,
   WaitForChangeStepSchema,
   WaitForSettledStepSchema,
+  WaitForColorStepSchema,
   ScreenshotStepSchema
 ]);
 
 // src/version.ts
+var HANDY_VERSION = "1.2.0";
 var HANDY_NAME = "handy";
 var HANDY_PACKAGE_NAME = "@miisodev/handy";
-var HANDY_VERSION = "1.1.0";
 
 // src/mcp.ts
 function logAudit(enabled, event) {
@@ -42848,7 +43040,7 @@ function createHandyMcpServer(options = {}) {
         resources: { listChanged: true },
         prompts: {}
       },
-      instructions: "Handy provides real-time computer screen vision with mapped (x, y) coordinates, active window metadata, pixel-under-cursor color, and frame-to-frame visual diffs (`handy_see`), plus real-time native mouse, keyboard, clipboard, and window control supporting chained multi-step actions (`handy_act`, `handy_windows`, `handy_clipboard`). Always call `handy_see` before clicking unfamiliar UI elements, prefer `paste` for long or multi-line text, use `wait_for_change` / `wait_for_settled` instead of blind sleeps, and chain sequential steps in a single `handy_act` call."
+      instructions: "Handy provides real-time computer screen vision with mapped (x, y) coordinates, window-scoped capture (`window`), active window metadata, pixel-under-cursor color, and frame-to-frame visual diffs (`handy_see`), plus real-time native mouse, keyboard, clipboard, and window control supporting chained multi-step actions and window-relative coordinates (`handy_act`, `handy_windows`, `handy_clipboard`). Always call `handy_see` before clicking unfamiliar UI elements, prefer `paste` for long or multi-line text, use `wait_for_change` / `wait_for_settled` / `wait_for_color` instead of blind sleeps, and chain sequential steps in a single `handy_act` call."
     }
   );
   const stopWatch = controller.permissions.watch((state) => {
@@ -42861,14 +43053,16 @@ function createHandyMcpServer(options = {}) {
   server.registerTool(
     "handy_see",
     {
-      title: "See Computer Screen (Mapped Coordinates + Mouse + Diff)",
-      description: "Capture the computer screen in real-time with mapped (x, y) coordinate rulers, dual-contrast grid labels, live mouse reticle, hex color under cursor, active window info, and visual diff since the previous capture (`changedPercent`, `changedBounds`). Use `region` to zoom into dense UI areas at 1:1 resolution while preserving global screen coordinates.",
+      title: "See Computer Screen (Mapped Coordinates + Window Zoom + Diff)",
+      description: "Capture the computer screen (or a single desktop window via `window`) in real-time with mapped (x, y) coordinate rulers, dual-contrast grid labels, live mouse reticle, hex color under cursor, active window info, and visual diff since the previous capture (`changedPercent`, `changedBounds`). Use `region` or `window` to zoom into dense UI areas at 1:1 resolution while preserving global screen coordinates, and set `highlightDiff: true` to outline changed pixels.",
       inputSchema: {
         display: external_exports.number().int().min(0).max(16).optional().describe("Monitor index (default: 0 primary)"),
         region: RegionSchema.optional().describe("Optional screen rectangle { x, y, width, height } to zoom into"),
+        window: external_exports.string().min(1).max(500).optional().describe("Optional window title or app substring to capture at 1:1 resolution while keeping global coordinates"),
         grid: external_exports.boolean().optional().describe("Overlay mapped coordinate rulers and grid (default: true)"),
         gridStep: external_exports.number().int().min(10).max(2e3).optional().describe("Custom major grid spacing in screen pixels"),
         showMouse: external_exports.boolean().optional().describe("Overlay live mouse reticle and (x, y) badge (default: true)"),
+        highlightDiff: external_exports.boolean().optional().describe("Draw an emerald CHANGED bounding box around pixels that changed since the previous capture"),
         maxWidth: external_exports.number().int().min(320).max(3840).optional().describe("Max output image width in pixels (default: 1280); drawn coordinates remain exact screen pixels")
       },
       annotations: {
@@ -42885,9 +43079,11 @@ function createHandyMcpServer(options = {}) {
         const shot = await controller.see({
           display: args.display,
           region: args.region,
+          window: args.window,
           grid: args.grid,
           gridStep: args.gridStep,
           showMouse: args.showMouse,
+          highlightDiff: args.highlightDiff,
           maxWidth: args.maxWidth
         });
         const metadata = {
@@ -42940,14 +43136,15 @@ function createHandyMcpServer(options = {}) {
     "handy_act",
     {
       title: "Control Mouse & Keyboard (Single or Chained)",
-      description: 'Execute native mouse, keyboard, clipboard-paste, window-focus, and smart visual-wait controls in real-time. Supports chaining multiple steps sequentially in one call \u2014 e.g. [{ "type": "focus_window", "title": "Code" }, { "type": "click", "x": 420, "y": 260 }, { "type": "paste", "text": "Hello!" }, { "type": "wait_for_settled" }]. Set `screenshotAfter: true` to receive an updated coordinate-mapped screenshot with numbered action-trail markers.',
+      description: 'Execute native mouse, keyboard, clipboard-paste, window-focus, and smart visual-wait controls in real-time. Supports chaining multiple steps sequentially in one call \u2014 e.g. [{ "type": "focus_window", "title": "Code" }, { "type": "click", "x": 420, "y": 260 }, { "type": "paste", "text": "Hello!" }, { "type": "wait_for_settled" }]. Steps support `coordinateSpace: "screen" | "normalized" | "window"`. Set `screenshotAfter: true` to receive an updated coordinate-mapped screenshot with numbered action-trail markers.',
       inputSchema: {
         actions: external_exports.array(ActionStepSchema).min(1).max(100).describe(
-          "Ordered array of steps (move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, screenshot)"
+          "Ordered array of steps (move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, wait_for_color, screenshot)"
         ),
         stepDelayMs: external_exports.number().min(0).max(5e3).optional().describe("Settling delay in ms between steps so native UI focus updates reliably (default: 15)"),
         screenshotAfter: external_exports.boolean().optional().describe("Capture and return an annotated screen image after the chain completes (default: false)"),
         showTrail: external_exports.boolean().optional().describe("Draw numbered amber markers (#1, #2, drag lines) on post-action screenshots (default: true)"),
+        highlightDiff: external_exports.boolean().optional().describe("Outline changed pixels since the previous capture on post-action screenshots (default: false)"),
         failsafe: external_exports.boolean().optional().describe("Abort immediately if a human slams the cursor to the top-left (0,0) corner (default: true)"),
         settleMs: external_exports.number().min(0).max(5e3).optional().describe("Wait in ms before taking screenshotAfter (default: 50)"),
         display: external_exports.number().int().min(0).max(16).optional().describe("Target display index for normalized coordinates or screenshotAfter"),
@@ -42971,6 +43168,7 @@ function createHandyMcpServer(options = {}) {
           stepDelayMs: args.stepDelayMs,
           screenshotAfter: args.screenshotAfter,
           showTrail: args.showTrail,
+          highlightDiff: args.highlightDiff,
           failsafe: args.failsafe,
           settleMs: args.settleMs,
           display: args.display,
@@ -43559,6 +43757,9 @@ function renderHtml(token) {
           <label style="margin-left:10px;font-size:13px;cursor:pointer;">
             <input type="checkbox" id="liveToggle" onchange="toggleLive()" /> Live (1.5s)
           </label>
+          <label style="margin-left:10px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" id="diffToggle" checked onchange="refreshScreen()" /> Highlight Diff
+          </label>
         </div>
         <div class="muted" id="hoverCoords">Hover image to inspect (x, y)</div>
       </div>
@@ -43648,7 +43849,8 @@ function renderHtml(token) {
     }
 
     async function refreshScreen() {
-      const data = await api("/api/see");
+      const hi = document.getElementById("diffToggle")?.checked ? "1" : "0";
+      const data = await api("/api/see?highlightDiff=" + hi);
       if (!data.ok) {
         document.getElementById("screenPlaceholder").style.display = "block";
         document.getElementById("screenPlaceholder").textContent = data.error || "Unable to capture screen";
@@ -43739,6 +43941,16 @@ function renderHtml(token) {
       }
     }
 
+    if (typeof EventSource !== "undefined") {
+      const es = new EventSource("/api/events?token=" + encodeURIComponent(TOKEN));
+      es.addEventListener("permission", (ev) => {
+        try {
+          const state = JSON.parse(ev.data);
+          updateBadge(state);
+        } catch {}
+      });
+    }
+
     loadStatus();
     refreshScreen();
   </script>
@@ -43755,6 +43967,18 @@ async function startControlPanel(options = {}) {
   });
   const token = randomBytes(24).toString("hex");
   const html = renderHtml(token);
+  const sseClients = /* @__PURE__ */ new Set();
+  const stopPermWatch = controller.permissions.watch((state) => {
+    const payload = `event: permission
+data: ${JSON.stringify(state)}
+
+`;
+    for (const client of sseClients) {
+      if (!client.writableEnded) {
+        client.write(payload);
+      }
+    }
+  });
   const server = createServer(async (req, res) => {
     try {
       const url3 = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
@@ -43765,6 +43989,28 @@ async function startControlPanel(options = {}) {
           "x-frame-options": "SAMEORIGIN"
         });
         res.end(html);
+        return;
+      }
+      if (req.method === "GET" && url3.pathname === "/api/events") {
+        const providedToken = req.headers["x-handy-token"] ?? url3.searchParams.get("token");
+        if (providedToken !== token) {
+          sendJson(res, 403, { ok: false, error: "Forbidden: missing or invalid token." });
+          return;
+        }
+        res.writeHead(200, {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache, no-store",
+          connection: "keep-alive"
+        });
+        const initial = controller.permissions.getState();
+        res.write(`event: permission
+data: ${JSON.stringify(initial)}
+
+`);
+        sseClients.add(res);
+        req.on("close", () => {
+          sseClients.delete(res);
+        });
         return;
       }
       if (url3.pathname.startsWith("/api/")) {
@@ -43794,7 +44040,14 @@ async function startControlPanel(options = {}) {
         return;
       }
       if (req.method === "GET" && url3.pathname === "/api/see") {
-        const shot = await controller.see({ grid: true, showMouse: true });
+        const highlightDiff = url3.searchParams.get("highlightDiff") === "1";
+        const windowQuery = url3.searchParams.get("window") ?? void 0;
+        const shot = await controller.see({
+          grid: true,
+          showMouse: true,
+          highlightDiff,
+          window: windowQuery || void 0
+        });
         sendJson(res, 200, {
           ok: true,
           base64Png: shot.base64Png,
@@ -43862,6 +44115,13 @@ async function startControlPanel(options = {}) {
     controller,
     server,
     close: async () => {
+      stopPermWatch();
+      for (const client of sseClients) {
+        if (!client.writableEnded) {
+          client.end();
+        }
+      }
+      sseClients.clear();
       await new Promise((resolve2) => server.close(() => resolve2()));
       await controller.close();
     }
@@ -43909,6 +44169,8 @@ Usage:
 Options for 'see':
   --out, -o <path>       Save annotated PNG screenshot to file (default: ./handy-screen.png)
   --region <x,y,w,h>     Zoom into a rectangular screen region (keeps global coordinates)
+  --window <title>       Capture a specific visible window by title/app substring
+  --highlight-diff       Outline changed pixels since the previous capture
   --display <index>      Target monitor index (default: 0)
   --max-width <px>       Max output image width (default: 1280)
   --grid-step <px>       Custom major coordinate grid spacing
@@ -43919,6 +44181,7 @@ Options for 'see':
 Options for 'act':
   --step-delay <ms>      Delay in ms between chained steps (default: 15)
   --screenshot-after <f> Save post-chain annotated PNG screenshot (with numbered trail) to path
+  --highlight-diff       Outline changed pixels on --screenshot-after
   --no-trail             Omit numbered action-trail markers on --screenshot-after
   --no-failsafe          Disable top-left (0,0) corner-slam failsafe
   --backend <kind>       Override backend (auto, virtual, linux-x11, linux-cli, darwin, win32)
@@ -43950,6 +44213,7 @@ function parseArgv(argv) {
     "no-mouse",
     "no-trail",
     "no-failsafe",
+    "highlight-diff",
     "submit",
     "right",
     "middle",
@@ -44297,12 +44561,23 @@ Press Ctrl+C to stop.
           typeof flags.get("out") === "string" ? flags.get("out") : "handy-screen.png"
         );
         const region = typeof flags.get("region") === "string" ? parseRegionFlag(flags.get("region")) : void 0;
+        const windowQuery = typeof flags.get("window") === "string" ? flags.get("window") : void 0;
         const display = typeof flags.get("display") === "string" ? Number(flags.get("display")) : void 0;
         const maxWidth = typeof flags.get("max-width") === "string" ? Number(flags.get("max-width")) : void 0;
         const gridStep = typeof flags.get("grid-step") === "string" ? Number(flags.get("grid-step")) : void 0;
         const grid = flags.get("no-grid") === true ? false : true;
         const showMouse = flags.get("no-mouse") === true ? false : true;
-        const shot = await controller.see({ display, region, maxWidth, gridStep, grid, showMouse });
+        const highlightDiff2 = flags.get("highlight-diff") === true;
+        const shot = await controller.see({
+          display,
+          region,
+          window: windowQuery,
+          maxWidth,
+          gridStep,
+          grid,
+          showMouse,
+          highlightDiff: highlightDiff2
+        });
         writeFileSync4(outPath, shot.pngBuffer);
         const payload = {
           ok: true,
@@ -44404,11 +44679,13 @@ Press Ctrl+C to stop.
       const afterPath = typeof flags.get("screenshot-after") === "string" ? resolve(flags.get("screenshot-after")) : void 0;
       const showTrail = flags.get("no-trail") !== true;
       const failsafe = flags.get("no-failsafe") !== true;
+      const highlightDiff = flags.get("highlight-diff") === true;
       const result = await controller.act({
         actions: steps,
         stepDelayMs,
         screenshotAfter: Boolean(afterPath),
         showTrail,
+        highlightDiff,
         failsafe
       });
       if (afterPath && result.screenshots[0]) {

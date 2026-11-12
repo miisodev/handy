@@ -62,11 +62,11 @@ export interface RawFrame {
 
 export type MouseButton = "left" | "right" | "middle";
 export type ModifierKey = "ctrl" | "alt" | "shift" | "meta" | "mod";
-export type CoordinateSpace = "screen" | "normalized";
+export type CoordinateSpace = "screen" | "normalized" | "window";
 
 export const MouseButtonSchema = z.enum(["left", "right", "middle"]);
 export const ModifierKeySchema = z.enum(["ctrl", "alt", "shift", "meta", "mod"]);
-export const CoordinateSpaceSchema = z.enum(["screen", "normalized"]);
+export const CoordinateSpaceSchema = z.enum(["screen", "normalized", "window"]);
 
 export const RegionSchema = z.object({
   x: z.number().int().describe("Left X coordinate in screen pixels"),
@@ -238,11 +238,29 @@ export const WaitForSettledStepSchema = z.object({
     .describe("Max changed pixel percentage treated as settled (default: 0.05)"),
 });
 
+export const WaitForColorStepSchema = z.object({
+  type: z.literal("wait_for_color"),
+  x: z.number().int().describe("Target X coordinate of pixel to inspect"),
+  y: z.number().int().describe("Target Y coordinate of pixel to inspect"),
+  color: z.string().regex(/^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/).describe("Expected hex color (#rrggbb or #rgb)"),
+  tolerance: z
+    .number()
+    .min(0)
+    .max(442)
+    .optional()
+    .describe("Allowed Euclidean RGB distance 0..442 (default: 24)"),
+  timeoutMs: z.number().min(50).max(15000).optional().describe("Max time to wait in ms (default: 5000)"),
+  pollMs: z.number().min(20).max(1000).optional().describe("Polling interval in ms (default: 80)"),
+  coordinateSpace: CoordinateSpaceSchema.optional(),
+});
+
 export const ScreenshotStepSchema = z.object({
   type: z.literal("screenshot"),
   region: RegionSchema.optional(),
+  window: z.string().max(256).optional().describe("Optional window title substring to capture at 1:1 resolution"),
   grid: z.boolean().optional(),
   showMouse: z.boolean().optional(),
+  highlightDiff: z.boolean().optional(),
   maxWidth: z.number().int().min(320).max(3840).optional(),
   label: z.string().max(120).optional().describe("Optional label identifying this mid-chain capture"),
 });
@@ -266,6 +284,7 @@ export const ActionStepSchema = z.discriminatedUnion("type", [
   WaitStepSchema,
   WaitForChangeStepSchema,
   WaitForSettledStepSchema,
+  WaitForColorStepSchema,
   ScreenshotStepSchema,
 ]);
 
@@ -274,9 +293,11 @@ export type ActionStep = z.infer<typeof ActionStepSchema>;
 export interface SeeOptions {
   display?: number;
   region?: Region;
+  window?: string | { title?: string; app?: string; id?: string | number };
   grid?: boolean;
   gridStep?: number;
   showMouse?: boolean;
+  highlightDiff?: boolean;
   maxWidth?: number;
   trail?: TrailMarker[];
 }
@@ -311,6 +332,7 @@ export interface ActOptions {
   stepDelayMs?: number;
   screenshotAfter?: boolean;
   showTrail?: boolean;
+  highlightDiff?: boolean;
   settleMs?: number;
   display?: number;
   maxWidth?: number;

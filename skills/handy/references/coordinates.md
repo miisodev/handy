@@ -20,9 +20,18 @@ High-DPI displays (4K Windows laptops, macOS Retina 2x screens) and vision-model
 - On **Windows**, Handy initializes `Per-Monitor V2` DPI awareness so `CopyFromScreen`, `GetCursorPos`, and `SendInput` share identical coordinates.
 - When `maxWidth` downscales a large frame, Handy draws the coordinate labels *after* resizing, using true OS screen coordinates. Always trust the numbers printed on the rulers and grid badges.
 
-## Precision Targeting with `region` Zoom
+## Precision Targeting with `window` or `region` Zoom
 
-When targeting dense UI controls (window close icons, browser tab buttons, spreadsheet cells, IDE status bar items):
+When targeting dense UI controls or focusing exclusively on one app window without desktop clutter:
+
+```json
+{
+  "window": "Visual Studio Code",
+  "highlightDiff": true
+}
+```
+
+Or crop an exact rectangle:
 
 ```json
 {
@@ -31,7 +40,11 @@ When targeting dense UI controls (window close icons, browser tab buttons, sprea
 }
 ```
 
-The cropped region is returned at native 1:1 resolution while its rulers and grid badges remain in **global screen `(x, y)` coordinates** (`360..680`, `120..340`). Pass the coordinate you read directly to `handy_act` — no offset addition required.
+The cropped window or region is returned at native 1:1 resolution while its rulers and grid badges remain in **global screen `(x, y)` coordinates** (`360..680`, `120..340`). Pass the coordinate you read directly to `handy_act` — no offset addition required.
+
+## Window-Relative Coordinates (`coordinateSpace: "window"`)
+
+When executing reusable workflows inside a movable desktop window, pass `"coordinateSpace": "window"` on any step (`move`, `click`, `drag`, `scroll`, `wait_for_color`). Handy offsets `(x, y)` automatically from the currently active window's top-left `{ x, y }` bounds.
 
 ## Normalized Coordinates (`0..1000`)
 

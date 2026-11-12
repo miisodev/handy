@@ -64,6 +64,13 @@ describe("CLI Commands & Packaged Plugin Tarball Integrity", () => {
     expect(see.code).toBe(0);
     expect(existsSync(shotPath)).toBe(true);
 
+    const winShotPath = join(workDir, "win-shot.png");
+    const winSee = await runHandy(["see", "--window", "Scratchpad", "--highlight-diff", "--out", winShotPath, "--json"], env);
+    expect(winSee.code).toBe(0);
+    const winSeeJson = JSON.parse(winSee.stdout) as { imageSize: { width: number; height: number } };
+    expect(winSeeJson.imageSize).toEqual({ width: 490, height: 360 });
+    expect(existsSync(winShotPath)).toBe(true);
+
     const afterPath = join(workDir, "after.png");
     const act = await runHandy(
       ["act", 'move 250 172 -> click -> type "Sam"', "--screenshot-after", afterPath, "--json"],

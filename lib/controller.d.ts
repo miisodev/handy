@@ -47,6 +47,7 @@ export declare class HandyController {
     }>;
     readClipboard(): Promise<string>;
     writeClipboard(text: string): Promise<void>;
+    private resolveWindowRegion;
     see(options?: SeeOptions & {
         trail?: TrailMarker[];
     }): Promise<SeeResult>;

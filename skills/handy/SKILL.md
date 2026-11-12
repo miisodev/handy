@@ -15,7 +15,7 @@ Real-time native mouse, keyboard, clipboard, window, and coordinate-mapped scree
 ```
 1. ORIENT   handy_status() / handy_windows("list")  check toggle, displays & open window bounds
 2. SEE      handy_see(...)                          read mapped (x, y) coordinates, pixel hex & frame diff
-   [ZOOM]   handy_see(region={...})                 for dense toolbars, small icons, or ambiguous targets
+   [ZOOM]   handy_see(window="...") / region={...}  1:1 window or region zoom while keeping global (x, y)
 3. ACT      handy_act(actions=[...],                chain focus/click/paste/smart-waits in ONE call
                       screenshotAfter=true)         and verify numbered #1, #2 trail markers
 4. STOP     handy_permission("off")                 when asked to relinquish control or on emergency stop
@@ -37,8 +37,8 @@ Real-time native mouse, keyboard, clipboard, window, and coordinate-mapped scree
 
 | Tool | Purpose | Key Parameters |
 |---|---|---|
-| `handy_see` | Live screen capture with mapped `(x, y)` grid, `MOUSE (x,y)` reticle, `pixelUnderMouse`, `activeWindow`, and `screenDiff` | `display`, `region: { x, y, width, height }`, `grid`, `gridStep`, `showMouse`, `maxWidth` |
-| `handy_act` | Execute 1–100 native mouse, keyboard, paste, focus, and smart-wait steps sequentially | `actions: [...]`, `stepDelayMs`, `screenshotAfter`, `showTrail`, `failsafe` |
+| `handy_see` | Live screen or single-window capture with mapped `(x, y)` grid, `MOUSE (x,y)` reticle, `pixelUnderMouse`, `activeWindow`, and `screenDiff` | `display`, `window`, `region: { x, y, width, height }`, `highlightDiff`, `grid`, `gridStep`, `showMouse`, `maxWidth` |
+| `handy_act` | Execute 1–100 native mouse, keyboard, paste, focus, and smart-wait steps sequentially | `actions: [...]`, `stepDelayMs`, `screenshotAfter`, `showTrail`, `highlightDiff`, `failsafe` |
 | `handy_windows` | List visible windows with bounds or focus a target window by `title`, `app`, or `id` | `action: "list" \| "focus"`, `title`, `app`, `id` |
 | `handy_clipboard` | Read or write plain-text system clipboard directly | `action: "read" \| "write"`, `text` |
 | `handy_status` | Read permission toggle (`ON`/`OFF`), mode (`full`/`view_only`), displays, active window, mouse | *(none)* |

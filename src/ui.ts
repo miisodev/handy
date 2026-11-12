@@ -226,6 +226,9 @@ function renderHtml(token: string): string {
           <label style="margin-left:10px;font-size:13px;cursor:pointer;">
             <input type="checkbox" id="liveToggle" onchange="toggleLive()" /> Live (1.5s)
           </label>
+          <label style="margin-left:10px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" id="diffToggle" checked onchange="refreshScreen()" /> Highlight Diff
+          </label>
         </div>
         <div class="muted" id="hoverCoords">Hover image to inspect (x, y)</div>
       </div>
@@ -315,7 +318,8 @@ function renderHtml(token: string): string {
     }
 
     async function refreshScreen() {
-      const data = await api("/api/see");
+      const hi = document.getElementById("diffToggle")?.checked ? "1" : "0";
+      const data = await api("/api/see?highlightDiff=" + hi);
       if (!data.ok) {
         document.getElementById("screenPlaceholder").style.display = "block";
         document.getElementById("screenPlaceholder").textContent = data.error || "Unable to capture screen";
@@ -406,6 +410,16 @@ function renderHtml(token: string): string {
       }
     }
 
+    if (typeof EventSource !== "undefined") {
+      const es = new EventSource("/api/events?token=" + encodeURIComponent(TOKEN));
+      es.addEventListener("permission", (ev) => {
+        try {
+          const state = JSON.parse(ev.data);
+          updateBadge(state);
+        } catch {}
+      });
+    }
+
     loadStatus();
     refreshScreen();
   </script>
@@ -425,6 +439,16 @@ export async function startControlPanel(options: StartControlPanelOptions = {}):
     });
   const token = randomBytes(24).toString("hex");
   const html = renderHtml(token);
+  const sseClients = new Set<ServerResponse>();
+
+  const stopPermWatch = controller.permissions.watch((state) => {
+    const payload = `event: permission\ndata: ${JSON.stringify(state)}\n\n`;
+    for (const client of sseClients) {
+      if (!client.writableEnded) {
+        client.write(payload);
+      }
+    }
+  });
 
   const server = createServer(async (req, res) => {
     try {
@@ -437,6 +461,26 @@ export async function startControlPanel(options: StartControlPanelOptions = {}):
           "x-frame-options": "SAMEORIGIN",
         });
         res.end(html);
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/api/events") {
+        const providedToken = req.headers["x-handy-token"] ?? url.searchParams.get("token");
+        if (providedToken !== token) {
+          sendJson(res, 403, { ok: false, error: "Forbidden: missing or invalid token." });
+          return;
+        }
+        res.writeHead(200, {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache, no-store",
+          connection: "keep-alive",
+        });
+        const initial = controller.permissions.getState();
+        res.write(`event: permission\ndata: ${JSON.stringify(initial)}\n\n`);
+        sseClients.add(res);
+        req.on("close", () => {
+          sseClients.delete(res);
+        });
         return;
       }
 
@@ -470,7 +514,14 @@ export async function startControlPanel(options: StartControlPanelOptions = {}):
       }
 
       if (req.method === "GET" && url.pathname === "/api/see") {
-        const shot = await controller.see({ grid: true, showMouse: true });
+        const highlightDiff = url.searchParams.get("highlightDiff") === "1";
+        const windowQuery = url.searchParams.get("window") ?? undefined;
+        const shot = await controller.see({
+          grid: true,
+          showMouse: true,
+          highlightDiff,
+          window: windowQuery || undefined,
+        });
         sendJson(res, 200, {
           ok: true,
           base64Png: shot.base64Png,
@@ -545,6 +596,13 @@ export async function startControlPanel(options: StartControlPanelOptions = {}):
     controller,
     server,
     close: async () => {
+      stopPermWatch();
+      for (const client of sseClients) {
+        if (!client.writableEnded) {
+          client.end();
+        }
+      }
+      sseClients.clear();
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await controller.close();
     },
