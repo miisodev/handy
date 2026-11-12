@@ -155,7 +155,7 @@ describe("Cross-Platform Native Bridges (macOS CoreGraphics & Windows SendInput)
       const realWin = new Win32Backend();
       try {
         const checks = await realWin.doctor();
-        expect(checks[0]?.ok).toBe(true);
+        expect(checks[0]?.ok, JSON.stringify(checks)).toBe(true);
         const displays = await realWin.getDisplays();
         expect(displays.length).toBeGreaterThanOrEqual(1);
         const wins = await realWin.listWindows();

@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseKeyChord, toWin32Vk, WIN32_VK_CODES, type ConcreteModifier } from "../keys.js";
 import { decodePng } from "../png.js";
 import type {
@@ -387,7 +390,7 @@ public static class HandyWin32 {
 }
 "@
 
-Add-Type -TypeDefinition $csharp -ReferencedAssemblies System.Windows.Forms, System.Drawing
+Add-Type -TypeDefinition $csharp -ReferencedAssemblies System, System.Windows.Forms, System.Drawing
 [HandyWin32]::InitDpi()
 
 while (($line = [Console]::In.ReadLine()) -ne $null) {
@@ -516,16 +519,24 @@ export class Win32Backend implements DesktopBackend {
   readonly platform = "win32" as const;
 
   private readonly worker: JsonlWorker;
+  private tempDir: string | null = null;
 
   constructor(options: Win32BackendOptions = {}) {
-    const encoded = Buffer.from(WIN32_POWERSHELL_SCRIPT, "utf16le").toString("base64");
-    this.worker = new JsonlWorker(
-      options.workerOptions ?? {
+    if (options.workerOptions) {
+      this.worker = new JsonlWorker(options.workerOptions);
+    } else {
+      // Write script to a temp .ps1 (with UTF-8 BOM for PowerShell 5.1) so we never hit
+      // Win32 CreateProcessW's 32,767-character command-line limit on -EncodedCommand
+      const dir = mkdtempSync(join(tmpdir(), "handy-win32-"));
+      const scriptPath = join(dir, "worker.ps1");
+      writeFileSync(scriptPath, `\uFEFF${WIN32_POWERSHELL_SCRIPT}`, "utf8");
+      this.tempDir = dir;
+      this.worker = new JsonlWorker({
         command: "powershell.exe",
-        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
         requestTimeoutMs: 15_000,
-      },
-    );
+      });
+    }
   }
 
   async init(): Promise<void> {
@@ -534,6 +545,14 @@ export class Win32Backend implements DesktopBackend {
 
   async close(): Promise<void> {
     await this.worker.stop();
+    if (this.tempDir) {
+      try {
+        rmSync(this.tempDir, { recursive: true, force: true });
+      } catch {
+        // ignore temp cleanup errors
+      }
+      this.tempDir = null;
+    }
   }
 
   async getDisplays(): Promise<DisplayInfo[]> {

@@ -7258,7 +7258,7 @@ var require_dist = __commonJS({
 });
 
 // src/cli.ts
-import { writeFileSync as writeFileSync3 } from "node:fs";
+import { writeFileSync as writeFileSync4 } from "node:fs";
 import { resolve } from "node:path";
 
 // node_modules/zod/v4/classic/external.js
@@ -30620,6 +30620,9 @@ var VirtualDesktopBackend = class _VirtualDesktopBackend {
 };
 
 // src/backends/win32.ts
+import { mkdtempSync as mkdtempSync3, rmSync as rmSync3, writeFileSync } from "node:fs";
+import { tmpdir as tmpdir3 } from "node:os";
+import { join as join4 } from "node:path";
 var WIN32_POWERSHELL_SCRIPT = `
 $ErrorActionPreference = "Stop"
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
@@ -30991,7 +30994,7 @@ public static class HandyWin32 {
 }
 "@
 
-Add-Type -TypeDefinition $csharp -ReferencedAssemblies System.Windows.Forms, System.Drawing
+Add-Type -TypeDefinition $csharp -ReferencedAssemblies System, System.Windows.Forms, System.Drawing
 [HandyWin32]::InitDpi()
 
 while (($line = [Console]::In.ReadLine()) -ne $null) {
@@ -31114,21 +31117,34 @@ var Win32Backend = class {
   name = "win32-sendinput";
   platform = "win32";
   worker;
+  tempDir = null;
   constructor(options = {}) {
-    const encoded = Buffer.from(WIN32_POWERSHELL_SCRIPT, "utf16le").toString("base64");
-    this.worker = new JsonlWorker(
-      options.workerOptions ?? {
+    if (options.workerOptions) {
+      this.worker = new JsonlWorker(options.workerOptions);
+    } else {
+      const dir = mkdtempSync3(join4(tmpdir3(), "handy-win32-"));
+      const scriptPath = join4(dir, "worker.ps1");
+      writeFileSync(scriptPath, `\uFEFF${WIN32_POWERSHELL_SCRIPT}`, "utf8");
+      this.tempDir = dir;
+      this.worker = new JsonlWorker({
         command: "powershell.exe",
-        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", scriptPath],
         requestTimeoutMs: 15e3
-      }
-    );
+      });
+    }
   }
   async init() {
     await this.worker.start();
   }
   async close() {
     await this.worker.stop();
+    if (this.tempDir) {
+      try {
+        rmSync3(this.tempDir, { recursive: true, force: true });
+      } catch {
+      }
+      this.tempDir = null;
+    }
   }
   async getDisplays() {
     const res = await this.worker.request({ op: "displays" });
@@ -31621,9 +31637,9 @@ function renderScreenOverlay(rgba, imageWidth, imageHeight, options) {
 }
 
 // src/permissions.ts
-import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync4, renameSync, statSync, watch, writeFileSync } from "node:fs";
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync4, renameSync, statSync, watch, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 var HandyPermissionError = class extends Error {
   code = "HANDY_PERMISSION_DENIED";
   state;
@@ -31645,7 +31661,7 @@ function resolveConfigDir(overrideDir) {
   if (overrideDir) return overrideDir;
   const fromEnv = process.env.HANDY_CONFIG_DIR?.trim();
   if (fromEnv) return fromEnv;
-  return join4(homedir2(), ".handy");
+  return join5(homedir2(), ".handy");
 }
 function parseDurationMs(input2) {
   const match = /^(\d+(?:\.\d+)?)\s*(ms|s|sec|secs|m|min|mins|h|hr|hrs)?$/i.exec(input2.trim());
@@ -31678,7 +31694,7 @@ var PermissionStore = class {
   allowMcpEnableOption;
   constructor(options = {}) {
     this.configDir = resolveConfigDir(options.configDir);
-    this.filePath = join4(this.configDir, "permissions.json");
+    this.filePath = join5(this.configDir, "permissions.json");
     this.allowMcpEnableOption = options.allowMcpEnable;
   }
   get allowMcpEnable() {
@@ -31838,7 +31854,7 @@ var PermissionStore = class {
   writeDiskState(state) {
     this.ensureDir();
     const tmpPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}
+    writeFileSync2(tmpPath, `${JSON.stringify(state, null, 2)}
 `, { encoding: "utf8", mode: 384 });
     renameSync(tmpPath, this.filePath);
   }
@@ -32759,9 +32775,9 @@ function parseChainInput(input2) {
 }
 
 // src/installer.ts
-import { copyFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { copyFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { dirname, join as join5 } from "node:path";
+import { dirname, join as join6 } from "node:path";
 var SUPPORTED_MCP_HOSTS = [
   "claude-desktop",
   "cursor",
@@ -32771,23 +32787,23 @@ var SUPPORTED_MCP_HOSTS = [
 function resolveHostConfigPath(host, env = {}) {
   const platform = env.platform ?? process.platform;
   const home = env.homeDir ?? homedir3();
-  const appData = env.appDataDir ?? process.env.APPDATA ?? join5(home, "AppData", "Roaming");
+  const appData = env.appDataDir ?? process.env.APPDATA ?? join6(home, "AppData", "Roaming");
   switch (host) {
     case "claude-desktop": {
       if (platform === "darwin") {
-        return join5(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
+        return join6(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
       }
       if (platform === "win32") {
-        return join5(appData, "Claude", "claude_desktop_config.json");
+        return join6(appData, "Claude", "claude_desktop_config.json");
       }
-      return join5(home, ".config", "Claude", "claude_desktop_config.json");
+      return join6(home, ".config", "Claude", "claude_desktop_config.json");
     }
     case "cursor":
-      return join5(home, ".cursor", "mcp.json");
+      return join6(home, ".cursor", "mcp.json");
     case "windsurf":
-      return join5(home, ".codeium", "windsurf", "mcp_config.json");
+      return join6(home, ".codeium", "windsurf", "mcp_config.json");
     case "claude-code":
-      return join5(home, ".claude.json");
+      return join6(home, ".claude.json");
   }
 }
 function buildHandyMcpEntry(platform = process.platform) {
@@ -32816,7 +32832,7 @@ function atomicWriteJson(filePath, data) {
   const dir = dirname(filePath);
   mkdirSync2(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}`;
-  writeFileSync2(tmp, `${JSON.stringify(data, null, 2)}
+  writeFileSync3(tmp, `${JSON.stringify(data, null, 2)}
 `, "utf8");
   renameSync2(tmp, filePath);
 }
@@ -44287,7 +44303,7 @@ Press Ctrl+C to stop.
         const grid = flags.get("no-grid") === true ? false : true;
         const showMouse = flags.get("no-mouse") === true ? false : true;
         const shot = await controller.see({ display, region, maxWidth, gridStep, grid, showMouse });
-        writeFileSync3(outPath, shot.pngBuffer);
+        writeFileSync4(outPath, shot.pngBuffer);
         const payload = {
           ok: true,
           path: outPath,
@@ -44396,7 +44412,7 @@ Press Ctrl+C to stop.
         failsafe
       });
       if (afterPath && result.screenshots[0]) {
-        writeFileSync3(afterPath, result.screenshots[0].pngBuffer);
+        writeFileSync4(afterPath, result.screenshots[0].pngBuffer);
       }
       const summary = {
         ok: true,
