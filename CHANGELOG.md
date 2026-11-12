@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-12
+
+### Added
+- **Desktop Window Awareness & Focus (`handy_windows`, `focus_window`)**: List visible desktop windows with titles, owning apps, PIDs, and screen bounds `{ x, y, width, height }`, or bring a window to the foreground across Windows (`EnumWindows`/`SetForegroundWindow`), macOS (`CGWindowListCopyWindowInfo`/`NSRunningApplication`), Linux X11 (pure EWMH `_NET_CLIENT_LIST`/`_NET_ACTIVE_WINDOW` wire protocol), and Virtual Desktop.
+- **Native Clipboard & Instant Paste (`handy_clipboard`, `paste`)**: Read/write Unicode clipboard text natively on Windows (MTA-safe Win32 `OpenClipboard`/`CF_UNICODETEXT`), macOS (`NSPasteboard`), Linux (`wl-clipboard`/`xclip`/`xsel`), and Virtual Desktop, plus a `paste` action step in `handy_act` with automatic clipboard preservation.
+- **Smart Visual Synchronization (`wait_for_change`, `wait_for_settled`)**: Sub-2ms RGBA frame diffing lets chains wait until a UI region visibly updates or finishes animating instead of relying on fixed `wait` sleeps.
+- **Richer Visual Perception (`handy_see`)**:
+  - `pixelUnderMouse` (`#rrggbb` sampled from the raw unannotated frame before drawing the cursor reticle).
+  - `activeWindow` metadata attached to `handy_see`, `handy_act`, and `handy_status`.
+  - `screenDiff` (`changedPercent`, `changedPixels`, `changedBounds`) computed automatically between consecutive captures.
+  - Dual-contrast coordinate grid lines (legible on both `#000000` dark and `#ffffff` light apps) and numbered amber **action-trail markers** (`#1`, `#2`, drag vectors) on `screenshotAfter` captures.
+- **Physical Corner-Slam Failsafe**: Slamming the mouse cursor into the top-left `(0, 0)` corner aborts any active `handy_act` chain immediately and releases held inputs.
+- **One-Command Host Installer (`handy install` / `handy uninstall`)**: Automatically registers or removes Handy in Claude Desktop, Cursor, Windsurf, and Claude Code with `--dry-run` and `.handy.bak` backups.
+- **Local Live Control Panel (`handy ui`)**: Loopback (`127.0.0.1`) web dashboard with CSRF token protection, instant `ON` / `View Only` / `OFF` switches, live coordinate-mapped screen viewer, window switcher, and chain runner.
+- **Faster Zero-Temp-File Captures**: In-memory CoreGraphics `CGWindowListCreateImage` PNG encoding on macOS (with `screencapture` fallback) and direct stdout PNG streaming for `grim`, `maim`, and `import` on Linux.
+
 ## [1.0.0] - 2026-11-12
 
 ### Added

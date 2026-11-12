@@ -8,6 +8,17 @@ export {
   type BackendKind,
 } from "./backends/index.js";
 export { HandyController, parseChainInput } from "./controller.js";
+export { computeFrameDiff, samplePixelHex } from "./diff.js";
+export {
+  buildHandyMcpEntry,
+  installHandyToHosts,
+  resolveHostConfigPath,
+  SUPPORTED_MCP_HOSTS,
+  uninstallHandyFromHosts,
+  type HostInstallResult,
+  type InstallerEnvOptions,
+  type McpHostTarget,
+} from "./installer.js";
 export { parseKeyChord, resolveModifier, type CanonicalKey, type ConcreteModifier, type ParsedKeyChord } from "./keys.js";
 export { createHandyMcpServer, runStdioMcpServer, type CreateHandyMcpOptions } from "./mcp.js";
 export { chooseGridStep, renderScreenOverlay, type OverlayOptions } from "./overlay.js";
@@ -25,6 +36,7 @@ export {
   CoordinateSpaceSchema,
   DoubleClickStepSchema,
   DragStepSchema,
+  FocusWindowStepSchema,
   KeyDownStepSchema,
   KeyStepSchema,
   KeyUpStepSchema,
@@ -33,12 +45,15 @@ export {
   MouseDownStepSchema,
   MouseUpStepSchema,
   MoveStepSchema,
+  PasteStepSchema,
   RegionSchema,
   RightClickStepSchema,
   ScreenshotStepSchema,
   ScrollStepSchema,
   TripleClickStepSchema,
   TypeStepSchema,
+  WaitForChangeStepSchema,
+  WaitForSettledStepSchema,
   WaitStepSchema,
   type ActionStep,
   type ActOptions,
@@ -47,6 +62,7 @@ export {
   type DesktopBackend,
   type DisplayInfo,
   type DoctorCheck,
+  type FrameDiff,
   type ModifierKey,
   type MouseButton,
   type PermissionMode,
@@ -57,5 +73,8 @@ export {
   type SeeOptions,
   type SeeResult,
   type StepReceipt,
+  type TrailMarker,
+  type WindowInfo,
 } from "./types.js";
+export { startControlPanel, type RunningControlPanel, type StartControlPanelOptions } from "./ui.js";
 export { HANDY_MCP_NAME, HANDY_NAME, HANDY_PACKAGE_NAME, HANDY_VERSION } from "./version.js";

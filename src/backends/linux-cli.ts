@@ -1,11 +1,20 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { parseKeyChord, toXdotoolKey, type ConcreteModifier } from "../keys.js";
 import { cropRgba, decodePng } from "../png.js";
-import type { DesktopBackend, DisplayInfo, DoctorCheck, MouseButton, Point, RawFrame, Region } from "../types.js";
+import type {
+  DesktopBackend,
+  DisplayInfo,
+  DoctorCheck,
+  MouseButton,
+  Point,
+  RawFrame,
+  Region,
+  WindowInfo,
+} from "../types.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -18,21 +27,92 @@ async function commandExists(cmd: string): Promise<boolean> {
   }
 }
 
+function pipeStdin(cmd: string, args: string[], input: string, timeoutMs = 4000): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(cmd, args, { stdio: ["pipe", "ignore", "pipe"] });
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(stderr.trim() || `${cmd} exited with code ${code}`));
+    });
+
+    child.stdin.write(input, "utf8");
+    child.stdin.end();
+  });
+}
+
+export async function readLinuxClipboard(): Promise<string> {
+  const isWayland = Boolean(process.env.WAYLAND_DISPLAY);
+  if (isWayland && (await commandExists("wl-paste"))) {
+    const { stdout } = await execFileAsync("wl-paste", ["--no-newline"], { timeout: 3000 });
+    return stdout;
+  }
+  if (await commandExists("xclip")) {
+    const { stdout } = await execFileAsync("xclip", ["-selection", "clipboard", "-o"], { timeout: 3000 });
+    return stdout;
+  }
+  if (await commandExists("xsel")) {
+    const { stdout } = await execFileAsync("xsel", ["--clipboard", "--output"], { timeout: 3000 });
+    return stdout;
+  }
+  if (await commandExists("wl-paste")) {
+    const { stdout } = await execFileAsync("wl-paste", ["--no-newline"], { timeout: 3000 });
+    return stdout;
+  }
+  throw new Error("No Linux clipboard utility found (install xclip, xsel, or wl-clipboard).");
+}
+
+export async function writeLinuxClipboard(text: string): Promise<void> {
+  const isWayland = Boolean(process.env.WAYLAND_DISPLAY);
+  if (isWayland && (await commandExists("wl-copy"))) {
+    await pipeStdin("wl-copy", [], text);
+    return;
+  }
+  if (await commandExists("xclip")) {
+    await pipeStdin("xclip", ["-selection", "clipboard", "-i"], text);
+    return;
+  }
+  if (await commandExists("xsel")) {
+    await pipeStdin("xsel", ["--clipboard", "--input"], text);
+    return;
+  }
+  if (await commandExists("wl-copy")) {
+    await pipeStdin("wl-copy", [], text);
+    return;
+  }
+  throw new Error("No Linux clipboard utility found (install xclip, xsel, or wl-clipboard).");
+}
+
 export class LinuxCliBackend implements DesktopBackend {
   readonly name = "linux-cli";
   readonly platform = "linux" as const;
 
-  private screenshotTool: "grim" | "scrot" | "import" | "gnome-screenshot" | null = null;
+  private screenshotTool: "grim" | "maim" | "scrot" | "import" | "gnome-screenshot" | null = null;
   private inputTool: "xdotool" | "ydotool" | null = null;
   private wtypeAvailable = false;
+  private wmctrlAvailable = false;
   private lastKnownMouse: Point = { x: 0, y: 0 };
   private cachedScreenSize: { width: number; height: number } | null = null;
 
   async init(): Promise<void> {
     const isWayland = Boolean(process.env.WAYLAND_DISPLAY);
-    const screenshotCandidates: Array<"grim" | "scrot" | "import" | "gnome-screenshot"> = isWayland
-      ? ["grim", "gnome-screenshot", "scrot", "import"]
-      : ["scrot", "import", "gnome-screenshot", "grim"];
+    const screenshotCandidates: Array<"grim" | "maim" | "scrot" | "import" | "gnome-screenshot"> = isWayland
+      ? ["grim", "gnome-screenshot", "maim", "scrot", "import"]
+      : ["maim", "scrot", "import", "gnome-screenshot", "grim"];
 
     for (const candidate of screenshotCandidates) {
       if (await commandExists(candidate)) {
@@ -49,6 +129,7 @@ export class LinuxCliBackend implements DesktopBackend {
       }
     }
     this.wtypeAvailable = await commandExists("wtype");
+    this.wmctrlAvailable = await commandExists("wmctrl");
   }
 
   async close(): Promise<void> {}
@@ -74,6 +155,120 @@ export class LinuxCliBackend implements DesktopBackend {
         primary: true,
       },
     ];
+  }
+
+  async listWindows(): Promise<WindowInfo[]> {
+    if (this.wmctrlAvailable) {
+      try {
+        const { stdout } = await execFileAsync("wmctrl", ["-lG"], { timeout: 3000 });
+        let activeHex = "";
+        if (this.inputTool === "xdotool") {
+          try {
+            const { stdout: actOut } = await execFileAsync("xdotool", ["getactivewindow"], { timeout: 2000 });
+            const idNum = Number(actOut.trim());
+            if (Number.isFinite(idNum)) activeHex = idNum.toString(16);
+          } catch {
+            // ignore
+          }
+        }
+        const results: WindowInfo[] = [];
+        for (const line of stdout.split("\n")) {
+          const m = /^(0x[0-9a-fA-F]+)\s+\S+\s+(-?\d+)\s+(-?\d+)\s+(\d+)\s+(\d+)\s+\S+\s+(.*)$/.exec(line.trim());
+          if (!m) continue;
+          const idHex = m[1]!;
+          const focused = activeHex ? Number.parseInt(idHex, 16) === Number.parseInt(activeHex, 16) : false;
+          results.push({
+            id: idHex,
+            title: m[6]!.trim(),
+            bounds: {
+              x: Number(m[2]),
+              y: Number(m[3]),
+              width: Math.max(1, Number(m[4])),
+              height: Math.max(1, Number(m[5])),
+            },
+            focused,
+          });
+        }
+        return results;
+      } catch {
+        // fall through
+      }
+    }
+    const active = await this.getActiveWindow();
+    return active ? [active] : [];
+  }
+
+  async getActiveWindow(): Promise<WindowInfo | null> {
+    if (this.inputTool === "xdotool") {
+      try {
+        const { stdout: idOut } = await execFileAsync("xdotool", ["getactivewindow"], { timeout: 2000 });
+        const winId = idOut.trim();
+        if (!winId) return null;
+        const { stdout: nameOut } = await execFileAsync("xdotool", ["getwindowname", winId], { timeout: 2000 });
+        const { stdout: geomOut } = await execFileAsync("xdotool", ["getwindowgeometry", "--shell", winId], {
+          timeout: 2000,
+        });
+        const xm = /^X=(-?\d+)/m.exec(geomOut);
+        const ym = /^Y=(-?\d+)/m.exec(geomOut);
+        const wm = /^WIDTH=(\d+)/m.exec(geomOut);
+        const hm = /^HEIGHT=(\d+)/m.exec(geomOut);
+        return {
+          id: Number(winId) || winId,
+          title: nameOut.trim(),
+          bounds:
+            xm && ym && wm && hm
+              ? {
+                  x: Number(xm[1]),
+                  y: Number(ym[1]),
+                  width: Math.max(1, Number(wm[1])),
+                  height: Math.max(1, Number(hm[1])),
+                }
+              : undefined,
+          focused: true,
+        };
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  async focusWindow(query: { title?: string; app?: string; id?: string | number }): Promise<boolean> {
+    if (query.id !== undefined && this.inputTool === "xdotool") {
+      try {
+        await execFileAsync("xdotool", ["windowactivate", "--sync", String(query.id)], { timeout: 3000 });
+        return true;
+      } catch {
+        // continue
+      }
+    }
+    const needle = query.title ?? query.app;
+    if (!needle) return false;
+    if (this.wmctrlAvailable) {
+      try {
+        await execFileAsync("wmctrl", ["-a", needle], { timeout: 3000 });
+        return true;
+      } catch {
+        // continue
+      }
+    }
+    if (this.inputTool === "xdotool") {
+      try {
+        await execFileAsync("xdotool", ["search", "--name", needle, "windowactivate"], { timeout: 3000 });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  async getClipboardText(): Promise<string> {
+    return readLinuxClipboard();
+  }
+
+  async setClipboardText(text: string): Promise<void> {
+    await writeLinuxClipboard(text);
   }
 
   async getMousePosition(): Promise<Point> {
@@ -105,7 +300,6 @@ export class LinuxCliBackend implements DesktopBackend {
 
   private buttonNum(button: MouseButton): string {
     if (this.inputTool === "ydotool") {
-      // ydotool mouse codes: 0x00 left, 0x01 right, 0x02 middle
       return button === "left" ? "0x00" : button === "right" ? "0x01" : "0x02";
     }
     return button === "left" ? "1" : button === "middle" ? "2" : "3";
@@ -148,9 +342,11 @@ export class LinuxCliBackend implements DesktopBackend {
         });
       }
     } else if (this.inputTool === "ydotool") {
-      await execFileAsync("ydotool", ["mousemove", "--wheel", "-x", String(Math.round(deltaX)), "-y", String(Math.round(-deltaY))], {
-        timeout: 3000,
-      });
+      await execFileAsync(
+        "ydotool",
+        ["mousemove", "--wheel", "-x", String(Math.round(deltaX)), "-y", String(Math.round(-deltaY))],
+        { timeout: 3000 },
+      );
     } else {
       throw new Error("No Linux input tool found.");
     }
@@ -213,66 +409,98 @@ export class LinuxCliBackend implements DesktopBackend {
 
   async captureScreen(options: { display?: number; region?: Region } = {}): Promise<RawFrame> {
     if (!this.screenshotTool) {
-      throw new Error("No Linux screenshot utility found (grim, scrot, import, or gnome-screenshot).");
+      throw new Error("No Linux screenshot utility found (grim, maim, scrot, import, or gnome-screenshot).");
     }
 
-    const dir = mkdtempSync(join(tmpdir(), "handy-shot-"));
-    const outPath = join(dir, "screen.png");
+    let pngBytes: Buffer | null = null;
+    let alreadyCropped = false;
 
-    try {
-      if (this.screenshotTool === "grim") {
-        const args = options.region
-          ? ["-g", `${options.region.x},${options.region.y} ${options.region.width}x${options.region.height}`, outPath]
-          : [outPath];
-        await execFileAsync("grim", args, { timeout: 5000 });
-      } else if (this.screenshotTool === "scrot") {
-        await execFileAsync("scrot", ["--overwrite", outPath], { timeout: 5000 });
-      } else if (this.screenshotTool === "import") {
-        await execFileAsync("import", ["-window", "root", outPath], { timeout: 5000 });
-      } else {
-        await execFileAsync("gnome-screenshot", ["-f", outPath], { timeout: 5000 });
+    // Fast path: capture PNG directly to stdout in memory (zero temp file I/O)
+    if (this.screenshotTool === "grim") {
+      const args = options.region
+        ? ["-g", `${options.region.x},${options.region.y} ${options.region.width}x${options.region.height}`, "-t", "png", "-"]
+        : ["-t", "png", "-"];
+      const { stdout } = await execFileAsync("grim", args, {
+        encoding: "buffer",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 5000,
+      });
+      pngBytes = stdout;
+      alreadyCropped = Boolean(options.region);
+    } else if (this.screenshotTool === "maim") {
+      const args = options.region
+        ? ["-g", `${options.region.width}x${options.region.height}+${options.region.x}+${options.region.y}`, "--format=png"]
+        : ["--format=png"];
+      const { stdout } = await execFileAsync("maim", args, {
+        encoding: "buffer",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 5000,
+      });
+      pngBytes = stdout;
+      alreadyCropped = Boolean(options.region);
+    } else if (this.screenshotTool === "import") {
+      const { stdout } = await execFileAsync("import", ["-window", "root", "png:-"], {
+        encoding: "buffer",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 5000,
+      });
+      pngBytes = stdout;
+    }
+
+    if (!pngBytes) {
+      const dir = mkdtempSync(join(tmpdir(), "handy-shot-"));
+      const outPath = join(dir, "screen.png");
+      try {
+        if (this.screenshotTool === "scrot") {
+          await execFileAsync("scrot", ["--overwrite", outPath], { timeout: 5000 });
+        } else {
+          await execFileAsync("gnome-screenshot", ["-f", outPath], { timeout: 5000 });
+        }
+        pngBytes = readFileSync(outPath);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
       }
+    }
 
-      const decoded = decodePng(readFileSync(outPath));
+    const decoded = decodePng(pngBytes);
+    if (!alreadyCropped) {
       this.cachedScreenSize = { width: decoded.width, height: decoded.height };
+    }
 
-      if (options.region && this.screenshotTool !== "grim") {
-        const cropped = cropRgba(
-          decoded.data,
-          decoded.width,
-          decoded.height,
-          options.region.x,
-          options.region.y,
-          options.region.width,
-          options.region.height,
-        );
-        return {
-          width: cropped.width,
-          height: cropped.height,
-          data: cropped.data,
-          originX: cropped.x,
-          originY: cropped.y,
-          logicalWidth: cropped.width,
-          logicalHeight: cropped.height,
-          scaleFactor: 1,
-          displayId: 0,
-        };
-      }
-
+    if (options.region && !alreadyCropped) {
+      const cropped = cropRgba(
+        decoded.data,
+        decoded.width,
+        decoded.height,
+        options.region.x,
+        options.region.y,
+        options.region.width,
+        options.region.height,
+      );
       return {
-        width: decoded.width,
-        height: decoded.height,
-        data: decoded.data,
-        originX: options.region?.x ?? 0,
-        originY: options.region?.y ?? 0,
-        logicalWidth: decoded.width,
-        logicalHeight: decoded.height,
+        width: cropped.width,
+        height: cropped.height,
+        data: cropped.data,
+        originX: cropped.x,
+        originY: cropped.y,
+        logicalWidth: cropped.width,
+        logicalHeight: cropped.height,
         scaleFactor: 1,
         displayId: 0,
       };
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
     }
+
+    return {
+      width: decoded.width,
+      height: decoded.height,
+      data: decoded.data,
+      originX: options.region?.x ?? 0,
+      originY: options.region?.y ?? 0,
+      logicalWidth: decoded.width,
+      logicalHeight: decoded.height,
+      scaleFactor: 1,
+      displayId: 0,
+    };
   }
 
   async doctor(): Promise<DoctorCheck[]> {
@@ -281,7 +509,7 @@ export class LinuxCliBackend implements DesktopBackend {
       {
         name: "Linux Screenshot Tool",
         ok: this.screenshotTool !== null,
-        detail: this.screenshotTool ? `Using ${this.screenshotTool}` : "Missing (install grim or scrot)",
+        detail: this.screenshotTool ? `Using ${this.screenshotTool}` : "Missing (install grim, maim, or scrot)",
       },
       {
         name: "Linux Input Tool",

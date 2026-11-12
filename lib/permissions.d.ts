@@ -20,7 +20,7 @@ export declare class PermissionStore {
     setEnabled(enabled: boolean, options?: {
         mode?: PermissionMode;
         ttlMs?: number | null;
-        updatedBy?: "cli" | "mcp";
+        updatedBy?: "cli" | "mcp" | "ui";
     }): PermissionState;
     toggle(options?: {
         mode?: PermissionMode;

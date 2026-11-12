@@ -23,6 +23,28 @@ export interface DisplayInfo {
   primary: boolean;
 }
 
+export interface WindowInfo {
+  id: string | number;
+  title: string;
+  app?: string;
+  pid?: number;
+  bounds?: Region;
+  focused: boolean;
+}
+
+export interface FrameDiff {
+  changedPercent: number;
+  changedPixels: number;
+  changedBounds: Region | null;
+}
+
+export interface TrailMarker {
+  stepNumber: number;
+  kind: "click" | "drag_start" | "drag_end";
+  x: number;
+  y: number;
+}
+
 export interface RawFrame {
   width: number;
   height: number;
@@ -121,7 +143,7 @@ export const DragStepSchema = z.object({
   toX: z.number().describe("Destination X coordinate"),
   toY: z.number().describe("Destination Y coordinate"),
   button: MouseButtonSchema.optional(),
-  durationMs: z.number().min(0).max(10000).optional().describe("Drag duration in ms (default 180)"),
+  durationMs: z.number().min(0).max(10000).optional().describe("Drag duration in ms (default 160)"),
   steps: z.number().int().min(2).max(200).optional().describe("Interpolation steps along drag path"),
   coordinateSpace: CoordinateSpaceSchema.optional(),
 });
@@ -144,13 +166,25 @@ export const TypeStepSchema = z.object({
   submit: z.boolean().optional().describe("Press Enter immediately after typing"),
 });
 
+export const PasteStepSchema = z.object({
+  type: z.literal("paste"),
+  text: z
+    .string()
+    .max(100000)
+    .describe("Text to paste instantly via OS clipboard + mod+v (ideal for long text, URLs, or code)"),
+  restoreClipboard: z.boolean().optional().describe("Restore previous clipboard text after pasting (default: true)"),
+  submit: z.boolean().optional().describe("Press Enter immediately after pasting"),
+});
+
 export const KeyStepSchema = z.object({
   type: z.literal("key"),
   key: z
     .string()
     .min(1)
     .max(100)
-    .describe("Key or chord, e.g. 'Enter', 'Tab', 'Escape', 'Backspace', 'ArrowDown', 'ctrl+c', 'mod+a', 'cmd+shift+p'"),
+    .describe(
+      "Key or chord, e.g. 'Enter', 'Tab', 'Escape', 'Backspace', 'ArrowDown', 'ctrl+c', 'mod+a', 'cmd+shift+p'",
+    ),
   modifiers: z.array(ModifierKeySchema).optional().describe("Optional modifiers held while pressing key"),
   count: z.number().int().min(1).max(50).optional().describe("Repeat count (default 1)"),
 });
@@ -165,9 +199,43 @@ export const KeyUpStepSchema = z.object({
   key: z.string().min(1).max(64).describe("Key to release"),
 });
 
+export const FocusWindowStepSchema = z.object({
+  type: z.literal("focus_window"),
+  title: z.string().min(1).max(256).optional().describe("Case-insensitive substring of window title to focus"),
+  app: z.string().min(1).max(256).optional().describe("Case-insensitive application/process name to focus"),
+  id: z.union([z.string(), z.number()]).optional().describe("Exact window ID from handy_windows"),
+});
+
 export const WaitStepSchema = z.object({
   type: z.literal("wait"),
   ms: z.number().min(0).max(30000).describe("Milliseconds to wait (0..30000)"),
+});
+
+export const WaitForChangeStepSchema = z.object({
+  type: z.literal("wait_for_change"),
+  region: RegionSchema.optional().describe("Optional screen region to watch for visual change"),
+  timeoutMs: z.number().min(50).max(15000).optional().describe("Max time to wait in ms (default: 3000)"),
+  pollMs: z.number().min(20).max(1000).optional().describe("Polling interval in ms (default: 60)"),
+  threshold: z
+    .number()
+    .min(0.001)
+    .max(100)
+    .optional()
+    .describe("Minimum changed pixel percentage to trigger completion (default: 0.05)"),
+});
+
+export const WaitForSettledStepSchema = z.object({
+  type: z.literal("wait_for_settled"),
+  region: RegionSchema.optional().describe("Optional screen region to wait until animations stop"),
+  timeoutMs: z.number().min(50).max(15000).optional().describe("Max time to wait in ms (default: 3000)"),
+  quietMs: z.number().min(30).max(2000).optional().describe("Required visually quiet window in ms (default: 120)"),
+  pollMs: z.number().min(20).max(1000).optional().describe("Polling interval in ms (default: 80)"),
+  threshold: z
+    .number()
+    .min(0.001)
+    .max(100)
+    .optional()
+    .describe("Max changed pixel percentage treated as settled (default: 0.05)"),
 });
 
 export const ScreenshotStepSchema = z.object({
@@ -190,10 +258,14 @@ export const ActionStepSchema = z.discriminatedUnion("type", [
   DragStepSchema,
   ScrollStepSchema,
   TypeStepSchema,
+  PasteStepSchema,
   KeyStepSchema,
   KeyDownStepSchema,
   KeyUpStepSchema,
+  FocusWindowStepSchema,
   WaitStepSchema,
+  WaitForChangeStepSchema,
+  WaitForSettledStepSchema,
   ScreenshotStepSchema,
 ]);
 
@@ -206,6 +278,7 @@ export interface SeeOptions {
   gridStep?: number;
   showMouse?: boolean;
   maxWidth?: number;
+  trail?: TrailMarker[];
 }
 
 export interface SeeResult {
@@ -223,6 +296,9 @@ export interface SeeResult {
   };
   region: Region;
   mouse: Point;
+  pixelUnderMouse: string | null;
+  activeWindow: WindowInfo | null;
+  screenDiff: FrameDiff | null;
   gridStep: number | null;
   coordinateSpace: "screen";
   captureMs: number;
@@ -234,11 +310,13 @@ export interface ActOptions {
   actions: ActionStep[];
   stepDelayMs?: number;
   screenshotAfter?: boolean;
+  showTrail?: boolean;
   settleMs?: number;
   display?: number;
   maxWidth?: number;
   grid?: boolean;
   showMouse?: boolean;
+  failsafe?: boolean;
   signal?: AbortSignal;
 }
 
@@ -255,6 +333,7 @@ export interface ActResult {
   stepsCompleted: number;
   totalDurationMs: number;
   mouse: Point;
+  activeWindow?: WindowInfo | null;
   receipts: StepReceipt[];
   screenshots: SeeResult[];
 }
@@ -266,7 +345,7 @@ export interface PermissionState {
   mode: PermissionMode;
   expiresAt: string | null;
   updatedAt: string;
-  updatedBy: "default" | "cli" | "env" | "mcp" | "expired";
+  updatedBy: "default" | "cli" | "env" | "mcp" | "ui" | "expired";
 }
 
 export interface DoctorCheck {
@@ -291,5 +370,10 @@ export interface DesktopBackend {
   keyTap(key: string, modifiers?: Exclude<ModifierKey, "mod">[]): Promise<void>;
   typeText(text: string): Promise<void>;
   captureScreen(options?: { display?: number; region?: Region }): Promise<RawFrame>;
+  getActiveWindow?(): Promise<WindowInfo | null>;
+  listWindows?(): Promise<WindowInfo[]>;
+  focusWindow?(query: { title?: string; app?: string; id?: string | number }): Promise<boolean>;
+  getClipboardText?(): Promise<string>;
+  setClipboardText?(text: string): Promise<void>;
   doctor(): Promise<DoctorCheck[]>;
 }

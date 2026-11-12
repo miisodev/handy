@@ -109,4 +109,20 @@ describe("LinuxX11Backend (Real X11 binary wire protocol)", () => {
     expect(zoomed.region).toEqual({ x: 160, y: 100, width: 320, height: 100 });
     expect(zoomed.mouse).toEqual({ x: 260, y: 145 });
   });
+
+  it("inspects and focuses EWMH X11 desktop windows over pure wire protocol", async () => {
+    const windows = await controller.listWindows();
+    expect(windows).toHaveLength(2);
+    expect(windows[0]).toMatchObject({
+      title: "X11 Workbench",
+      app: "HandyWorkbench",
+      bounds: { x: 40, y: 40, width: 520, height: 420 },
+      focused: true,
+    });
+
+    const focusRes = await controller.focusWindow({ title: "Terminal" });
+    expect(focusRes.focused).toBe(true);
+    expect(focusRes.activeWindow?.title).toBe("X11 Terminal");
+    expect(x11Server.activeWindowId).toBe(0x00200002);
+  });
 });

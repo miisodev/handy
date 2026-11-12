@@ -3,8 +3,17 @@ import { createConnection, type Socket } from "node:net";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { parseKeyChord, toX11Keysym, X11_KEYSYMS, type ConcreteModifier } from "../keys.js";
-import type { DesktopBackend, DisplayInfo, DoctorCheck, MouseButton, Point, RawFrame, Region } from "../types.js";
-import { LinuxCliBackend } from "./linux-cli.js";
+import type {
+  DesktopBackend,
+  DisplayInfo,
+  DoctorCheck,
+  MouseButton,
+  Point,
+  RawFrame,
+  Region,
+  WindowInfo,
+} from "../types.js";
+import { LinuxCliBackend, readLinuxClipboard, writeLinuxClipboard } from "./linux-cli.js";
 
 function pad4(n: number): number {
   return (n + 3) & ~3;
@@ -164,6 +173,7 @@ export class LinuxX11Backend implements DesktopBackend {
     meta: 133,
   };
   private scratchKeycode = 254;
+  private atomCache = new Map<string, number>();
   private initialized = false;
 
   constructor(options: { display?: string } = {}) {
@@ -412,13 +422,27 @@ export class LinuxX11Backend implements DesktopBackend {
     this.socket.write(req);
   }
 
-  private sendRequestWithReply(req: Buffer): Promise<Buffer> {
+  private sendRequestWithReply(req: Buffer, timeoutMs = 4000): Promise<Buffer> {
     if (!this.socket || this.socket.destroyed) {
       return Promise.reject(new Error("X11 socket is not connected."));
     }
     const seq = this.nextSeq();
     return new Promise<Buffer>((resolve, reject) => {
-      this.pending.set(seq, { resolve, reject });
+      const timer = setTimeout(() => {
+        if (this.pending.delete(seq)) {
+          reject(new Error(`X11 request opcode=${req[0]} seq=${seq} timed out after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+      this.pending.set(seq, {
+        resolve: (pkt) => {
+          clearTimeout(timer);
+          resolve(pkt);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+      });
       this.socket!.write(req);
     });
   }
@@ -543,6 +567,7 @@ export class LinuxX11Backend implements DesktopBackend {
       this.socket = null;
     }
     this.pending.clear();
+    this.atomCache.clear();
   }
 
   private async ensureReady(): Promise<X11ScreenInfo> {
@@ -618,6 +643,271 @@ export class LinuxX11Backend implements DesktopBackend {
         primary: true,
       },
     ];
+  }
+
+  private async internAtom(name: string): Promise<number> {
+    const cached = this.atomCache.get(name);
+    if (cached !== undefined) return cached;
+    const nameBytes = Buffer.from(name, "ascii");
+    const padded = pad4(nameBytes.length);
+    const req = Buffer.alloc(8 + padded);
+    req[0] = 16; // InternAtom
+    req[1] = 0; // only-if-exists = false
+    req.writeUInt16LE((8 + padded) / 4, 2);
+    req.writeUInt16LE(nameBytes.length, 4);
+    nameBytes.copy(req, 8);
+    const reply = await this.sendRequestWithReply(req);
+    const atom = reply.readUInt32LE(8);
+    this.atomCache.set(name, atom);
+    return atom;
+  }
+
+  private async getProperty(window: number, propertyAtom: number): Promise<{ format: number; value: Buffer }> {
+    const req = Buffer.alloc(24);
+    req[0] = 20; // GetProperty
+    req[1] = 0; // delete = false
+    req.writeUInt16LE(6, 2);
+    req.writeUInt32LE(window >>> 0, 4);
+    req.writeUInt32LE(propertyAtom >>> 0, 8);
+    req.writeUInt32LE(0, 12); // AnyPropertyType
+    req.writeUInt32LE(0, 16); // long-offset
+    req.writeUInt32LE(1024, 20); // long-length
+    const reply = await this.sendRequestWithReply(req);
+    const format = reply[1]!;
+    if (format === 0) return { format: 0, value: Buffer.alloc(0) };
+    const valueLen = reply.readUInt32LE(16);
+    const byteCount = valueLen * (format / 8);
+    return {
+      format,
+      value: reply.subarray(32, Math.min(reply.length, 32 + byteCount)),
+    };
+  }
+
+  private async getActiveWindowId(root: number): Promise<number> {
+    try {
+      const netActive = await this.internAtom("_NET_ACTIVE_WINDOW");
+      const prop = await this.getProperty(root, netActive);
+      if (prop.format === 32 && prop.value.length >= 4) {
+        const id = prop.value.readUInt32LE(0);
+        if (id > 0 && id !== root) return id;
+      }
+    } catch {
+      // fall through
+    }
+    try {
+      const reply = await this.sendRequestWithReply(Buffer.from([43, 0, 1, 0])); // GetInputFocus
+      const focus = reply.readUInt32LE(8);
+      if (focus > 1 && focus !== root) return focus;
+    } catch {
+      // ignore
+    }
+    return 0;
+  }
+
+  private async inspectX11Window(
+    winId: number,
+    root: number,
+    activeId: number,
+    netWmNameAtom: number,
+    netWmPidAtom: number,
+  ): Promise<WindowInfo | null> {
+    try {
+      let title = "";
+      const utf8Name = await this.getProperty(winId, netWmNameAtom);
+      if (utf8Name.format === 8 && utf8Name.value.length > 0) {
+        title = utf8Name.value.toString("utf8").replace(/\0+$/g, "").trim();
+      }
+      if (!title) {
+        const wmName = await this.getProperty(winId, 39); // XA_WM_NAME
+        if (wmName.format === 8 && wmName.value.length > 0) {
+          title = wmName.value.toString("utf8").replace(/\0+$/g, "").trim();
+        }
+      }
+
+      let app: string | undefined;
+      const wmClass = await this.getProperty(winId, 67); // XA_WM_CLASS
+      if (wmClass.format === 8 && wmClass.value.length > 0) {
+        const parts = wmClass.value
+          .toString("utf8")
+          .split("\0")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        app = parts[1] ?? parts[0];
+      }
+
+      if (!title && !app) return null;
+
+      let pid: number | undefined;
+      const pidProp = await this.getProperty(winId, netWmPidAtom);
+      if (pidProp.format === 32 && pidProp.value.length >= 4) {
+        const p = pidProp.value.readUInt32LE(0);
+        if (p > 0) pid = p;
+      }
+
+      let bounds: Region | undefined;
+      try {
+        const geomReq = Buffer.alloc(8);
+        geomReq[0] = 14; // GetGeometry
+        geomReq.writeUInt16LE(2, 2);
+        geomReq.writeUInt32LE(winId >>> 0, 4);
+        const geomRep = await this.sendRequestWithReply(geomReq);
+        let wx = geomRep.readInt16LE(12);
+        let wy = geomRep.readInt16LE(14);
+        const ww = geomRep.readUInt16LE(16);
+        const wh = geomRep.readUInt16LE(18);
+
+        try {
+          const transReq = Buffer.alloc(16);
+          transReq[0] = 40; // TranslateCoordinates
+          transReq.writeUInt16LE(4, 2);
+          transReq.writeUInt32LE(winId >>> 0, 4);
+          transReq.writeUInt32LE(root >>> 0, 8);
+          const transRep = await this.sendRequestWithReply(transReq);
+          wx = transRep.readInt16LE(12);
+          wy = transRep.readInt16LE(14);
+        } catch {
+          // keep GetGeometry coords
+        }
+
+        if (ww > 0 && wh > 0) {
+          bounds = { x: wx, y: wy, width: ww, height: wh };
+        }
+      } catch {
+        // ignore geometry errors on transient windows
+      }
+
+      return {
+        id: winId,
+        title: title || app || `Window ${winId}`,
+        app,
+        pid,
+        bounds,
+        focused: winId === activeId,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async listWindows(): Promise<WindowInfo[]> {
+    const screen = await this.ensureReady();
+    const activeId = await this.getActiveWindowId(screen.root);
+    const netClientList = await this.internAtom("_NET_CLIENT_LIST");
+    const netWmName = await this.internAtom("_NET_WM_NAME");
+    const netWmPid = await this.internAtom("_NET_WM_PID");
+
+    const windowIds: number[] = [];
+    try {
+      const listProp = await this.getProperty(screen.root, netClientList);
+      if (listProp.format === 32 && listProp.value.length >= 4) {
+        for (let off = 0; off + 4 <= listProp.value.length; off += 4) {
+          const id = listProp.value.readUInt32LE(off);
+          if (id > 0) windowIds.push(id);
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    if (windowIds.length === 0) {
+      // Fallback for window-manager-less X servers (e.g. bare Xvfb): QueryTree on root
+      try {
+        const treeReq = Buffer.alloc(8);
+        treeReq[0] = 15; // QueryTree
+        treeReq.writeUInt16LE(2, 2);
+        treeReq.writeUInt32LE(screen.root, 4);
+        const treeRep = await this.sendRequestWithReply(treeReq);
+        const numChildren = treeRep.readUInt16LE(16);
+        for (let i = 0; i < numChildren && 32 + (i + 1) * 4 <= treeRep.length; i++) {
+          const cid = treeRep.readUInt32LE(32 + i * 4);
+          if (cid > 0) windowIds.push(cid);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (activeId > 0 && !windowIds.includes(activeId)) {
+      windowIds.unshift(activeId);
+    }
+
+    const windows: WindowInfo[] = [];
+    for (const id of windowIds) {
+      const info = await this.inspectX11Window(id, screen.root, activeId, netWmName, netWmPid);
+      if (info) windows.push(info);
+    }
+    return windows;
+  }
+
+  async getActiveWindow(): Promise<WindowInfo | null> {
+    const screen = await this.ensureReady();
+    const activeId = await this.getActiveWindowId(screen.root);
+    if (!activeId) return null;
+    const netWmName = await this.internAtom("_NET_WM_NAME");
+    const netWmPid = await this.internAtom("_NET_WM_PID");
+    return this.inspectX11Window(activeId, screen.root, activeId, netWmName, netWmPid);
+  }
+
+  async focusWindow(query: { title?: string; app?: string; id?: string | number }): Promise<boolean> {
+    const screen = await this.ensureReady();
+    const windows = await this.listWindows();
+    const titleNeedle = query.title?.toLowerCase();
+    const appNeedle = query.app?.toLowerCase();
+    const target = windows.find((w) => {
+      if (query.id !== undefined && String(w.id) === String(query.id)) return true;
+      if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
+      if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
+      return false;
+    });
+    if (!target) return false;
+
+    const winId = typeof target.id === "number" ? target.id : Number(target.id);
+    if (!Number.isFinite(winId) || winId <= 0) return false;
+
+    // 1. Send EWMH _NET_ACTIVE_WINDOW ClientMessage to root window
+    const netActive = await this.internAtom("_NET_ACTIVE_WINDOW");
+    const sendEv = Buffer.alloc(44);
+    sendEv[0] = 25; // SendEvent
+    sendEv[1] = 0; // propagate = false
+    sendEv.writeUInt16LE(11, 2); // 44 / 4 = 11 words
+    sendEv.writeUInt32LE(screen.root, 4);
+    sendEv.writeUInt32LE(0x00180000, 8); // SubstructureRedirectMask | SubstructureNotifyMask
+    sendEv[12] = 33; // ClientMessage
+    sendEv[13] = 32; // format = 32
+    sendEv.writeUInt32LE(winId >>> 0, 16);
+    sendEv.writeUInt32LE(netActive >>> 0, 20);
+    sendEv.writeUInt32LE(2, 24); // source = 2 (pager / user-automated)
+    sendEv.writeUInt32LE(0, 28); // CurrentTime
+    sendEv.writeUInt32LE(0, 32);
+    this.sendOneWay(sendEv);
+
+    // 2. Also raise & focus directly for bare X servers without an EWMH window manager
+    const raiseReq = Buffer.alloc(16);
+    raiseReq[0] = 12; // ConfigureWindow
+    raiseReq.writeUInt16LE(4, 2);
+    raiseReq.writeUInt32LE(winId >>> 0, 4);
+    raiseReq.writeUInt16LE(0x0040, 8); // StackMode
+    raiseReq.writeUInt32LE(0, 12); // Above = 0
+    this.sendOneWay(raiseReq);
+
+    const focusReq = Buffer.alloc(12);
+    focusReq[0] = 42; // SetInputFocus
+    focusReq[1] = 2; // RevertToParent
+    focusReq.writeUInt16LE(3, 2);
+    focusReq.writeUInt32LE(winId >>> 0, 4);
+    focusReq.writeUInt32LE(0, 8); // CurrentTime
+    this.sendOneWay(focusReq);
+
+    await this.sync();
+    return true;
+  }
+
+  async getClipboardText(): Promise<string> {
+    return readLinuxClipboard();
+  }
+
+  async setClipboardText(text: string): Promise<void> {
+    await writeLinuxClipboard(text);
   }
 
   async getMousePosition(): Promise<Point> {

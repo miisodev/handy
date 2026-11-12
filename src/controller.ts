@@ -1,3 +1,5 @@
+import { DarwinBackend } from "./backends/darwin.js";
+import { computeFrameDiff, samplePixelHex } from "./diff.js";
 import { parseKeyChord, resolveModifier } from "./keys.js";
 import { renderScreenOverlay } from "./overlay.js";
 import { PermissionStore } from "./permissions.js";
@@ -10,13 +12,16 @@ import type {
   DesktopBackend,
   DisplayInfo,
   DoctorCheck,
+  FrameDiff,
   MouseButton,
   Point,
+  RawFrame,
   SeeOptions,
   SeeResult,
   StepReceipt,
+  TrailMarker,
+  WindowInfo,
 } from "./types.js";
-import { DarwinBackend } from "./backends/darwin.js";
 
 function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
   if (ms <= 0) return Promise.resolve();
@@ -37,6 +42,10 @@ function sleepAbortable(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+function isTopLeftCorner(p: Point): boolean {
+  return p.x <= 2 && p.y <= 2;
+}
+
 export class HandyController {
   readonly backend: DesktopBackend;
   readonly permissions: PermissionStore;
@@ -45,6 +54,9 @@ export class HandyController {
   private readonly heldKeys = new Set<string>();
   private queueTail: Promise<unknown> = Promise.resolve();
   private queuedCount = 0;
+  private lastSeenFrame: RawFrame | null = null;
+  private lastObservedMouse: Point | null = null;
+  private lastCommandedTarget: Point | null = null;
   private static readonly MAX_QUEUED_CHAINS = 8;
 
   constructor(options: { backend: DesktopBackend; permissions?: PermissionStore }) {
@@ -90,6 +102,7 @@ export class HandyController {
     backend: string;
     displays?: DisplayInfo[];
     mouse?: Point;
+    activeWindow?: WindowInfo | null;
   }> {
     const perm = this.permissions.getState();
     const base = {
@@ -105,8 +118,12 @@ export class HandyController {
       return base;
     }
     try {
-      const [displays, mouse] = await Promise.all([this.backend.getDisplays(), this.backend.getMousePosition()]);
-      return { ...base, displays, mouse };
+      const [displays, mouse, activeWindow] = await Promise.all([
+        this.backend.getDisplays(),
+        this.backend.getMousePosition(),
+        this.backend.getActiveWindow ? this.backend.getActiveWindow().catch(() => null) : Promise.resolve(null),
+      ]);
+      return { ...base, displays, mouse, activeWindow };
     } catch {
       return base;
     }
@@ -126,14 +143,76 @@ export class HandyController {
     };
   }
 
-  async see(options: SeeOptions = {}): Promise<SeeResult> {
+  async listWindows(): Promise<WindowInfo[]> {
+    this.permissions.assertCanSee();
+    if (!this.backend.listWindows) return [];
+    return this.backend.listWindows();
+  }
+
+  async getActiveWindow(): Promise<WindowInfo | null> {
+    this.permissions.assertCanSee();
+    if (!this.backend.getActiveWindow) return null;
+    return this.backend.getActiveWindow();
+  }
+
+  async focusWindow(query: {
+    title?: string;
+    app?: string;
+    id?: string | number;
+  }): Promise<{ focused: boolean; activeWindow: WindowInfo | null }> {
+    this.permissions.assertCanControl();
+    if (!this.backend.focusWindow) {
+      throw new Error(`Window focusing is not supported by backend "${this.backend.name}".`);
+    }
+    const focused = await this.backend.focusWindow(query);
+    const activeWindow = this.backend.getActiveWindow ? await this.backend.getActiveWindow().catch(() => null) : null;
+    return { focused, activeWindow };
+  }
+
+  async readClipboard(): Promise<string> {
+    this.permissions.assertCanSee();
+    if (!this.backend.getClipboardText) {
+      throw new Error(`Clipboard read is not supported by backend "${this.backend.name}".`);
+    }
+    return this.backend.getClipboardText();
+  }
+
+  async writeClipboard(text: string): Promise<void> {
+    this.permissions.assertCanControl();
+    if (!this.backend.setClipboardText) {
+      throw new Error(`Clipboard write is not supported by backend "${this.backend.name}".`);
+    }
+    await this.backend.setClipboardText(text);
+  }
+
+  async see(options: SeeOptions & { trail?: TrailMarker[] } = {}): Promise<SeeResult> {
     this.permissions.assertCanSee();
     const t0 = performance.now();
 
-    const [frame, mouse] = await Promise.all([
+    const [frame, mouse, activeWindow] = await Promise.all([
       this.backend.captureScreen({ display: options.display, region: options.region }),
       this.backend.getMousePosition(),
+      this.backend.getActiveWindow ? this.backend.getActiveWindow().catch(() => null) : Promise.resolve(null),
     ]);
+
+    this.lastObservedMouse = { ...mouse };
+
+    // Sample pixel color directly under cursor from the raw unannotated frame
+    const pixelUnderMouse = samplePixelHex(frame, mouse);
+
+    // Compute fast RGBA visual diff against previous comparable frame
+    let screenDiff: FrameDiff | null = null;
+    if (
+      this.lastSeenFrame &&
+      this.lastSeenFrame.displayId === frame.displayId &&
+      this.lastSeenFrame.originX === frame.originX &&
+      this.lastSeenFrame.originY === frame.originY &&
+      this.lastSeenFrame.width === frame.width &&
+      this.lastSeenFrame.height === frame.height
+    ) {
+      screenDiff = computeFrameDiff(this.lastSeenFrame, frame);
+    }
+    this.lastSeenFrame = frame;
 
     const maxWidth = options.maxWidth ?? 1280;
     let outWidth = frame.width;
@@ -158,6 +237,7 @@ export class HandyController {
       grid: options.grid ?? true,
       gridStep: options.gridStep,
       showMouse: options.showMouse ?? true,
+      trail: options.trail,
     });
 
     const pngBuffer = encodePng(outWidth, outHeight, rgba, { compressionLevel: 3 });
@@ -183,6 +263,9 @@ export class HandyController {
         height: frame.logicalHeight,
       },
       mouse,
+      pixelUnderMouse,
+      activeWindow,
+      screenDiff,
       gridStep: overlayMeta.gridStep,
       coordinateSpace: "screen",
       captureMs,
@@ -218,6 +301,31 @@ export class HandyController {
     }
   }
 
+  private async checkFailsafe(enabled: boolean): Promise<void> {
+    const cur = await this.backend.getMousePosition();
+    if (
+      enabled &&
+      isTopLeftCorner(cur) &&
+      this.lastObservedMouse !== null &&
+      !isTopLeftCorner(this.lastObservedMouse) &&
+      (!this.lastCommandedTarget || !isTopLeftCorner(this.lastCommandedTarget))
+    ) {
+      this.lastObservedMouse = { ...cur };
+      throw new Error(
+        "Failsafe triggered: cursor was moved to the top-left corner (0,0). Action chain aborted immediately.",
+      );
+    }
+    this.lastObservedMouse = { ...cur };
+  }
+
+  private async commandMoveMouse(x: number, y: number): Promise<void> {
+    const rx = Math.round(x);
+    const ry = Math.round(y);
+    this.lastCommandedTarget = { x: rx, y: ry };
+    await this.backend.moveMouse(rx, ry);
+    this.lastObservedMouse = { x: rx, y: ry };
+  }
+
   private async resolvePoint(
     x: number,
     y: number,
@@ -245,18 +353,27 @@ export class HandyController {
     };
   }
 
-  private async interpolateMove(from: Point, to: Point, durationMs: number, steps?: number, signal?: AbortSignal): Promise<void> {
+  private async interpolateMove(
+    from: Point,
+    to: Point,
+    durationMs: number,
+    steps: number | undefined,
+    failsafe: boolean,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const count = steps ?? Math.max(2, Math.min(60, Math.round(durationMs / 10)));
     const interval = durationMs / count;
     for (let i = 1; i <= count; i++) {
       this.permissions.assertCanControl();
       if (signal?.aborted) throw new Error("Action chain aborted.");
+      if (i > 1 && i % 4 === 0) {
+        await this.checkFailsafe(failsafe);
+      }
       const t = i / count;
-      // Smooth ease-out quadratic curve
       const eased = 1 - (1 - t) * (1 - t);
       const nx = Math.round(from.x + (to.x - from.x) * eased);
       const ny = Math.round(from.y + (to.y - from.y) * eased);
-      await this.backend.moveMouse(nx, ny);
+      await this.commandMoveMouse(nx, ny);
       if (i < count && interval >= 1) {
         await sleepAbortable(interval, signal);
       }
@@ -307,19 +424,28 @@ export class HandyController {
 
     const chainStart = performance.now();
     const stepDelayMs = options.stepDelayMs ?? 15;
+    const failsafeEnabled = options.failsafe ?? true;
+    const showTrail = options.showTrail ?? true;
     const receipts: StepReceipt[] = [];
     const screenshots: SeeResult[] = [];
+    const trail: TrailMarker[] = [];
     let cachedDisplays: DisplayInfo[] | null = null;
 
     try {
+      await this.checkFailsafe(failsafeEnabled);
+
       for (let i = 0; i < options.actions.length; i++) {
         const step = options.actions[i]!;
         if (options.signal?.aborted) {
           throw new Error("Action chain aborted.");
         }
 
+        if (i > 0) {
+          await this.checkFailsafe(failsafeEnabled);
+        }
+
         // Check permission before EVERY step in the chain so `handy off` stops immediately mid-chain
-        if (step.type === "screenshot") {
+        if (step.type === "screenshot" || step.type === "wait_for_change" || step.type === "wait_for_settled") {
           this.permissions.assertCanSee();
         } else {
           this.permissions.assertCanControl();
@@ -342,9 +468,9 @@ export class HandyController {
 
             if (step.durationMs && step.durationMs > 0) {
               const startPos = await this.backend.getMousePosition();
-              await this.interpolateMove(startPos, target, step.durationMs, step.steps, options.signal);
+              await this.interpolateMove(startPos, target, step.durationMs, step.steps, failsafeEnabled, options.signal);
             } else {
-              await this.backend.moveMouse(target.x, target.y);
+              await this.commandMoveMouse(target.x, target.y);
             }
             detail = `moved to (${target.x},${target.y})`;
             break;
@@ -354,11 +480,15 @@ export class HandyController {
           case "double_click":
           case "triple_click":
           case "right_click": {
+            let clickPos: Point;
             if (step.x !== undefined && step.y !== undefined) {
               const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
               cachedDisplays = res.displays;
-              await this.backend.moveMouse(res.point.x, res.point.y);
+              clickPos = res.point;
+              await this.commandMoveMouse(clickPos.x, clickPos.y);
               await sleepAbortable(6, options.signal);
+            } else {
+              clickPos = await this.backend.getMousePosition();
             }
             const button: MouseButton =
               step.type === "right_click" ? "right" : "button" in step && step.button ? step.button : "left";
@@ -371,7 +501,13 @@ export class HandyController {
                     ? step.count
                     : 1;
             await this.performClick(button, count, step.modifiers, options.signal);
-            detail = `${button} click x${count}`;
+            trail.push({
+              stepNumber: i + 1,
+              kind: "click",
+              x: clickPos.x,
+              y: clickPos.y,
+            });
+            detail = `${button} click x${count} at (${clickPos.x},${clickPos.y})`;
             break;
           }
 
@@ -379,7 +515,7 @@ export class HandyController {
             if (step.x !== undefined && step.y !== undefined) {
               const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
               cachedDisplays = res.displays;
-              await this.backend.moveMouse(res.point.x, res.point.y);
+              await this.commandMoveMouse(res.point.x, res.point.y);
             }
             const btn = step.button ?? "left";
             await this.backend.mouseDown(btn);
@@ -392,7 +528,7 @@ export class HandyController {
             if (step.x !== undefined && step.y !== undefined) {
               const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
               cachedDisplays = res.displays;
-              await this.backend.moveMouse(res.point.x, res.point.y);
+              await this.commandMoveMouse(res.point.x, res.point.y);
             }
             const btn = step.button ?? "left";
             await this.backend.mouseUp(btn);
@@ -413,7 +549,7 @@ export class HandyController {
               );
               cachedDisplays = fromRes.displays;
               startPos = fromRes.point;
-              await this.backend.moveMouse(startPos.x, startPos.y);
+              await this.commandMoveMouse(startPos.x, startPos.y);
               await sleepAbortable(8, options.signal);
             } else {
               startPos = await this.backend.getMousePosition();
@@ -437,12 +573,27 @@ export class HandyController {
                 toRes.point,
                 step.durationMs ?? 160,
                 step.steps ?? 16,
+                failsafeEnabled,
                 options.signal,
               );
             } finally {
               await this.backend.mouseUp(btn);
               this.heldButtons.delete(btn);
             }
+            trail.push(
+              {
+                stepNumber: i + 1,
+                kind: "drag_start",
+                x: startPos.x,
+                y: startPos.y,
+              },
+              {
+                stepNumber: i + 1,
+                kind: "drag_end",
+                x: toRes.point.x,
+                y: toRes.point.y,
+              },
+            );
             detail = `dragged (${startPos.x},${startPos.y}) -> (${toRes.point.x},${toRes.point.y})`;
             break;
           }
@@ -451,7 +602,7 @@ export class HandyController {
             if (step.x !== undefined && step.y !== undefined) {
               const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
               cachedDisplays = res.displays;
-              await this.backend.moveMouse(res.point.x, res.point.y);
+              await this.commandMoveMouse(res.point.x, res.point.y);
             }
             const amount = step.amount ?? 3;
             let dx = step.deltaX ?? 0;
@@ -487,6 +638,49 @@ export class HandyController {
             break;
           }
 
+          case "paste": {
+            if (!this.backend.setClipboardText) {
+              // Graceful fallback to typeText if clipboard utility is unavailable
+              await this.backend.typeText(step.text);
+              if (step.submit) {
+                await sleepAbortable(10, options.signal);
+                await this.backend.keyTap("enter", []);
+              }
+              detail = `typed (clipboard fallback) ${Array.from(step.text).length} chars`;
+              break;
+            }
+
+            const shouldRestore = step.restoreClipboard ?? true;
+            let previousClip: string | null = null;
+            if (shouldRestore && this.backend.getClipboardText) {
+              try {
+                previousClip = await this.backend.getClipboardText();
+              } catch {
+                previousClip = null;
+              }
+            }
+
+            await this.backend.setClipboardText(step.text);
+            const pasteParsed = parseKeyChord("mod+v", [], this.backend.platform);
+            await this.backend.keyTap(pasteParsed.key, pasteParsed.modifiers);
+
+            if (previousClip !== null && this.backend.setClipboardText) {
+              await sleepAbortable(35, options.signal);
+              try {
+                await this.backend.setClipboardText(previousClip);
+              } catch {
+                // ignore restore error
+              }
+            }
+
+            if (step.submit) {
+              await sleepAbortable(10, options.signal);
+              await this.backend.keyTap("enter", []);
+            }
+            detail = `pasted ${Array.from(step.text).length} chars${step.submit ? " + Enter" : ""}`;
+            break;
+          }
+
           case "key": {
             const parsed = parseKeyChord(step.key, step.modifiers ?? [], this.backend.platform);
             const repeat = step.count ?? 1;
@@ -516,9 +710,104 @@ export class HandyController {
             break;
           }
 
+          case "focus_window": {
+            if (!this.backend.focusWindow) {
+              throw new Error(`Window focusing is not supported by backend "${this.backend.name}".`);
+            }
+            const ok = await this.backend.focusWindow({
+              title: step.title,
+              app: step.app,
+              id: step.id,
+            });
+            if (!ok) {
+              const targetDesc = step.title ?? step.app ?? String(step.id ?? "");
+              throw new Error(`Could not find or focus window matching "${targetDesc}".`);
+            }
+            await sleepAbortable(35, options.signal);
+            detail = `focused window (${step.title ?? step.app ?? step.id})`;
+            break;
+          }
+
           case "wait": {
             await sleepAbortable(step.ms, options.signal);
             detail = `waited ${step.ms}ms`;
+            break;
+          }
+
+          case "wait_for_change": {
+            const timeoutMs = step.timeoutMs ?? 3000;
+            const pollMs = step.pollMs ?? 60;
+            const threshold = step.threshold ?? 0.05;
+            const baseline = await this.backend.captureScreen({
+              display: options.display,
+              region: step.region,
+            });
+            const deadline = performance.now() + timeoutMs;
+            let maxObserved = 0;
+            let matchedDiff: FrameDiff | null = null;
+
+            while (performance.now() < deadline) {
+              await sleepAbortable(pollMs, options.signal);
+              await this.checkFailsafe(failsafeEnabled);
+              const next = await this.backend.captureScreen({
+                display: options.display,
+                region: step.region,
+              });
+              const diff = computeFrameDiff(baseline, next);
+              if (diff) {
+                if (diff.changedPercent > maxObserved) maxObserved = diff.changedPercent;
+                if (diff.changedPercent >= threshold) {
+                  matchedDiff = diff;
+                  break;
+                }
+              }
+            }
+
+            if (!matchedDiff) {
+              throw new Error(
+                `Timed out after ${timeoutMs}ms waiting for screen change >= ${threshold}% (max observed: ${maxObserved}%).`,
+              );
+            }
+            detail = `detected ${matchedDiff.changedPercent}% visual change`;
+            break;
+          }
+
+          case "wait_for_settled": {
+            const timeoutMs = step.timeoutMs ?? 3000;
+            const quietMs = step.quietMs ?? 120;
+            const pollMs = step.pollMs ?? 80;
+            const threshold = step.threshold ?? 0.1;
+
+            let prev = await this.backend.captureScreen({
+              display: options.display,
+              region: step.region,
+            });
+            const deadline = performance.now() + timeoutMs;
+            let quietSince = performance.now();
+            let settled = false;
+
+            while (performance.now() < deadline) {
+              await sleepAbortable(pollMs, options.signal);
+              await this.checkFailsafe(failsafeEnabled);
+              const curr = await this.backend.captureScreen({
+                display: options.display,
+                region: step.region,
+              });
+              const diff = computeFrameDiff(prev, curr);
+              prev = curr;
+              if (!diff || diff.changedPercent <= threshold) {
+                if (performance.now() - quietSince >= quietMs) {
+                  settled = true;
+                  break;
+                }
+              } else {
+                quietSince = performance.now();
+              }
+            }
+
+            detail = settled
+              ? `screen settled (${quietMs}ms quiet)`
+              : `timeout (${timeoutMs}ms) reached while waiting for settle`;
             break;
           }
 
@@ -529,6 +818,7 @@ export class HandyController {
               grid: step.grid ?? options.grid ?? true,
               showMouse: step.showMouse ?? options.showMouse ?? true,
               maxWidth: step.maxWidth ?? options.maxWidth,
+              trail: showTrail && trail.length > 0 ? trail : undefined,
             });
             if (step.label) shot.label = step.label;
             screenshots.push(shot);
@@ -545,8 +835,14 @@ export class HandyController {
           detail,
         });
 
-        // Brief settle between chained UI actions so window/input focus updates before keystrokes
-        if (i < options.actions.length - 1 && stepDelayMs > 0 && step.type !== "wait" && step.type !== "screenshot") {
+        if (
+          i < options.actions.length - 1 &&
+          stepDelayMs > 0 &&
+          step.type !== "wait" &&
+          step.type !== "wait_for_change" &&
+          step.type !== "wait_for_settled" &&
+          step.type !== "screenshot"
+        ) {
           await sleepAbortable(stepDelayMs, options.signal);
         }
       }
@@ -561,12 +857,17 @@ export class HandyController {
           grid: options.grid ?? true,
           showMouse: options.showMouse ?? true,
           maxWidth: options.maxWidth,
+          trail: showTrail && trail.length > 0 ? trail : undefined,
         });
         postShot.label = "after";
         screenshots.push(postShot);
       }
 
-      const finalMouse = await this.backend.getMousePosition();
+      const [finalMouse, activeWindow] = await Promise.all([
+        this.backend.getMousePosition(),
+        this.backend.getActiveWindow ? this.backend.getActiveWindow().catch(() => null) : Promise.resolve(null),
+      ]);
+      this.lastObservedMouse = { ...finalMouse };
       const totalDurationMs = Math.round((performance.now() - chainStart) * 10) / 10;
 
       return {
@@ -574,11 +875,11 @@ export class HandyController {
         stepsCompleted: receipts.length,
         totalDurationMs,
         mouse: finalMouse,
+        activeWindow,
         receipts,
         screenshots,
       };
     } catch (err) {
-      // Never leave modifier keys or mouse buttons stuck down if a chain aborts or fails
       await this.releaseHeldInputs();
       throw err;
     }
@@ -587,8 +888,8 @@ export class HandyController {
 
 /**
  * Parses a human/CLI chain expression like:
- *   `move 420 260 -> click -> type "Sam" -> key Enter`
- * OR JSON array `[{"type":"move","x":420,"y":260}, ...]` into validated ActionStep[].
+ *   `focus "Scratchpad" -> click 800 420 -> paste "Hello 🌍" -> key Enter`
+ * OR JSON array `[{"type":"move","x":420,"y":260}, ...]` into ActionStep[].
  */
 export function parseChainInput(input: string): ActionStep[] {
   const trimmed = input.trim();
@@ -606,7 +907,6 @@ export function parseChainInput(input: string): ActionStep[] {
     return [JSON.parse(trimmed) as ActionStep];
   }
 
-  // Split by `->` or `;` outside quotes
   const segments: string[] = [];
   let current = "";
   let quote: '"' | "'" | null = null;
@@ -749,7 +1049,6 @@ export function parseChainInput(input: string): ActionStep[] {
         throw new Error(`Invalid scroll step "${seg}". Expected: scroll <up|down|left|right> [amount]`);
       }
       case "type": {
-        // Preserve raw text after `type ` if unquoted, or use parsed token if quoted
         const rawAfterCmd = seg.replace(/^type\s+/i, "");
         const text =
           (rawAfterCmd.startsWith('"') && rawAfterCmd.endsWith('"')) ||
@@ -758,10 +1057,25 @@ export function parseChainInput(input: string): ActionStep[] {
             : rawAfterCmd;
         return { type: "type", text };
       }
+      case "paste": {
+        const rawAfterCmd = seg.replace(/^paste\s+/i, "");
+        const text =
+          (rawAfterCmd.startsWith('"') && rawAfterCmd.endsWith('"')) ||
+          (rawAfterCmd.startsWith("'") && rawAfterCmd.endsWith("'"))
+            ? (tokens[1] ?? "")
+            : rawAfterCmd;
+        return { type: "paste", text };
+      }
       case "key":
       case "press": {
         if (!tokens[1]) throw new Error(`Invalid key step "${seg}". Expected: key <KeyOrChord>`);
         return { type: "key", key: tokens[1] };
+      }
+      case "focus":
+      case "focus_window": {
+        const title = tokens.slice(1).join(" ").trim();
+        if (!title) throw new Error(`Invalid focus_window step "${seg}". Expected: focus <WindowTitle>`);
+        return { type: "focus_window", title };
       }
       case "wait":
       case "sleep": {
@@ -769,12 +1083,21 @@ export function parseChainInput(input: string): ActionStep[] {
         if (Number.isNaN(ms) || ms < 0) throw new Error(`Invalid wait step "${seg}". Expected: wait <ms>`);
         return { type: "wait", ms };
       }
+      case "wait_for_change": {
+        const timeoutMs = tokens[1] ? Number(tokens[1]) : undefined;
+        return { type: "wait_for_change", timeoutMs };
+      }
+      case "wait_for_settled": {
+        const timeoutMs = tokens[1] ? Number(tokens[1]) : undefined;
+        const quietMs = tokens[2] ? Number(tokens[2]) : undefined;
+        return { type: "wait_for_settled", timeoutMs, quietMs };
+      }
       case "screenshot":
       case "see":
         return { type: "screenshot" };
       default:
         throw new Error(
-          `Unknown step "${cmd}" in "${seg}". Supported steps: move, click, double_click, triple_click, right_click, drag, scroll, type, key, wait, screenshot.`,
+          `Unknown step "${cmd}" in "${seg}". Supported steps: move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, screenshot.`,
         );
     }
   });

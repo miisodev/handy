@@ -1,6 +1,15 @@
 import { parseKeyChord, toWin32Vk, WIN32_VK_CODES, type ConcreteModifier } from "../keys.js";
 import { decodePng } from "../png.js";
-import type { DesktopBackend, DisplayInfo, DoctorCheck, MouseButton, Point, RawFrame, Region } from "../types.js";
+import type {
+  DesktopBackend,
+  DisplayInfo,
+  DoctorCheck,
+  MouseButton,
+  Point,
+  RawFrame,
+  Region,
+  WindowInfo,
+} from "../types.js";
 import { JsonlWorker, type JsonlWorkerOptions } from "./jsonl-worker.js";
 
 /**
@@ -17,13 +26,19 @@ Add-Type -AssemblyName System.Drawing
 
 $csharp = @"
 using System;
+using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 public static class HandyWin32 {
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
     [DllImport("user32.dll")]
     private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiFlag);
 
@@ -39,10 +54,75 @@ public static class HandyWin32 {
     [DllImport("user32.dll", SetLastError = true)]
     public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
 
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool OpenClipboard(IntPtr hWndNewOwner);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool CloseClipboard();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EmptyClipboard();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetClipboardData(uint uFormat);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GlobalAlloc(uint uFlags, UIntPtr dwBytes);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GlobalLock(IntPtr hMem);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GlobalUnlock(IntPtr hMem);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GlobalFree(IntPtr hMem);
+
     [StructLayout(LayoutKind.Sequential)]
     public struct POINT {
         public int X;
         public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -84,6 +164,18 @@ public static class HandyWin32 {
         public ushort wParamH;
     }
 
+    public class WinItem {
+        public long id;
+        public string title;
+        public string app;
+        public int pid;
+        public int x;
+        public int y;
+        public int width;
+        public int height;
+        public bool focused;
+    }
+
     public const uint INPUT_MOUSE = 0;
     public const uint INPUT_KEYBOARD = 1;
 
@@ -101,6 +193,9 @@ public static class HandyWin32 {
 
     public const uint KEYEVENTF_KEYUP = 0x0002;
     public const uint KEYEVENTF_UNICODE = 0x0004;
+
+    private const uint CF_UNICODETEXT = 13;
+    private const uint GMEM_MOVEABLE = 0x0002;
 
     public static void InitDpi() {
         try {
@@ -186,6 +281,109 @@ public static class HandyWin32 {
             }
         }
     }
+
+    public static WinItem[] ListVisibleWindows() {
+        IntPtr fg = GetForegroundWindow();
+        List<WinItem> results = new List<WinItem>();
+        EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+            if (!IsWindowVisible(hWnd)) return true;
+            int len = GetWindowTextLength(hWnd);
+            if (len <= 0) return true;
+            StringBuilder sb = new StringBuilder(len + 1);
+            GetWindowText(hWnd, sb, sb.Capacity);
+            string title = sb.ToString().Trim();
+            if (title.Length == 0) return true;
+            RECT r;
+            if (!GetWindowRect(hWnd, out r)) return true;
+            int w = r.Right - r.Left;
+            int h = r.Bottom - r.Top;
+            if (w <= 0 || h <= 0) return true;
+            uint pid = 0;
+            GetWindowThreadProcessId(hWnd, out pid);
+            string appName = "";
+            if (pid > 0) {
+                try { appName = Process.GetProcessById((int)pid).ProcessName; } catch { }
+            }
+            WinItem item = new WinItem();
+            item.id = hWnd.ToInt64();
+            item.title = title;
+            item.app = appName;
+            item.pid = (int)pid;
+            item.x = r.Left;
+            item.y = r.Top;
+            item.width = w;
+            item.height = h;
+            item.focused = (hWnd == fg);
+            results.Add(item);
+            return true;
+        }, IntPtr.Zero);
+        return results.ToArray();
+    }
+
+    public static bool FocusWindowById(long hwndVal) {
+        IntPtr hWnd = new IntPtr(hwndVal);
+        if (IsIconic(hWnd)) {
+            ShowWindow(hWnd, 9);
+        }
+        return SetForegroundWindow(hWnd);
+    }
+
+    private static bool TryOpenClipboard() {
+        for (int i = 0; i < 6; i++) {
+            if (OpenClipboard(IntPtr.Zero)) return true;
+            Thread.Sleep(15);
+        }
+        return false;
+    }
+
+    public static string ReadClipboardUnicode() {
+        if (!TryOpenClipboard()) return "";
+        try {
+            IntPtr hData = GetClipboardData(CF_UNICODETEXT);
+            if (hData == IntPtr.Zero) return "";
+            IntPtr ptr = GlobalLock(hData);
+            if (ptr == IntPtr.Zero) return "";
+            try {
+                return Marshal.PtrToStringUni(ptr) ?? "";
+            } finally {
+                GlobalUnlock(hData);
+            }
+        } finally {
+            CloseClipboard();
+        }
+    }
+
+    public static void WriteClipboardUnicode(string text) {
+        string safe = text ?? "";
+        if (!TryOpenClipboard()) {
+            throw new InvalidOperationException("Unable to open Win32 clipboard.");
+        }
+        try {
+            EmptyClipboard();
+            int byteLen = (safe.Length + 1) * 2;
+            IntPtr hGlobal = GlobalAlloc(GMEM_MOVEABLE, new UIntPtr((uint)byteLen));
+            if (hGlobal == IntPtr.Zero) {
+                throw new InvalidOperationException("GlobalAlloc failed for clipboard.");
+            }
+            IntPtr target = GlobalLock(hGlobal);
+            if (target == IntPtr.Zero) {
+                GlobalFree(hGlobal);
+                throw new InvalidOperationException("GlobalLock failed for clipboard.");
+            }
+            try {
+                Marshal.Copy(safe.ToCharArray(), 0, target, safe.Length);
+                Marshal.WriteInt16(target, safe.Length * 2, 0);
+            } finally {
+                GlobalUnlock(hGlobal);
+            }
+            if (SetClipboardData(CF_UNICODETEXT, hGlobal) == IntPtr.Zero) {
+                GlobalFree(hGlobal);
+                throw new InvalidOperationException("SetClipboardData failed.");
+            }
+        } finally {
+            CloseClipboard();
+        }
+    }
 }
 "@
 
@@ -222,6 +420,43 @@ while (($line = [Console]::In.ReadLine()) -ne $null) {
                 }
             }
             $resp = @{ id = $id; ok = $true; displays = $list } | ConvertTo-Json -Compress -Depth 4
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "windows") {
+            $items = [HandyWin32]::ListVisibleWindows()
+            $list = @()
+            for ($i = 0; $i -lt $items.Length; $i++) {
+                $w = $items[$i]
+                $list += @{
+                    id = [int64]$w.id
+                    title = [string]$w.title
+                    app = [string]$w.app
+                    pid = [int]$w.pid
+                    bounds = @{
+                        x = [int]$w.x
+                        y = [int]$w.y
+                        width = [int]$w.width
+                        height = [int]$w.height
+                    }
+                    focused = [bool]$w.focused
+                }
+            }
+            $resp = @{ id = $id; ok = $true; windows = $list } | ConvertTo-Json -Compress -Depth 5
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "focus_window") {
+            $okFocus = [HandyWin32]::FocusWindowById([int64]$cmd.hwnd)
+            $resp = @{ id = $id; ok = $true; focused = [bool]$okFocus } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "clipboard_get") {
+            $txt = [HandyWin32]::ReadClipboardUnicode()
+            $resp = @{ id = $id; ok = $true; text = [string]$txt } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "clipboard_set") {
+            [HandyWin32]::WriteClipboardUnicode([string]$cmd.text)
+            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
             [Console]::Out.WriteLine($resp)
         }
         elseif ($op -eq "mouse_pos") {
@@ -320,6 +555,46 @@ export class Win32Backend implements DesktopBackend {
     ];
   }
 
+  async listWindows(): Promise<WindowInfo[]> {
+    const res = await this.worker.request({ op: "windows" });
+    const raw = res.windows;
+    const list = Array.isArray(raw) ? (raw as WindowInfo[]) : raw ? [raw as WindowInfo] : [];
+    return list.map((w) => ({
+      ...w,
+      app: w.app || undefined,
+      pid: w.pid || undefined,
+    }));
+  }
+
+  async getActiveWindow(): Promise<WindowInfo | null> {
+    const wins = await this.listWindows();
+    return wins.find((w) => w.focused) ?? wins[0] ?? null;
+  }
+
+  async focusWindow(query: { title?: string; app?: string; id?: string | number }): Promise<boolean> {
+    const wins = await this.listWindows();
+    const titleNeedle = query.title?.toLowerCase();
+    const appNeedle = query.app?.toLowerCase();
+    const match = wins.find((w) => {
+      if (query.id !== undefined && String(w.id) === String(query.id)) return true;
+      if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
+      if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
+      return false;
+    });
+    if (!match) return false;
+    const res = await this.worker.request({ op: "focus_window", hwnd: Number(match.id) });
+    return Boolean(res.focused);
+  }
+
+  async getClipboardText(): Promise<string> {
+    const res = await this.worker.request({ op: "clipboard_get" });
+    return typeof res.text === "string" ? res.text : "";
+  }
+
+  async setClipboardText(text: string): Promise<void> {
+    await this.worker.request({ op: "clipboard_set", text });
+  }
+
   async getMousePosition(): Promise<Point> {
     const res = await this.worker.request({ op: "mouse_pos" });
     return { x: Number(res.x ?? 0), y: Number(res.y ?? 0) };
@@ -393,7 +668,6 @@ export class Win32Backend implements DesktopBackend {
   }
 
   async typeText(text: string): Promise<void> {
-    // Split on newlines/tabs so Enter/Tab fire true virtual-key events while text uses SendInput KEYEVENTF_UNICODE
     let chunk = "";
     const flush = async () => {
       if (chunk.length > 0) {

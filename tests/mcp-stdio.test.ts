@@ -28,7 +28,7 @@ describe("Stdio MCP Server (Real Child Process End-to-End)", () => {
       stderr: "pipe",
     });
 
-    client = new Client({ name: "handy-test-client", version: "1.0.0" }, { capabilities: {} });
+    client = new Client({ name: "handy-test-client", version: "1.1.0" }, { capabilities: {} });
     await client.connect(transport);
   });
 
@@ -37,20 +37,31 @@ describe("Stdio MCP Server (Real Child Process End-to-End)", () => {
     rmSync(configDir, { recursive: true, force: true });
   });
 
-  it("advertises tools, resources, and prompts and executes chained controls + live screen vision", async () => {
+  it("advertises all 6 tools, 3 resources, and prompts and executes chained controls + window/clipboard tools", async () => {
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
-    expect(names).toEqual(["handy_act", "handy_permission", "handy_see", "handy_status"]);
+    expect(names).toEqual([
+      "handy_act",
+      "handy_clipboard",
+      "handy_permission",
+      "handy_see",
+      "handy_status",
+      "handy_windows",
+    ]);
 
     const { resources } = await client.listResources();
-    expect(resources.map((r) => r.uri).sort()).toEqual(["handy://screen/current", "handy://status"]);
+    expect(resources.map((r) => r.uri).sort()).toEqual([
+      "handy://screen/current",
+      "handy://status",
+      "handy://windows",
+    ]);
 
     const { prompts } = await client.listPrompts();
     expect(prompts.map((p) => p.name)).toContain("computer-control");
     const promptRes = await client.getPrompt({ name: "computer-control", arguments: { goal: "Type Sam" } });
     expect(promptRes.messages[0]?.content).toMatchObject({ type: "text" });
 
-    // 1. Inspect initial screen via handy_see
+    // 1. Inspect initial screen via handy_see (includes pixelUnderMouse & activeWindow)
     const seeRes = await client.callTool({ name: "handy_see", arguments: {} });
     expect(seeRes.isError).toBeFalsy();
     const seeContent = seeRes.content as Array<{ type: string; data?: string; text?: string }>;
@@ -60,18 +71,35 @@ describe("Stdio MCP Server (Real Child Process End-to-End)", () => {
     const decoded = decodePng(Buffer.from(imgBlock!.data!, "base64"));
     expect(decoded.width).toBe(1280);
     expect(decoded.height).toBe(800);
-    const meta = JSON.parse(txtBlock!.text!) as { mouse: { x: number; y: number }; coordinateSpace: string };
+    const meta = JSON.parse(txtBlock!.text!) as {
+      mouse: { x: number; y: number };
+      pixelUnderMouse: string;
+      activeWindow: { title: string };
+      coordinateSpace: string;
+    };
     expect(meta.coordinateSpace).toBe("screen");
     expect(meta.mouse).toEqual({ x: 640, y: 400 });
+    expect(meta.pixelUnderMouse).toMatch(/^#[0-9a-f]{6}$/);
+    expect(meta.activeWindow.title).toBe("Agent Control Workbench");
 
-    // 2. Execute chained control: move -> click -> type "Sam" -> click Submit + screenshotAfter
+    // 2. Clipboard write + read via handy_clipboard
+    await client.callTool({ name: "handy_clipboard", arguments: { action: "write", text: "PriorClipboard" } });
+    const clipRead = await client.callTool({ name: "handy_clipboard", arguments: { action: "read" } });
+    expect(JSON.parse((clipRead.content as Array<{ text: string }>)[0]!.text).text).toBe("PriorClipboard");
+
+    // 3. List & focus desktop windows via handy_windows
+    const winList = await client.callTool({ name: "handy_windows", arguments: { action: "list" } });
+    const winListJson = JSON.parse((winList.content as Array<{ text: string }>)[0]!.text) as { count: number };
+    expect(winListJson.count).toBe(2);
+
+    // 4. Execute chained control: move -> click -> paste "Sam" -> click Submit + screenshotAfter
     const actRes = await client.callTool({
       name: "handy_act",
       arguments: {
         actions: [
           { type: "move", x: 250, y: 172 },
           { type: "click" },
-          { type: "type", text: "Sam" },
+          { type: "paste", text: "Sam" },
           { type: "click", x: 195, y: 325 },
         ],
         stepDelayMs: 5,
@@ -85,12 +113,15 @@ describe("Stdio MCP Server (Real Child Process End-to-End)", () => {
     expect(receipt.stepsCompleted).toBe(4);
     expect(receipt.mouse).toEqual({ x: 195, y: 325 });
     expect(actContent.some((c) => c.type === "image")).toBe(true);
+
+    // Verify paste restored user's previous clipboard!
+    const clipAfter = await client.callTool({ name: "handy_clipboard", arguments: { action: "read" } });
+    expect(JSON.parse((clipAfter.content as Array<{ text: string }>)[0]!.text).text).toBe("PriorClipboard");
   });
 
   it("enforces live on/off permission toggle across processes without restarting MCP server", async () => {
     const externalStore = new PermissionStore({ configDir });
 
-    // User flips Handy OFF externally (`handy off`)
     externalStore.setEnabled(false, { updatedBy: "cli" });
 
     const deniedSee = await client.callTool({ name: "handy_see", arguments: {} });
@@ -103,42 +134,35 @@ describe("Stdio MCP Server (Real Child Process End-to-End)", () => {
     });
     expect(deniedAct.isError).toBe(true);
 
-    // MCP cannot self-enable after user turned it OFF
     const attemptEnable = await client.callTool({
       name: "handy_permission",
       arguments: { action: "on" },
     });
     expect(attemptEnable.isError).toBe(true);
 
-    // Status still works cleanly and reports enabled: false
     const statusRes = await client.callTool({ name: "handy_status", arguments: {} });
     expect(statusRes.isError).toBeFalsy();
     const statusJson = JSON.parse((statusRes.content as Array<{ text: string }>)[0]!.text);
     expect(statusJson.enabled).toBe(false);
 
-    // User flips Handy back ON externally (`handy on`) -> works immediately!
     externalStore.setEnabled(true, { updatedBy: "cli" });
     const allowedSee = await client.callTool({ name: "handy_see", arguments: { maxWidth: 640 } });
     expect(allowedSee.isError).toBeFalsy();
 
-    // Agent CAN safely turn Handy OFF via handy_permission({ action: "off" })
     const agentOff = await client.callTool({ name: "handy_permission", arguments: { action: "off" } });
     expect(agentOff.isError).toBeFalsy();
     expect(externalStore.getState().enabled).toBe(false);
 
-    // Resource read of live screen while OFF must also be denied (MCP-11)
     await expect(client.readResource({ uri: "handy://screen/current" })).rejects.toThrow();
   });
 
   it("handles invalid tool schemas, unknown tools, and concurrent requests cleanly (MCP-03, MCP-07)", async () => {
-    // Empty actions array violates min(1) schema
     const invalidRes = await client.callTool({
       name: "handy_act",
       arguments: { actions: [] },
     });
     expect(invalidRes.isError).toBe(true);
 
-    // Concurrent calls serialize safely without corrupting responses
     const [r1, r2, r3] = await Promise.all([
       client.callTool({ name: "handy_status", arguments: {} }),
       client.callTool({ name: "handy_act", arguments: { actions: [{ type: "move", x: 300, y: 200 }] } }),
@@ -170,7 +194,7 @@ describe("Stdio MCP Server (Real Child Process End-to-End)", () => {
         params: {
           protocolVersion: "2024-11-05",
           capabilities: {},
-          clientInfo: { name: "eof-probe", version: "1.0.0" },
+          clientInfo: { name: "eof-probe", version: "1.1.0" },
         },
       });
       proc.stdin.write(`${initMsg}\n`);
@@ -183,13 +207,11 @@ describe("Stdio MCP Server (Real Child Process End-to-End)", () => {
         check();
       });
 
-      // Every non-empty line on stdout must parse as valid JSON-RPC 2.0
       for (const line of stdoutData.trim().split("\n")) {
         const parsed = JSON.parse(line) as { jsonrpc: string };
         expect(parsed.jsonrpc).toBe("2.0");
       }
 
-      // Close stdin -> process must exit cleanly with code 0
       const exitCode = await new Promise<number | null>((resolveExit) => {
         proc.once("close", (code) => resolveExit(code));
         proc.stdin.end();

@@ -7,7 +7,7 @@ import {
   measureText,
   type RgbaColor,
 } from "./font.js";
-import type { Point } from "./types.js";
+import type { Point, TrailMarker } from "./types.js";
 
 const NICE_STEPS = [25, 50, 100, 200, 250, 400, 500, 1000] as const;
 
@@ -38,6 +38,8 @@ export interface OverlayOptions {
   gridStep?: number;
   /** Draw live mouse reticle & coordinate badge */
   showMouse?: boolean;
+  /** Optional chain action trail markers (clicks / drags) to render on post-action screenshots */
+  trail?: TrailMarker[];
 }
 
 export function renderScreenOverlay(
@@ -64,9 +66,11 @@ export function renderScreenOverlay(
     resolvedStep = majorStep;
     const minorStep = majorStep >= 50 ? Math.round(majorStep / 2) : 0;
 
-    const majorColor: RgbaColor = [14, 165, 233, 78]; // Sky-500 semi-transparent
-    const minorColor: RgbaColor = [148, 163, 184, 36]; // Slate-400 subtle
-    const tickColor: RgbaColor = [56, 189, 248, 220];
+    // Dual-contrast lines: subtle dark backing + sky highlight so grid stays legible on both #000 and #fff UIs
+    const majorColor: RgbaColor = [14, 165, 233, 88];
+    const majorShadow: RgbaColor = [15, 23, 42, 34];
+    const minorColor: RgbaColor = [148, 163, 184, 40];
+    const tickColor: RgbaColor = [56, 189, 248, 225];
 
     const startX = Math.ceil(options.originX / (minorStep || majorStep)) * (minorStep || majorStep);
     const endX = options.originX + options.logicalWidth;
@@ -83,6 +87,9 @@ export function renderScreenOverlay(
       for (let py = 0; py < imageHeight; py++) {
         if (isMajor || (py & 3) < 2) {
           blendPixel(rgba, imageWidth, imageHeight, ix, py, col);
+          if (isMajor && ix + 1 < imageWidth) {
+            blendPixel(rgba, imageWidth, imageHeight, ix + 1, py, majorShadow);
+          }
         }
       }
     }
@@ -97,13 +104,16 @@ export function renderScreenOverlay(
       for (let px = 0; px < imageWidth; px++) {
         if (isMajor || (px & 3) < 2) {
           blendPixel(rgba, imageWidth, imageHeight, px, iy, col);
+          if (isMajor && iy + 1 < imageHeight) {
+            blendPixel(rgba, imageWidth, imageHeight, px, iy + 1, majorShadow);
+          }
         }
       }
     }
 
     // Top & Left thin ruler strips for high legibility over both light and dark apps
-    fillRect(rgba, imageWidth, imageHeight, 0, 0, imageWidth, 15, [15, 23, 42, 175]);
-    fillRect(rgba, imageWidth, imageHeight, 0, 15, 34, imageHeight - 15, [15, 23, 42, 155]);
+    fillRect(rgba, imageWidth, imageHeight, 0, 0, imageWidth, 15, [15, 23, 42, 185]);
+    fillRect(rgba, imageWidth, imageHeight, 0, 15, 34, imageHeight - 15, [15, 23, 42, 165]);
 
     // Interior subtle coordinate pills at every second major intersection so LLM can read local (x,y) directly
     const majorStartX = Math.ceil(options.originX / majorStep) * majorStep;
@@ -119,12 +129,11 @@ export function renderScreenOverlay(
         colIdx++;
         if (ix < 52 || ix > imageWidth - 64) continue;
         if ((rowIdx + colIdx) % 2 === 0) {
-          // Small cross marker + subtle coordinate pill
-          drawLine(rgba, imageWidth, imageHeight, ix - 3, iy, ix + 3, iy, [56, 189, 248, 170]);
-          drawLine(rgba, imageWidth, imageHeight, ix, iy - 3, ix, iy + 3, [56, 189, 248, 170]);
+          drawLine(rgba, imageWidth, imageHeight, ix - 3, iy, ix + 3, iy, [56, 189, 248, 175]);
+          drawLine(rgba, imageWidth, imageHeight, ix, iy - 3, ix, iy + 3, [56, 189, 248, 175]);
           drawBadge(rgba, imageWidth, imageHeight, ix + 3, iy + 3, `${sx},${sy}`, {
-            bg: [15, 23, 42, 145],
-            fg: [186, 230, 253, 225],
+            bg: [15, 23, 42, 155],
+            fg: [186, 230, 253, 230],
             padX: 2,
             padY: 1,
           });
@@ -140,7 +149,7 @@ export function renderScreenOverlay(
       const label = String(sx);
       const m = measureText(label, 1);
       drawBadge(rgba, imageWidth, imageHeight, Math.max(36, ix - Math.floor(m.width / 2) - 2), 2, label, {
-        bg: [15, 23, 42, 215],
+        bg: [15, 23, 42, 220],
         fg: [125, 211, 252, 255],
         padX: 2,
         padY: 2,
@@ -153,7 +162,7 @@ export function renderScreenOverlay(
       if (iy < 20 || iy > imageHeight - 12) continue;
       drawLine(rgba, imageWidth, imageHeight, 0, iy, 12, iy, tickColor);
       drawBadge(rgba, imageWidth, imageHeight, 2, Math.max(16, iy - 5), String(sy), {
-        bg: [15, 23, 42, 215],
+        bg: [15, 23, 42, 220],
         fg: [125, 211, 252, 255],
         padX: 2,
         padY: 2,
@@ -162,11 +171,49 @@ export function renderScreenOverlay(
 
     // Origin badge in top-left corner
     drawBadge(rgba, imageWidth, imageHeight, 2, 2, `${options.originX},${options.originY}`, {
-      bg: [2, 132, 199, 235],
+      bg: [2, 132, 199, 240],
       fg: [255, 255, 255, 255],
       padX: 3,
       padY: 2,
     });
+  }
+
+  // Render optional chained-action trail markers (amber rings + step numbers)
+  if (options.trail && options.trail.length > 0) {
+    const amberRing: RgbaColor = [245, 158, 11, 235];
+    const amberHalo: RgbaColor = [255, 255, 255, 210];
+
+    for (let i = 0; i < options.trail.length; i++) {
+      const m = options.trail[i]!;
+      if (
+        m.x < options.originX ||
+        m.x > options.originX + options.logicalWidth ||
+        m.y < options.originY ||
+        m.y > options.originY + options.logicalHeight
+      ) {
+        continue;
+      }
+      const mx = Math.max(0, Math.min(imageWidth - 1, toImgX(m.x)));
+      const my = Math.max(0, Math.min(imageHeight - 1, toImgY(m.y)));
+
+      // Connect drag_start -> drag_end with a line
+      if (m.kind === "drag_end" && i > 0 && options.trail[i - 1]?.kind === "drag_start") {
+        const prev = options.trail[i - 1]!;
+        drawLine(rgba, imageWidth, imageHeight, toImgX(prev.x), toImgY(prev.y), mx, my, [245, 158, 11, 185]);
+      }
+
+      drawCircleRing(rgba, imageWidth, imageHeight, mx, my, 7, 2.5, amberHalo);
+      drawCircleRing(rgba, imageWidth, imageHeight, mx, my, 7, 1.5, amberRing);
+      const bx = Math.min(imageWidth - 22, Math.max(4, mx + 8));
+      const by = Math.max(16, Math.min(imageHeight - 16, my - 14));
+      drawBadge(rgba, imageWidth, imageHeight, bx, by, `#${m.stepNumber}`, {
+        bg: [120, 53, 15, 230],
+        fg: [254, 243, 199, 255],
+        border: [251, 191, 36, 255],
+        padX: 3,
+        padY: 2,
+      });
+    }
   }
 
   if (drawMouse) {
@@ -183,14 +230,12 @@ export function renderScreenOverlay(
       const cy = Math.max(0, Math.min(imageHeight - 1, toImgY(my)));
 
       const whiteHalo: RgbaColor = [255, 255, 255, 235];
-      const redCore: RgbaColor = [239, 68, 68, 250]; // Red-500
+      const redCore: RgbaColor = [239, 68, 68, 250];
 
-      // Outer white contrast halo + vivid red reticle ring
       drawCircleRing(rgba, imageWidth, imageHeight, cx, cy, 12, 3.2, whiteHalo);
       drawCircleRing(rgba, imageWidth, imageHeight, cx, cy, 12, 1.8, redCore);
       drawCircleRing(rgba, imageWidth, imageHeight, cx, cy, 4, 1.5, redCore);
 
-      // Crosshair arms with open 3px center so target pixel stays visible
       drawLine(rgba, imageWidth, imageHeight, cx - 18, cy, cx - 5, cy, redCore);
       drawLine(rgba, imageWidth, imageHeight, cx + 5, cy, cx + 18, cy, redCore);
       drawLine(rgba, imageWidth, imageHeight, cx, cy - 18, cx, cy - 5, redCore);

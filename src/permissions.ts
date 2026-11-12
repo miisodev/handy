@@ -126,7 +126,7 @@ export class PermissionStore {
     options: {
       mode?: PermissionMode;
       ttlMs?: number | null;
-      updatedBy?: "cli" | "mcp";
+      updatedBy?: "cli" | "mcp" | "ui";
     } = {},
   ): PermissionState {
     const updatedBy = options.updatedBy ?? "cli";

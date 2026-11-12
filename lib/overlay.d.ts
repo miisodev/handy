@@ -1,4 +1,4 @@
-import type { Point } from "./types.js";
+import type { Point, TrailMarker } from "./types.js";
 export declare function chooseGridStep(logicalWidth: number, logicalHeight: number): number;
 export interface OverlayOptions {
     /** Global logical X of top-left pixel */
@@ -17,6 +17,8 @@ export interface OverlayOptions {
     gridStep?: number;
     /** Draw live mouse reticle & coordinate badge */
     showMouse?: boolean;
+    /** Optional chain action trail markers (clicks / drags) to render on post-action screenshots */
+    trail?: TrailMarker[];
 }
 export declare function renderScreenOverlay(rgba: Uint8Array, imageWidth: number, imageHeight: number, options: OverlayOptions): {
     gridStep: number | null;

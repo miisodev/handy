@@ -19,6 +19,25 @@ export interface DisplayInfo {
     scaleFactor: number;
     primary: boolean;
 }
+export interface WindowInfo {
+    id: string | number;
+    title: string;
+    app?: string;
+    pid?: number;
+    bounds?: Region;
+    focused: boolean;
+}
+export interface FrameDiff {
+    changedPercent: number;
+    changedPixels: number;
+    changedBounds: Region | null;
+}
+export interface TrailMarker {
+    stepNumber: number;
+    kind: "click" | "drag_start" | "drag_end";
+    x: number;
+    y: number;
+}
 export interface RawFrame {
     width: number;
     height: number;
@@ -215,6 +234,12 @@ export declare const TypeStepSchema: z.ZodObject<{
     delayMs: z.ZodOptional<z.ZodNumber>;
     submit: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
+export declare const PasteStepSchema: z.ZodObject<{
+    type: z.ZodLiteral<"paste">;
+    text: z.ZodString;
+    restoreClipboard: z.ZodOptional<z.ZodBoolean>;
+    submit: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>;
 export declare const KeyStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"key">;
     key: z.ZodString;
@@ -235,9 +260,40 @@ export declare const KeyUpStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"key_up">;
     key: z.ZodString;
 }, z.core.$strip>;
+export declare const FocusWindowStepSchema: z.ZodObject<{
+    type: z.ZodLiteral<"focus_window">;
+    title: z.ZodOptional<z.ZodString>;
+    app: z.ZodOptional<z.ZodString>;
+    id: z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+}, z.core.$strip>;
 export declare const WaitStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"wait">;
     ms: z.ZodNumber;
+}, z.core.$strip>;
+export declare const WaitForChangeStepSchema: z.ZodObject<{
+    type: z.ZodLiteral<"wait_for_change">;
+    region: z.ZodOptional<z.ZodObject<{
+        x: z.ZodNumber;
+        y: z.ZodNumber;
+        width: z.ZodNumber;
+        height: z.ZodNumber;
+    }, z.core.$strip>>;
+    timeoutMs: z.ZodOptional<z.ZodNumber>;
+    pollMs: z.ZodOptional<z.ZodNumber>;
+    threshold: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const WaitForSettledStepSchema: z.ZodObject<{
+    type: z.ZodLiteral<"wait_for_settled">;
+    region: z.ZodOptional<z.ZodObject<{
+        x: z.ZodNumber;
+        y: z.ZodNumber;
+        width: z.ZodNumber;
+        height: z.ZodNumber;
+    }, z.core.$strip>>;
+    timeoutMs: z.ZodOptional<z.ZodNumber>;
+    quietMs: z.ZodOptional<z.ZodNumber>;
+    pollMs: z.ZodOptional<z.ZodNumber>;
+    threshold: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 export declare const ScreenshotStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"screenshot">;
@@ -400,6 +456,11 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     delayMs: z.ZodOptional<z.ZodNumber>;
     submit: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"paste">;
+    text: z.ZodString;
+    restoreClipboard: z.ZodOptional<z.ZodBoolean>;
+    submit: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"key">;
     key: z.ZodString;
     modifiers: z.ZodOptional<z.ZodArray<z.ZodEnum<{
@@ -417,8 +478,36 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"key_up">;
     key: z.ZodString;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"focus_window">;
+    title: z.ZodOptional<z.ZodString>;
+    app: z.ZodOptional<z.ZodString>;
+    id: z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"wait">;
     ms: z.ZodNumber;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"wait_for_change">;
+    region: z.ZodOptional<z.ZodObject<{
+        x: z.ZodNumber;
+        y: z.ZodNumber;
+        width: z.ZodNumber;
+        height: z.ZodNumber;
+    }, z.core.$strip>>;
+    timeoutMs: z.ZodOptional<z.ZodNumber>;
+    pollMs: z.ZodOptional<z.ZodNumber>;
+    threshold: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"wait_for_settled">;
+    region: z.ZodOptional<z.ZodObject<{
+        x: z.ZodNumber;
+        y: z.ZodNumber;
+        width: z.ZodNumber;
+        height: z.ZodNumber;
+    }, z.core.$strip>>;
+    timeoutMs: z.ZodOptional<z.ZodNumber>;
+    quietMs: z.ZodOptional<z.ZodNumber>;
+    pollMs: z.ZodOptional<z.ZodNumber>;
+    threshold: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"screenshot">;
     region: z.ZodOptional<z.ZodObject<{
@@ -440,6 +529,7 @@ export interface SeeOptions {
     gridStep?: number;
     showMouse?: boolean;
     maxWidth?: number;
+    trail?: TrailMarker[];
 }
 export interface SeeResult {
     pngBuffer: Buffer;
@@ -456,6 +546,9 @@ export interface SeeResult {
     };
     region: Region;
     mouse: Point;
+    pixelUnderMouse: string | null;
+    activeWindow: WindowInfo | null;
+    screenDiff: FrameDiff | null;
     gridStep: number | null;
     coordinateSpace: "screen";
     captureMs: number;
@@ -466,11 +559,13 @@ export interface ActOptions {
     actions: ActionStep[];
     stepDelayMs?: number;
     screenshotAfter?: boolean;
+    showTrail?: boolean;
     settleMs?: number;
     display?: number;
     maxWidth?: number;
     grid?: boolean;
     showMouse?: boolean;
+    failsafe?: boolean;
     signal?: AbortSignal;
 }
 export interface StepReceipt {
@@ -485,6 +580,7 @@ export interface ActResult {
     stepsCompleted: number;
     totalDurationMs: number;
     mouse: Point;
+    activeWindow?: WindowInfo | null;
     receipts: StepReceipt[];
     screenshots: SeeResult[];
 }
@@ -494,7 +590,7 @@ export interface PermissionState {
     mode: PermissionMode;
     expiresAt: string | null;
     updatedAt: string;
-    updatedBy: "default" | "cli" | "env" | "mcp" | "expired";
+    updatedBy: "default" | "cli" | "env" | "mcp" | "ui" | "expired";
 }
 export interface DoctorCheck {
     name: string;
@@ -520,5 +616,14 @@ export interface DesktopBackend {
         display?: number;
         region?: Region;
     }): Promise<RawFrame>;
+    getActiveWindow?(): Promise<WindowInfo | null>;
+    listWindows?(): Promise<WindowInfo[]>;
+    focusWindow?(query: {
+        title?: string;
+        app?: string;
+        id?: string | number;
+    }): Promise<boolean>;
+    getClipboardText?(): Promise<string>;
+    setClipboardText?(text: string): Promise<void>;
     doctor(): Promise<DoctorCheck[]>;
 }

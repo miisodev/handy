@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.miisodev/handy",
-  "description": "Native mouse, keyboard, and coordinate-mapped screen control for LLMs via stdio MCP.",
-  "version": "1.0.0",
+  "description": "Native mouse, keyboard, window, clipboard, and screen control for LLMs via stdio MCP.",
+  "version": "1.1.0",
   "websiteUrl": "https://github.com/miisodev/handy",
   "repository": {
     "url": "https://github.com/miisodev/handy",
@@ -12,7 +12,7 @@
     {
       "registryType": "npm",
       "identifier": "@miisodev/handy",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "transport": {
         "type": "stdio"
       },

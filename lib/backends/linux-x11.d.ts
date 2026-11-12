@@ -1,5 +1,5 @@
 import { type ConcreteModifier } from "../keys.js";
-import type { DesktopBackend, DisplayInfo, DoctorCheck, MouseButton, Point, RawFrame, Region } from "../types.js";
+import type { DesktopBackend, DisplayInfo, DoctorCheck, MouseButton, Point, RawFrame, Region, WindowInfo } from "../types.js";
 export interface X11DisplayTarget {
     socketPath?: string;
     host?: string;
@@ -24,6 +24,7 @@ export declare class LinuxX11Backend implements DesktopBackend {
     private keysymMap;
     private modifierKeycodes;
     private scratchKeycode;
+    private atomCache;
     private initialized;
     constructor(options?: {
         display?: string;
@@ -42,6 +43,19 @@ export declare class LinuxX11Backend implements DesktopBackend {
     close(): Promise<void>;
     private ensureReady;
     getDisplays(): Promise<DisplayInfo[]>;
+    private internAtom;
+    private getProperty;
+    private getActiveWindowId;
+    private inspectX11Window;
+    listWindows(): Promise<WindowInfo[]>;
+    getActiveWindow(): Promise<WindowInfo | null>;
+    focusWindow(query: {
+        title?: string;
+        app?: string;
+        id?: string | number;
+    }): Promise<boolean>;
+    getClipboardText(): Promise<string>;
+    setClipboardText(text: string): Promise<void>;
     getMousePosition(): Promise<Point>;
     moveMouse(x: number, y: number): Promise<void>;
     private buttonCode;

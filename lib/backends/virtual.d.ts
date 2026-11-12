@@ -1,11 +1,14 @@
 import { type ConcreteModifier } from "../keys.js";
-import type { DesktopBackend, DisplayInfo, DoctorCheck, MouseButton, Point, RawFrame, Region } from "../types.js";
+import type { DesktopBackend, DisplayInfo, DoctorCheck, MouseButton, Point, RawFrame, Region, WindowInfo } from "../types.js";
 export interface VirtualWidgetState {
-    focusedField: "name" | "notes" | null;
+    activeWindowId: "workbench" | "scratchpad";
+    focusedField: "name" | "notes" | "scratchpad" | null;
     fields: {
         name: string;
         notes: string;
+        scratchpad: string;
     };
+    clipboard: string;
     selectedAll: boolean;
     submittedValue: string;
     counter: number;
@@ -30,6 +33,24 @@ export declare class VirtualDesktopBackend implements DesktopBackend {
     private clickStreak;
     readonly state: VirtualWidgetState;
     static readonly LAYOUT: {
+        readonly workbenchWindow: {
+            readonly x: 80;
+            readonly y: 80;
+            readonly width: 580;
+            readonly height: 630;
+        };
+        readonly scratchpadWindow: {
+            readonly x: 720;
+            readonly y: 310;
+            readonly width: 490;
+            readonly height: 360;
+        };
+        readonly scratchpadInput: {
+            readonly x: 745;
+            readonly y: 365;
+            readonly width: 440;
+            readonly height: 280;
+        };
         readonly nameInput: {
             readonly x: 120;
             readonly y: 150;
@@ -78,6 +99,15 @@ export declare class VirtualDesktopBackend implements DesktopBackend {
     init(): Promise<void>;
     close(): Promise<void>;
     getDisplays(): Promise<DisplayInfo[]>;
+    listWindows(): Promise<WindowInfo[]>;
+    getActiveWindow(): Promise<WindowInfo | null>;
+    focusWindow(query: {
+        title?: string;
+        app?: string;
+        id?: string | number;
+    }): Promise<boolean>;
+    getClipboardText(): Promise<string>;
+    setClipboardText(text: string): Promise<void>;
     getMousePosition(): Promise<Point>;
     moveMouse(x: number, y: number): Promise<void>;
     private hitRect;

@@ -7258,8349 +7258,271 @@ var require_dist = __commonJS({
 });
 
 // src/cli.ts
-import { writeFileSync as writeFileSync2 } from "node:fs";
+import { writeFileSync as writeFileSync3 } from "node:fs";
 import { resolve } from "node:path";
 
-// src/backends/darwin.ts
-import { execFile } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { promisify } from "node:util";
-
-// src/keys.ts
-var MODIFIER_ALIASES = {
-  ctrl: "ctrl",
-  control: "ctrl",
-  ctl: "ctrl",
-  alt: "alt",
-  opt: "alt",
-  option: "alt",
-  shift: "shift",
-  shft: "shift",
-  meta: "meta",
-  cmd: "meta",
-  command: "meta",
-  super: "meta",
-  win: "meta",
-  windows: "meta",
-  gui: "meta",
-  mod: "mod",
-  cmdorctrl: "mod"
-};
-var KEY_ALIASES = {
-  enter: "enter",
-  return: "enter",
-  kp_enter: "enter",
-  "\n": "enter",
-  "\r": "enter",
-  tab: "tab",
-  "	": "tab",
-  space: "space",
-  spacebar: "space",
-  " ": "space",
-  backspace: "backspace",
-  bksp: "backspace",
-  bs: "backspace",
-  delete: "delete",
-  del: "delete",
-  forwarddelete: "delete",
-  esc: "escape",
-  escape: "escape",
-  up: "up",
-  arrowup: "up",
-  down: "down",
-  arrowdown: "down",
-  left: "left",
-  arrowleft: "left",
-  right: "right",
-  arrowright: "right",
-  home: "home",
-  end: "end",
-  pageup: "pageup",
-  pgup: "pageup",
-  prior: "pageup",
-  pagedown: "pagedown",
-  pgdn: "pagedown",
-  next: "pagedown",
-  insert: "insert",
-  ins: "insert",
-  capslock: "capslock",
-  caps: "capslock",
-  f1: "f1",
-  f2: "f2",
-  f3: "f3",
-  f4: "f4",
-  f5: "f5",
-  f6: "f6",
-  f7: "f7",
-  f8: "f8",
-  f9: "f9",
-  f10: "f10",
-  f11: "f11",
-  f12: "f12",
-  plus: "+",
-  minus: "-",
-  equal: "=",
-  equals: "=",
-  slash: "/",
-  backslash: "\\",
-  comma: ",",
-  period: ".",
-  dot: ".",
-  semicolon: ";",
-  apostrophe: "'",
-  quote: "'",
-  grave: "`",
-  backtick: "`",
-  bracketleft: "[",
-  bracketright: "]"
-};
-function resolveModifier(mod, platform = process.platform) {
-  if (mod === "mod") {
-    return platform === "darwin" ? "meta" : "ctrl";
-  }
-  return mod;
-}
-function normalizeSingleKey(raw, platform = process.platform) {
-  if (raw === " ") return "space";
-  if (raw === "\n" || raw === "\r") return "enter";
-  if (raw === "	") return "tab";
-  const trimmed = raw.trim();
-  if (!trimmed) {
-    throw new Error("Key cannot be empty.");
-  }
-  const lower = trimmed.toLowerCase();
-  const modAlias = MODIFIER_ALIASES[lower];
-  if (modAlias) {
-    return resolveModifier(modAlias, platform);
-  }
-  const keyAlias = KEY_ALIASES[lower];
-  if (keyAlias) {
-    return keyAlias;
-  }
-  const codePoints = Array.from(trimmed);
-  if (codePoints.length === 1) {
-    return trimmed.length === 1 && trimmed >= "A" && trimmed <= "Z" ? trimmed.toLowerCase() : trimmed;
-  }
-  throw new Error(
-    `Unsupported key "${raw}". Use a named key (Enter, Tab, Escape, Backspace, Delete, Space, ArrowUp..ArrowRight, Home, End, PageUp, PageDown, F1..F12), modifier (ctrl, alt, shift, meta, mod), or chord like "ctrl+c" / "mod+a".`
-  );
-}
-function parseKeyChord(rawKey, extraModifiers = [], platform = process.platform) {
-  const modSet = /* @__PURE__ */ new Set();
-  for (const m of extraModifiers) {
-    modSet.add(resolveModifier(m, platform));
-  }
-  if (rawKey === " " || rawKey === "+" || rawKey === "\n" || rawKey === "	") {
-    return {
-      key: normalizeSingleKey(rawKey, platform),
-      modifiers: Array.from(modSet)
-    };
-  }
-  const tokens = [];
-  let rest = rawKey.trim();
-  while (rest.length > 0) {
-    const plusIdx = rest.indexOf("+");
-    if (plusIdx === -1) {
-      tokens.push(rest);
-      break;
-    }
-    if (plusIdx === 0) {
-      tokens.push("+");
-      rest = rest.slice(1);
-      if (rest.startsWith("+")) rest = rest.slice(1);
-    } else {
-      tokens.push(rest.slice(0, plusIdx));
-      rest = rest.slice(plusIdx + 1);
-      if (rest === "") {
-        tokens.push("+");
-        break;
-      }
-    }
-  }
-  if (tokens.length === 0) {
-    throw new Error(`Invalid key "${rawKey}".`);
-  }
-  for (let i = 0; i < tokens.length - 1; i++) {
-    const tok = tokens[i].trim().toLowerCase();
-    const mod = MODIFIER_ALIASES[tok];
-    if (!mod) {
-      throw new Error(`Unknown modifier "${tokens[i]}" in key chord "${rawKey}".`);
-    }
-    modSet.add(resolveModifier(mod, platform));
-  }
-  const lastRaw = tokens[tokens.length - 1];
-  const isSingleUpperAlpha = tokens.length === 1 && extraModifiers.length === 0 && /^[A-Z]$/.test(lastRaw);
-  if (isSingleUpperAlpha) {
-    modSet.add("shift");
-  }
-  const key = normalizeSingleKey(lastRaw, platform);
-  if (key === "ctrl" || key === "alt" || key === "shift" || key === "meta") {
-    modSet.delete(key);
-  }
-  return {
-    key,
-    modifiers: Array.from(modSet)
-  };
-}
-var X11_KEYSYMS = {
-  backspace: 65288,
-  tab: 65289,
-  enter: 65293,
-  escape: 65307,
-  delete: 65535,
-  home: 65360,
-  left: 65361,
-  up: 65362,
-  right: 65363,
-  down: 65364,
-  pageup: 65365,
-  pagedown: 65366,
-  end: 65367,
-  insert: 65379,
-  capslock: 65509,
-  f1: 65470,
-  f2: 65471,
-  f3: 65472,
-  f4: 65473,
-  f5: 65474,
-  f6: 65475,
-  f7: 65476,
-  f8: 65477,
-  f9: 65478,
-  f10: 65479,
-  f11: 65480,
-  f12: 65481,
-  shift: 65505,
-  ctrl: 65507,
-  meta: 65515,
-  // XK_Super_L
-  alt: 65513,
-  // XK_Alt_L
-  space: 32
-};
-function toX11Keysym(key) {
-  const named = X11_KEYSYMS[key];
-  if (named !== void 0) return named;
-  const cp = key.codePointAt(0);
-  if (cp === void 0) throw new Error(`Cannot map empty key to X11 keysym`);
-  if (cp >= 32 && cp <= 255) return cp;
-  return 16777216 | cp;
-}
-var DARWIN_KEYCODES = {
-  a: { code: 0 },
-  s: { code: 1 },
-  d: { code: 2 },
-  f: { code: 3 },
-  h: { code: 4 },
-  g: { code: 5 },
-  z: { code: 6 },
-  x: { code: 7 },
-  c: { code: 8 },
-  v: { code: 9 },
-  b: { code: 11 },
-  q: { code: 12 },
-  w: { code: 13 },
-  e: { code: 14 },
-  r: { code: 15 },
-  y: { code: 16 },
-  t: { code: 17 },
-  "1": { code: 18 },
-  "!": { code: 18, shift: true },
-  "2": { code: 19 },
-  "@": { code: 19, shift: true },
-  "3": { code: 20 },
-  "#": { code: 20, shift: true },
-  "4": { code: 21 },
-  "$": { code: 21, shift: true },
-  "6": { code: 22 },
-  "^": { code: 22, shift: true },
-  "5": { code: 23 },
-  "%": { code: 23, shift: true },
-  "=": { code: 24 },
-  "+": { code: 24, shift: true },
-  "9": { code: 25 },
-  "(": { code: 25, shift: true },
-  "7": { code: 26 },
-  "&": { code: 26, shift: true },
-  "-": { code: 27 },
-  "_": { code: 27, shift: true },
-  "8": { code: 28 },
-  "*": { code: 28, shift: true },
-  "0": { code: 29 },
-  ")": { code: 29, shift: true },
-  "]": { code: 30 },
-  "}": { code: 30, shift: true },
-  o: { code: 31 },
-  u: { code: 32 },
-  "[": { code: 33 },
-  "{": { code: 33, shift: true },
-  i: { code: 34 },
-  p: { code: 35 },
-  enter: { code: 36 },
-  l: { code: 37 },
-  j: { code: 38 },
-  "'": { code: 39 },
-  '"': { code: 39, shift: true },
-  k: { code: 40 },
-  ";": { code: 41 },
-  ":": { code: 41, shift: true },
-  "\\": { code: 42 },
-  "|": { code: 42, shift: true },
-  ",": { code: 43 },
-  "<": { code: 43, shift: true },
-  "/": { code: 44 },
-  "?": { code: 44, shift: true },
-  n: { code: 45 },
-  m: { code: 46 },
-  ".": { code: 47 },
-  ">": { code: 47, shift: true },
-  tab: { code: 48 },
-  space: { code: 49 },
-  "`": { code: 50 },
-  "~": { code: 50, shift: true },
-  backspace: { code: 51 },
-  escape: { code: 53 },
-  meta: { code: 55 },
-  shift: { code: 56 },
-  capslock: { code: 57 },
-  alt: { code: 58 },
-  ctrl: { code: 59 },
-  f5: { code: 96 },
-  f6: { code: 97 },
-  f7: { code: 98 },
-  f3: { code: 99 },
-  f8: { code: 100 },
-  f9: { code: 101 },
-  f11: { code: 103 },
-  f10: { code: 109 },
-  f12: { code: 111 },
-  insert: { code: 114 },
-  home: { code: 115 },
-  pageup: { code: 116 },
-  delete: { code: 117 },
-  f4: { code: 118 },
-  end: { code: 119 },
-  f2: { code: 120 },
-  pagedown: { code: 121 },
-  f1: { code: 122 },
-  left: { code: 123 },
-  right: { code: 124 },
-  down: { code: 125 },
-  up: { code: 126 }
-};
-var WIN32_VK_CODES = {
-  backspace: { vk: 8 },
-  tab: { vk: 9 },
-  enter: { vk: 13 },
-  shift: { vk: 16 },
-  ctrl: { vk: 17 },
-  alt: { vk: 18 },
-  capslock: { vk: 20 },
-  escape: { vk: 27 },
-  space: { vk: 32 },
-  pageup: { vk: 33 },
-  pagedown: { vk: 34 },
-  end: { vk: 35 },
-  home: { vk: 36 },
-  left: { vk: 37 },
-  up: { vk: 38 },
-  right: { vk: 39 },
-  down: { vk: 40 },
-  insert: { vk: 45 },
-  delete: { vk: 46 },
-  meta: { vk: 91 },
-  // VK_LWIN
-  f1: { vk: 112 },
-  f2: { vk: 113 },
-  f3: { vk: 114 },
-  f4: { vk: 115 },
-  f5: { vk: 116 },
-  f6: { vk: 117 },
-  f7: { vk: 118 },
-  f8: { vk: 119 },
-  f9: { vk: 120 },
-  f10: { vk: 121 },
-  f11: { vk: 122 },
-  f12: { vk: 123 },
-  ";": { vk: 186 },
-  ":": { vk: 186, shift: true },
-  "=": { vk: 187 },
-  "+": { vk: 187, shift: true },
-  ",": { vk: 188 },
-  "<": { vk: 188, shift: true },
-  "-": { vk: 189 },
-  "_": { vk: 189, shift: true },
-  ".": { vk: 190 },
-  ">": { vk: 190, shift: true },
-  "/": { vk: 191 },
-  "?": { vk: 191, shift: true },
-  "`": { vk: 192 },
-  "~": { vk: 192, shift: true },
-  "[": { vk: 219 },
-  "{": { vk: 219, shift: true },
-  "\\": { vk: 220 },
-  "|": { vk: 220, shift: true },
-  "]": { vk: 221 },
-  "}": { vk: 221, shift: true },
-  "'": { vk: 222 },
-  '"': { vk: 222, shift: true },
-  "!": { vk: 49, shift: true },
-  "@": { vk: 50, shift: true },
-  "#": { vk: 51, shift: true },
-  $: { vk: 52, shift: true },
-  "%": { vk: 53, shift: true },
-  "^": { vk: 54, shift: true },
-  "&": { vk: 55, shift: true },
-  "*": { vk: 56, shift: true },
-  "(": { vk: 57, shift: true },
-  ")": { vk: 48, shift: true }
-};
-function toWin32Vk(key) {
-  const mapped = WIN32_VK_CODES[key];
-  if (mapped) return mapped;
-  if (key.length === 1) {
-    const ch = key.charCodeAt(0);
-    if (ch >= 97 && ch <= 122) return { vk: ch - 32 };
-    if (ch >= 48 && ch <= 57) return { vk: ch };
-  }
-  return null;
-}
-function toXdotoolKey(key) {
-  const map2 = {
-    enter: "Return",
-    tab: "Tab",
-    space: "space",
-    backspace: "BackSpace",
-    delete: "Delete",
-    escape: "Escape",
-    up: "Up",
-    down: "Down",
-    left: "Left",
-    right: "Right",
-    home: "Home",
-    end: "End",
-    pageup: "Prior",
-    pagedown: "Next",
-    insert: "Insert",
-    capslock: "Caps_Lock",
-    ctrl: "ctrl",
-    alt: "alt",
-    shift: "shift",
-    meta: "super",
-    f1: "F1",
-    f2: "F2",
-    f3: "F3",
-    f4: "F4",
-    f5: "F5",
-    f6: "F6",
-    f7: "F7",
-    f8: "F8",
-    f9: "F9",
-    f10: "F10",
-    f11: "F11",
-    f12: "F12",
-    "+": "plus",
-    "-": "minus",
-    "=": "equal",
-    "/": "slash",
-    "\\": "backslash",
-    ",": "comma",
-    ".": "period",
-    ";": "semicolon",
-    "'": "apostrophe",
-    "`": "grave",
-    "[": "bracketleft",
-    "]": "bracketright"
-  };
-  return map2[key] ?? key;
-}
-
-// src/png.ts
-import { deflateSync, inflateSync } from "node:zlib";
-var PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-var CRC_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let n = 0; n < 256; n++) {
-    let c = n;
-    for (let k = 0; k < 8; k++) {
-      c = (c & 1) !== 0 ? 3988292384 ^ c >>> 1 : c >>> 1;
-    }
-    table[n] = c >>> 0;
-  }
-  return table;
-})();
-function crc32(typeAndData) {
-  let c = 4294967295;
-  for (let i = 0; i < typeAndData.length; i++) {
-    c = (CRC_TABLE[(c ^ typeAndData[i]) & 255] ^ c >>> 8) >>> 0;
-  }
-  return (c ^ 4294967295) >>> 0;
-}
-function makeChunk(type, data) {
-  const chunk = Buffer.allocUnsafe(12 + data.length);
-  chunk.writeUInt32BE(data.length, 0);
-  chunk.write(type, 4, 4, "ascii");
-  Buffer.from(data.buffer, data.byteOffset, data.byteLength).copy(chunk, 8);
-  const crc = crc32(chunk.subarray(4, 8 + data.length));
-  chunk.writeUInt32BE(crc, 8 + data.length);
-  return chunk;
-}
-function encodePng(width, height, rgba, options = {}) {
-  if (width <= 0 || height <= 0) {
-    throw new Error(`Invalid PNG dimensions: ${width}x${height}`);
-  }
-  const expectedLength = width * height * 4;
-  if (rgba.length < expectedLength) {
-    throw new Error(`RGBA buffer too small: got ${rgba.length}, expected ${expectedLength}`);
-  }
-  const stride = width * 4;
-  const raw = Buffer.allocUnsafe((stride + 1) * height);
-  for (let y = 0; y < height; y++) {
-    const srcOffset = y * stride;
-    const dstOffset = y * (stride + 1);
-    raw[dstOffset] = 1;
-    raw[dstOffset + 1] = rgba[srcOffset];
-    raw[dstOffset + 2] = rgba[srcOffset + 1];
-    raw[dstOffset + 3] = rgba[srcOffset + 2];
-    raw[dstOffset + 4] = rgba[srcOffset + 3];
-    for (let i = 4; i < stride; i++) {
-      raw[dstOffset + 1 + i] = rgba[srcOffset + i] - rgba[srcOffset + i - 4] & 255;
-    }
-  }
-  const ihdr = Buffer.allocUnsafe(13);
-  ihdr.writeUInt32BE(width, 0);
-  ihdr.writeUInt32BE(height, 4);
-  ihdr[8] = 8;
-  ihdr[9] = 6;
-  ihdr[10] = 0;
-  ihdr[11] = 0;
-  ihdr[12] = 0;
-  const compressed = deflateSync(raw, { level: options.compressionLevel ?? 3 });
-  const ihdrChunk = makeChunk("IHDR", ihdr);
-  const idatChunk = makeChunk("IDAT", compressed);
-  const iendChunk = makeChunk("IEND", new Uint8Array(0));
-  return Buffer.concat([PNG_SIGNATURE, ihdrChunk, idatChunk, iendChunk]);
-}
-function paethPredictor(a, b, c) {
-  const p = a + b - c;
-  const pa = Math.abs(p - a);
-  const pb = Math.abs(p - b);
-  const pc = Math.abs(p - c);
-  if (pa <= pb && pa <= pc) return a;
-  if (pb <= pc) return b;
-  return c;
-}
-function decodePng(pngBytes) {
-  const buf = Buffer.from(pngBytes.buffer, pngBytes.byteOffset, pngBytes.byteLength);
-  if (buf.length < 8 || !buf.subarray(0, 8).equals(PNG_SIGNATURE)) {
-    throw new Error("Invalid PNG signature.");
-  }
-  let offset = 8;
-  let width = 0;
-  let height = 0;
-  let bitDepth = 0;
-  let colorType = 0;
-  let interlace = 0;
-  let palette = null;
-  let trns = null;
-  const idatChunks = [];
-  while (offset + 8 <= buf.length) {
-    const length = buf.readUInt32BE(offset);
-    const type = buf.toString("ascii", offset + 4, offset + 8);
-    const dataStart = offset + 8;
-    const dataEnd = dataStart + length;
-    if (dataEnd + 4 > buf.length) {
-      throw new Error(`Truncated PNG chunk "${type}".`);
-    }
-    const chunkData = buf.subarray(dataStart, dataEnd);
-    if (type === "IHDR") {
-      width = chunkData.readUInt32BE(0);
-      height = chunkData.readUInt32BE(4);
-      bitDepth = chunkData[8];
-      colorType = chunkData[9];
-      interlace = chunkData[12];
-    } else if (type === "PLTE") {
-      palette = chunkData;
-    } else if (type === "tRNS") {
-      trns = chunkData;
-    } else if (type === "IDAT") {
-      idatChunks.push(chunkData);
-    } else if (type === "IEND") {
-      break;
-    }
-    offset = dataEnd + 4;
-  }
-  if (width <= 0 || height <= 0) {
-    throw new Error("PNG missing valid IHDR.");
-  }
-  if (interlace !== 0) {
-    throw new Error("Interlaced PNG is not supported.");
-  }
-  if (bitDepth !== 8 && bitDepth !== 16) {
-    throw new Error(`Unsupported PNG bit depth: ${bitDepth}`);
-  }
-  const channelsByColorType = {
-    0: 1,
-    // Grayscale
-    2: 3,
-    // RGB
-    3: 1,
-    // Indexed
-    4: 2,
-    // Grayscale + Alpha
-    6: 4
-    // RGBA
-  };
-  const channels = channelsByColorType[colorType];
-  if (!channels) {
-    throw new Error(`Unsupported PNG color type: ${colorType}`);
-  }
-  const bytesPerSample = bitDepth / 8;
-  const bpp = channels * bytesPerSample;
-  const stride = width * bpp;
-  const inflated = inflateSync(Buffer.concat(idatChunks));
-  if (inflated.length < (stride + 1) * height) {
-    throw new Error("Corrupt PNG IDAT stream: inflated data shorter than image dimensions.");
-  }
-  const unfiltered = new Uint8Array(stride * height);
-  for (let y = 0; y < height; y++) {
-    const filterType = inflated[y * (stride + 1)];
-    const srcRow = y * (stride + 1) + 1;
-    const dstRow = y * stride;
-    const prevRow = (y - 1) * stride;
-    for (let x = 0; x < stride; x++) {
-      const rawByte = inflated[srcRow + x];
-      const a = x >= bpp ? unfiltered[dstRow + x - bpp] : 0;
-      const b = y > 0 ? unfiltered[prevRow + x] : 0;
-      const c = y > 0 && x >= bpp ? unfiltered[prevRow + x - bpp] : 0;
-      let val;
-      switch (filterType) {
-        case 0:
-          val = rawByte;
-          break;
-        case 1:
-          val = rawByte + a & 255;
-          break;
-        case 2:
-          val = rawByte + b & 255;
-          break;
-        case 3:
-          val = rawByte + (a + b >>> 1) & 255;
-          break;
-        case 4:
-          val = rawByte + paethPredictor(a, b, c) & 255;
-          break;
-        default:
-          throw new Error(`Unknown PNG filter type ${filterType} at row ${y}.`);
-      }
-      unfiltered[dstRow + x] = val;
-    }
-  }
-  if (colorType === 6 && bitDepth === 8) {
-    return { width, height, data: unfiltered };
-  }
-  const rgba = new Uint8Array(width * height * 4);
-  const pixelCount = width * height;
-  if (colorType === 2 && bitDepth === 8) {
-    for (let i = 0; i < pixelCount; i++) {
-      const s = i * 3;
-      const d = i * 4;
-      rgba[d] = unfiltered[s];
-      rgba[d + 1] = unfiltered[s + 1];
-      rgba[d + 2] = unfiltered[s + 2];
-      rgba[d + 3] = 255;
-    }
-  } else if (colorType === 0 && bitDepth === 8) {
-    for (let i = 0; i < pixelCount; i++) {
-      const g = unfiltered[i];
-      const d = i * 4;
-      rgba[d] = g;
-      rgba[d + 1] = g;
-      rgba[d + 2] = g;
-      rgba[d + 3] = 255;
-    }
-  } else if (colorType === 4 && bitDepth === 8) {
-    for (let i = 0; i < pixelCount; i++) {
-      const g = unfiltered[i * 2];
-      const a = unfiltered[i * 2 + 1];
-      const d = i * 4;
-      rgba[d] = g;
-      rgba[d + 1] = g;
-      rgba[d + 2] = g;
-      rgba[d + 3] = a;
-    }
-  } else if (colorType === 3 && bitDepth === 8) {
-    if (!palette) throw new Error("Indexed PNG missing PLTE chunk.");
-    for (let i = 0; i < pixelCount; i++) {
-      const idx = unfiltered[i];
-      const p = idx * 3;
-      const d = i * 4;
-      rgba[d] = palette[p] ?? 0;
-      rgba[d + 1] = palette[p + 1] ?? 0;
-      rgba[d + 2] = palette[p + 2] ?? 0;
-      rgba[d + 3] = trns && idx < trns.length ? trns[idx] : 255;
-    }
-  } else {
-    for (let i = 0; i < pixelCount; i++) {
-      const s = i * bpp;
-      const d = i * 4;
-      if (colorType === 6) {
-        rgba[d] = unfiltered[s];
-        rgba[d + 1] = unfiltered[s + 2];
-        rgba[d + 2] = unfiltered[s + 4];
-        rgba[d + 3] = unfiltered[s + 6];
-      } else if (colorType === 2) {
-        rgba[d] = unfiltered[s];
-        rgba[d + 1] = unfiltered[s + 2];
-        rgba[d + 2] = unfiltered[s + 4];
-        rgba[d + 3] = 255;
-      } else if (colorType === 4) {
-        const g = unfiltered[s];
-        rgba[d] = g;
-        rgba[d + 1] = g;
-        rgba[d + 2] = g;
-        rgba[d + 3] = unfiltered[s + 2];
-      } else {
-        const g = unfiltered[s];
-        rgba[d] = g;
-        rgba[d + 1] = g;
-        rgba[d + 2] = g;
-        rgba[d + 3] = 255;
-      }
-    }
-  }
-  return { width, height, data: rgba };
-}
-function cropRgba(src, srcWidth, srcHeight, x, y, cropWidth, cropHeight) {
-  const cx = Math.max(0, Math.min(srcWidth - 1, Math.round(x)));
-  const cy = Math.max(0, Math.min(srcHeight - 1, Math.round(y)));
-  const cw = Math.max(1, Math.min(srcWidth - cx, Math.round(cropWidth)));
-  const ch = Math.max(1, Math.min(srcHeight - cy, Math.round(cropHeight)));
-  if (cx === 0 && cy === 0 && cw === srcWidth && ch === srcHeight) {
-    return { width: srcWidth, height: srcHeight, data: new Uint8Array(src), x: 0, y: 0 };
-  }
-  const out = new Uint8Array(cw * ch * 4);
-  const srcStride = srcWidth * 4;
-  const dstStride = cw * 4;
-  for (let row = 0; row < ch; row++) {
-    const srcStart = (cy + row) * srcStride + cx * 4;
-    out.set(src.subarray(srcStart, srcStart + dstStride), row * dstStride);
-  }
-  return { width: cw, height: ch, data: out, x: cx, y: cy };
-}
-function resizeRgba(src, srcWidth, srcHeight, dstWidth, dstHeight) {
-  if (srcWidth === dstWidth && srcHeight === dstHeight) {
-    return new Uint8Array(src);
-  }
-  const dst = new Uint8Array(dstWidth * dstHeight * 4);
-  const xRatio = srcWidth / dstWidth;
-  const yRatio = srcHeight / dstHeight;
-  for (let dy = 0; dy < dstHeight; dy++) {
-    const sy = (dy + 0.5) * yRatio - 0.5;
-    const y0 = Math.max(0, Math.floor(sy));
-    const y1 = Math.min(srcHeight - 1, y0 + 1);
-    const wy = Math.max(0, sy - y0);
-    const wyInv = 1 - wy;
-    const row0 = y0 * srcWidth * 4;
-    const row1 = y1 * srcWidth * 4;
-    const dstRow = dy * dstWidth * 4;
-    for (let dx = 0; dx < dstWidth; dx++) {
-      const sx = (dx + 0.5) * xRatio - 0.5;
-      const x0 = Math.max(0, Math.floor(sx));
-      const x1 = Math.min(srcWidth - 1, x0 + 1);
-      const wx = Math.max(0, sx - x0);
-      const wxInv = 1 - wx;
-      const p00 = row0 + x0 * 4;
-      const p10 = row0 + x1 * 4;
-      const p01 = row1 + x0 * 4;
-      const p11 = row1 + x1 * 4;
-      const d = dstRow + dx * 4;
-      const w00 = wxInv * wyInv;
-      const w10 = wx * wyInv;
-      const w01 = wxInv * wy;
-      const w11 = wx * wy;
-      dst[d] = Math.round(src[p00] * w00 + src[p10] * w10 + src[p01] * w01 + src[p11] * w11);
-      dst[d + 1] = Math.round(
-        src[p00 + 1] * w00 + src[p10 + 1] * w10 + src[p01 + 1] * w01 + src[p11 + 1] * w11
-      );
-      dst[d + 2] = Math.round(
-        src[p00 + 2] * w00 + src[p10 + 2] * w10 + src[p01 + 2] * w01 + src[p11 + 2] * w11
-      );
-      dst[d + 3] = 255;
-    }
-  }
-  return dst;
-}
-
-// src/backends/jsonl-worker.ts
-import { spawn } from "node:child_process";
-import { createInterface } from "node:readline";
-var JsonlWorker = class {
-  proc = null;
-  rl = null;
-  nextId = 1;
-  pending = /* @__PURE__ */ new Map();
-  stderrTail = "";
-  options;
-  constructor(options) {
-    this.options = options;
-  }
-  get isRunning() {
-    return this.proc !== null && this.proc.exitCode === null && !this.proc.killed;
-  }
-  async start() {
-    if (this.isRunning) return;
-    const child = spawn(this.options.command, this.options.args, {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ...this.options.env },
-      windowsHide: true
-    });
-    this.proc = child;
-    this.stderrTail = "";
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => {
-      this.stderrTail = (this.stderrTail + chunk).slice(-2e3);
-    });
-    const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    this.rl = rl;
-    rl.on("line", (line) => {
-      const trimmed = line.trim();
-      if (!trimmed.startsWith("{")) return;
-      try {
-        const msg = JSON.parse(trimmed);
-        const id = typeof msg.id === "number" ? msg.id : -1;
-        const waiter = this.pending.get(id);
-        if (!waiter) return;
-        this.pending.delete(id);
-        clearTimeout(waiter.timer);
-        if (msg.ok === false || typeof msg.error === "string") {
-          waiter.reject(new Error(String(msg.error ?? "Native bridge request failed")));
-        } else {
-          waiter.resolve(msg);
-        }
-      } catch {
-      }
-    });
-    const failAll = (reason) => {
-      const detail = this.stderrTail.trim();
-      const err = new Error(detail ? `${reason}: ${detail}` : reason);
-      for (const p of this.pending.values()) {
-        clearTimeout(p.timer);
-        p.reject(err);
-      }
-      this.pending.clear();
-    };
-    child.on("error", (err) => {
-      failAll(`Native worker spawn error (${this.options.command}): ${err.message}`);
-    });
-    child.on("close", (code) => {
-      this.proc = null;
-      this.rl = null;
-      if (this.pending.size > 0) {
-        failAll(`Native worker exited unexpectedly (code=${code ?? "null"})`);
-      }
-    });
-  }
-  async request(payload, timeoutMs) {
-    if (!this.isRunning) {
-      await this.start();
-    }
-    if (!this.proc || !this.proc.stdin.writable) {
-      throw new Error(`Native worker "${this.options.command}" is not writable.`);
-    }
-    const id = this.nextId++;
-    const timeout = timeoutMs ?? this.options.requestTimeoutMs ?? 1e4;
-    const line = `${JSON.stringify({ id, ...payload })}
-`;
-    return new Promise((resolve2, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Native worker request "${String(payload.op ?? "unknown")}" timed out after ${timeout}ms.`));
-      }, timeout);
-      timer.unref?.();
-      this.pending.set(id, { resolve: resolve2, reject, timer });
-      this.proc.stdin.write(line, (err) => {
-        if (err) {
-          clearTimeout(timer);
-          this.pending.delete(id);
-          reject(err);
-        }
-      });
-    });
-  }
-  async stop() {
-    if (!this.proc) return;
-    const child = this.proc;
-    this.proc = null;
-    this.rl?.close();
-    this.rl = null;
-    for (const p of this.pending.values()) {
-      clearTimeout(p.timer);
-      p.reject(new Error("Native worker stopped."));
-    }
-    this.pending.clear();
-    try {
-      child.stdin.end();
-    } catch {
-    }
-    child.kill();
-  }
-};
-
-// src/backends/darwin.ts
-var execFileAsync = promisify(execFile);
-var DARWIN_JXA_SCRIPT = `
-ObjC.import("Foundation");
-ObjC.import("CoreGraphics");
-ObjC.import("AppKit");
-ObjC.import("ApplicationServices");
-
-const stdin = $.NSFileHandle.fileHandleWithStandardInput;
-const stdout = $.NSFileHandle.fileHandleWithStandardOutput;
-
-function writeJson(obj) {
-  const str = JSON.stringify(obj) + "\\n";
-  const ns = $(str);
-  const data = ns.dataUsingEncoding($.NSUTF8StringEncoding);
-  stdout.writeData(data);
-}
-
-function getMousePos() {
-  const ev = $.CGEventCreate($());
-  const loc = $.CGEventGetLocation(ev);
-  return { x: Math.round(loc.x), y: Math.round(loc.y) };
-}
-
-function flagsForMods(mods) {
-  let flags = 0;
-  if (!mods) return 0;
-  for (let i = 0; i < mods.length; i++) {
-    const m = mods[i];
-    if (m === "meta") flags |= (1 << 20);
-    else if (m === "shift") flags |= (1 << 17);
-    else if (m === "alt") flags |= (1 << 19);
-    else if (m === "ctrl") flags |= (1 << 18);
-  }
-  return flags;
-}
-
-let heldLeft = false;
-let lastClickCount = 1;
-
-function handleCmd(cmd) {
-  const op = cmd.op;
-  if (op === "doctor") {
-    let ax = true;
-    let screen = true;
-    try { ax = Boolean($.AXIsProcessTrusted()); } catch (_) {}
-    try { screen = Boolean($.CGPreflightScreenCaptureAccess()); } catch (_) {}
-    return { id: cmd.id, ok: true, accessibility: ax, screenRecording: screen };
-  }
-  if (op === "displays") {
-    const screens = $.NSScreen.screens;
-    const count = screens.count;
-    const primaryH = count > 0 ? screens.objectAtIndex(0).frame.size.height : 0;
-    const list = [];
-    for (let i = 0; i < count; i++) {
-      const s = screens.objectAtIndex(i);
-      const f = s.frame;
-      const scale = Number(s.backingScaleFactor) || 1;
-      // Convert Cocoa bottom-left origin to CoreGraphics top-left origin
-      const cgY = primaryH - (f.origin.y + f.size.height);
-      list.push({
-        id: i,
-        name: "macOS Display " + (i + 1),
-        x: Math.round(f.origin.x),
-        y: Math.round(cgY),
-        width: Math.round(f.size.width),
-        height: Math.round(f.size.height),
-        scaleFactor: scale,
-        primary: i === 0
-      });
-    }
-    return { id: cmd.id, ok: true, displays: list };
-  }
-  if (op === "mouse_pos") {
-    const p = getMousePos();
-    return { id: cmd.id, ok: true, x: p.x, y: p.y };
-  }
-  if (op === "move") {
-    const pt = { x: cmd.x, y: cmd.y };
-    const evType = heldLeft ? $.kCGEventLeftMouseDragged : $.kCGEventMouseMoved;
-    const ev = $.CGEventCreateMouseEvent($(), evType, pt, $.kCGMouseButtonLeft);
-    $.CGEventPost($.kCGHIDEventTap, ev);
-    return { id: cmd.id, ok: true };
-  }
-  if (op === "mouse_down" || op === "mouse_up") {
-    const p = getMousePos();
-    const isDown = op === "mouse_down";
-    const btn = cmd.button || "left";
-    let evType = isDown ? $.kCGEventLeftMouseDown : $.kCGEventLeftMouseUp;
-    let cgBtn = $.kCGMouseButtonLeft;
-    if (btn === "right") {
-      evType = isDown ? $.kCGEventRightMouseDown : $.kCGEventRightMouseUp;
-      cgBtn = $.kCGMouseButtonRight;
-    } else if (btn === "middle") {
-      evType = isDown ? $.kCGEventOtherMouseDown : $.kCGEventOtherMouseUp;
-      cgBtn = $.kCGMouseButtonCenter;
-    } else {
-      heldLeft = isDown;
-    }
-    const ev = $.CGEventCreateMouseEvent($(), evType, p, cgBtn);
-    const clickState = cmd.clickCount || lastClickCount || 1;
-    lastClickCount = isDown ? clickState : 1;
-    $.CGEventSetIntegerValueField(ev, $.kCGMouseEventClickState, clickState);
-    if (cmd.modifiers && cmd.modifiers.length) {
-      $.CGEventSetFlags(ev, flagsForMods(cmd.modifiers));
-    }
-    $.CGEventPost($.kCGHIDEventTap, ev);
-    return { id: cmd.id, ok: true };
-  }
-  if (op === "scroll") {
-    const ev = $.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitLine, 2, -Math.round(cmd.dy || 0), -Math.round(cmd.dx || 0));
-    $.CGEventPost($.kCGHIDEventTap, ev);
-    return { id: cmd.id, ok: true };
-  }
-  if (op === "key_event") {
-    const ev = $.CGEventCreateKeyboardEvent($(), cmd.code, Boolean(cmd.down));
-    if (cmd.modifiers && cmd.modifiers.length) {
-      $.CGEventSetFlags(ev, flagsForMods(cmd.modifiers));
-    }
-    $.CGEventPost($.kCGHIDEventTap, ev);
-    return { id: cmd.id, ok: true };
-  }
-  if (op === "type_text" || op === "type_char") {
-    const str = String(cmd.text !== undefined ? cmd.text : (cmd.char || ""));
-    let i = 0;
-    while (i < str.length) {
-      // Batch up to 16 UTF-16 code units per CGEventKeyboardSetUnicodeString call
-      const end = Math.min(str.length, i + 16);
-      const codes = [];
-      for (let j = i; j < end; j++) codes.push(str.charCodeAt(j));
-      const down = $.CGEventCreateKeyboardEvent($(), 0, true);
-      const up = $.CGEventCreateKeyboardEvent($(), 0, false);
-      $.CGEventKeyboardSetUnicodeString(down, codes.length, codes);
-      $.CGEventKeyboardSetUnicodeString(up, codes.length, codes);
-      $.CGEventPost($.kCGHIDEventTap, down);
-      $.CGEventPost($.kCGHIDEventTap, up);
-      i = end;
-    }
-    return { id: cmd.id, ok: true };
-  }
-  return { id: cmd.id, ok: false, error: "Unknown op: " + op };
-}
-
-let buffer = "";
-while (true) {
-  const data = stdin.availableData;
-  if (!data || data.length === 0) break;
-  const chunk = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding)) || "";
-  buffer += chunk;
-  let nl;
-  while ((nl = buffer.indexOf("\\n")) !== -1) {
-    const line = buffer.slice(0, nl).trim();
-    buffer = buffer.slice(nl + 1);
-    if (!line) continue;
-    try {
-      const cmd = JSON.parse(line);
-      writeJson(handleCmd(cmd));
-    } catch (err) {
-      writeJson({ id: -1, ok: false, error: String(err) });
-    }
-  }
-}
-`;
-var DarwinBackend = class {
-  name = "darwin-coregraphics";
-  platform = "darwin";
-  worker;
-  customCapturePng;
-  constructor(options = {}) {
-    this.worker = new JsonlWorker(
-      options.workerOptions ?? {
-        command: "/usr/bin/osascript",
-        args: ["-l", "JavaScript", "-e", DARWIN_JXA_SCRIPT]
-      }
-    );
-    this.customCapturePng = options.capturePng;
-  }
-  async init() {
-    await this.worker.start();
-  }
-  async close() {
-    await this.worker.stop();
-  }
-  async getDisplays() {
-    const res = await this.worker.request({ op: "displays" });
-    const list = Array.isArray(res.displays) ? res.displays : [];
-    if (list.length > 0) return list;
-    return [
-      {
-        id: 0,
-        name: "macOS Primary Display",
-        x: 0,
-        y: 0,
-        width: 1440,
-        height: 900,
-        scaleFactor: 2,
-        primary: true
-      }
-    ];
-  }
-  async getMousePosition() {
-    const res = await this.worker.request({ op: "mouse_pos" });
-    return { x: Number(res.x ?? 0), y: Number(res.y ?? 0) };
-  }
-  async moveMouse(x, y) {
-    await this.worker.request({ op: "move", x: Math.round(x), y: Math.round(y) });
-  }
-  async mouseDown(button, clickCount = 1, modifiers = []) {
-    await this.worker.request({ op: "mouse_down", button, clickCount, modifiers });
-  }
-  async mouseUp(button, clickCount = 1, modifiers = []) {
-    await this.worker.request({ op: "mouse_up", button, clickCount, modifiers });
-  }
-  async scroll(deltaX, deltaY) {
-    await this.worker.request({ op: "scroll", dx: deltaX, dy: deltaY });
-  }
-  async keyDown(key) {
-    const parsed = parseKeyChord(key, [], "darwin");
-    const entry = DARWIN_KEYCODES[parsed.key];
-    if (!entry) {
-      throw new Error(`Unsupported macOS keyDown key "${key}".`);
-    }
-    if (entry.shift) {
-      await this.worker.request({ op: "key_event", code: DARWIN_KEYCODES.shift.code, down: true });
-    }
-    await this.worker.request({ op: "key_event", code: entry.code, down: true });
-  }
-  async keyUp(key) {
-    const parsed = parseKeyChord(key, [], "darwin");
-    const entry = DARWIN_KEYCODES[parsed.key];
-    if (!entry) {
-      throw new Error(`Unsupported macOS keyUp key "${key}".`);
-    }
-    await this.worker.request({ op: "key_event", code: entry.code, down: false });
-    if (entry.shift) {
-      await this.worker.request({ op: "key_event", code: DARWIN_KEYCODES.shift.code, down: false });
-    }
-  }
-  async keyTap(key, modifiers = []) {
-    const entry = DARWIN_KEYCODES[key];
-    if (!entry) {
-      if (modifiers.length === 0 && Array.from(key).length === 1) {
-        await this.typeText(key);
-        return;
-      }
-      throw new Error(`Unsupported macOS key "${key}".`);
-    }
-    const activeMods = [...modifiers];
-    if (entry.shift && !activeMods.includes("shift")) {
-      activeMods.push("shift");
-    }
-    for (const m of activeMods) {
-      await this.worker.request({ op: "key_event", code: DARWIN_KEYCODES[m].code, down: true, modifiers: activeMods });
-    }
-    await this.worker.request({ op: "key_event", code: entry.code, down: true, modifiers: activeMods });
-    await this.worker.request({ op: "key_event", code: entry.code, down: false, modifiers: activeMods });
-    for (const m of [...activeMods].reverse()) {
-      await this.worker.request({ op: "key_event", code: DARWIN_KEYCODES[m].code, down: false, modifiers: [] });
-    }
-  }
-  async typeText(text) {
-    let chunk = "";
-    const flush = async () => {
-      if (chunk.length > 0) {
-        await this.worker.request({ op: "type_text", text: chunk });
-        chunk = "";
-      }
-    };
-    for (const ch of text) {
-      if (ch === "\r") continue;
-      if (ch === "\n") {
-        await flush();
-        await this.keyTap("enter");
-      } else if (ch === "	") {
-        await flush();
-        await this.keyTap("tab");
-      } else {
-        chunk += ch;
-      }
-    }
-    await flush();
-  }
-  async captureScreen(options = {}) {
-    const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
-    let pngBytes;
-    if (this.customCapturePng) {
-      pngBytes = await this.customCapturePng({ display: disp, region: options.region });
-    } else {
-      const dir = mkdtempSync(join(tmpdir(), "handy-mac-"));
-      const outPath = join(dir, "screen.png");
-      try {
-        const args = ["-x", "-t", "png"];
-        if (options.region) {
-          args.push(
-            "-R",
-            `${Math.round(options.region.x)},${Math.round(options.region.y)},${Math.round(options.region.width)},${Math.round(options.region.height)}`
-          );
-        } else {
-          args.push("-D", String(disp.id + 1));
-        }
-        args.push(outPath);
-        await execFileAsync("/usr/sbin/screencapture", args, { timeout: 6e3 });
-        pngBytes = readFileSync(outPath);
-      } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
-    }
-    const decoded = decodePng(pngBytes);
-    const logicalWidth = options.region ? Math.round(options.region.width) : disp.width;
-    const logicalHeight = options.region ? Math.round(options.region.height) : disp.height;
-    const originX = options.region ? Math.round(options.region.x) : disp.x;
-    const originY = options.region ? Math.round(options.region.y) : disp.y;
-    return {
-      width: decoded.width,
-      height: decoded.height,
-      data: decoded.data,
-      originX,
-      originY,
-      logicalWidth,
-      logicalHeight,
-      scaleFactor: disp.scaleFactor || decoded.width / Math.max(1, logicalWidth),
-      displayId: disp.id
-    };
-  }
-  async doctor() {
-    try {
-      const res = await this.worker.request({ op: "doctor" });
-      const ax = Boolean(res.accessibility);
-      const sr = Boolean(res.screenRecording);
-      return [
-        {
-          name: "macOS Accessibility Permission",
-          ok: ax,
-          detail: ax ? "Granted (CoreGraphics HID events enabled)" : "Not granted \u2014 enable your terminal/MCP host in System Settings -> Privacy & Security -> Accessibility"
-        },
-        {
-          name: "macOS Screen Recording Permission",
-          ok: sr,
-          detail: sr ? "Granted (Screen capture enabled)" : "Not granted \u2014 enable your terminal/MCP host in System Settings -> Privacy & Security -> Screen Recording"
-        }
-      ];
-    } catch (err) {
-      return [
-        {
-          name: "macOS CoreGraphics Bridge",
-          ok: false,
-          detail: err instanceof Error ? err.message : String(err)
-        }
-      ];
-    }
-  }
-};
-
-// src/backends/linux-cli.ts
-import { execFile as execFile2 } from "node:child_process";
-import { mkdtempSync as mkdtempSync2, readFileSync as readFileSync2, rmSync as rmSync2 } from "node:fs";
-import { tmpdir as tmpdir2 } from "node:os";
-import { join as join2 } from "node:path";
-import { promisify as promisify2 } from "node:util";
-var execFileAsync2 = promisify2(execFile2);
-async function commandExists(cmd) {
-  try {
-    await execFileAsync2("which", [cmd], { timeout: 2e3 });
-    return true;
-  } catch {
-    return false;
-  }
-}
-var LinuxCliBackend = class {
-  name = "linux-cli";
-  platform = "linux";
-  screenshotTool = null;
-  inputTool = null;
-  wtypeAvailable = false;
-  lastKnownMouse = { x: 0, y: 0 };
-  cachedScreenSize = null;
-  async init() {
-    const isWayland = Boolean(process.env.WAYLAND_DISPLAY);
-    const screenshotCandidates = isWayland ? ["grim", "gnome-screenshot", "scrot", "import"] : ["scrot", "import", "gnome-screenshot", "grim"];
-    for (const candidate of screenshotCandidates) {
-      if (await commandExists(candidate)) {
-        this.screenshotTool = candidate;
-        break;
-      }
-    }
-    const inputCandidates = isWayland ? ["ydotool", "xdotool"] : ["xdotool", "ydotool"];
-    for (const candidate of inputCandidates) {
-      if (await commandExists(candidate)) {
-        this.inputTool = candidate;
-        break;
-      }
-    }
-    this.wtypeAvailable = await commandExists("wtype");
-  }
-  async close() {
-  }
-  async getDisplays() {
-    if (!this.cachedScreenSize) {
-      try {
-        const frame = await this.captureScreen();
-        this.cachedScreenSize = { width: frame.width, height: frame.height };
-      } catch {
-        this.cachedScreenSize = { width: 1920, height: 1080 };
-      }
-    }
-    return [
-      {
-        id: 0,
-        name: process.env.WAYLAND_DISPLAY ? `Wayland (${process.env.WAYLAND_DISPLAY})` : "Linux Display",
-        x: 0,
-        y: 0,
-        width: this.cachedScreenSize.width,
-        height: this.cachedScreenSize.height,
-        scaleFactor: 1,
-        primary: true
-      }
-    ];
-  }
-  async getMousePosition() {
-    if (this.inputTool === "xdotool") {
-      const { stdout } = await execFileAsync2("xdotool", ["getmouselocation", "--shell"], { timeout: 3e3 });
-      const xm = /^X=(-?\d+)/m.exec(stdout);
-      const ym = /^Y=(-?\d+)/m.exec(stdout);
-      if (xm && ym) {
-        this.lastKnownMouse = { x: Number(xm[1]), y: Number(ym[1]) };
-      }
-    }
-    return { ...this.lastKnownMouse };
-  }
-  async moveMouse(x, y) {
-    const rx = Math.round(x);
-    const ry = Math.round(y);
-    if (this.inputTool === "xdotool") {
-      await execFileAsync2("xdotool", ["mousemove", "--", String(rx), String(ry)], { timeout: 3e3 });
-    } else if (this.inputTool === "ydotool") {
-      await execFileAsync2("ydotool", ["mousemove", "--absolute", "-x", String(rx), "-y", String(ry)], {
-        timeout: 3e3
-      });
-    } else {
-      throw new Error("No Linux input tool found (install xdotool for X11 or ydotool for Wayland).");
-    }
-    this.lastKnownMouse = { x: rx, y: ry };
-  }
-  buttonNum(button) {
-    if (this.inputTool === "ydotool") {
-      return button === "left" ? "0x00" : button === "right" ? "0x01" : "0x02";
-    }
-    return button === "left" ? "1" : button === "middle" ? "2" : "3";
-  }
-  async mouseDown(button) {
-    if (this.inputTool === "xdotool") {
-      await execFileAsync2("xdotool", ["mousedown", this.buttonNum(button)], { timeout: 3e3 });
-    } else if (this.inputTool === "ydotool") {
-      const code = button === "left" ? "0x40" : button === "right" ? "0x41" : "0x42";
-      await execFileAsync2("ydotool", ["click", code], { timeout: 3e3 });
-    } else {
-      throw new Error("No Linux input tool found.");
-    }
-  }
-  async mouseUp(button) {
-    if (this.inputTool === "xdotool") {
-      await execFileAsync2("xdotool", ["mouseup", this.buttonNum(button)], { timeout: 3e3 });
-    } else if (this.inputTool === "ydotool") {
-      const code = button === "left" ? "0x80" : button === "right" ? "0x81" : "0x82";
-      await execFileAsync2("ydotool", ["click", code], { timeout: 3e3 });
-    } else {
-      throw new Error("No Linux input tool found.");
-    }
-  }
-  async scroll(deltaX, deltaY) {
-    if (this.inputTool === "xdotool") {
-      const vSteps = Math.round(Math.abs(deltaY));
-      if (vSteps > 0) {
-        await execFileAsync2("xdotool", ["click", "--repeat", String(vSteps), deltaY < 0 ? "4" : "5"], {
-          timeout: 3e3
-        });
-      }
-      const hSteps = Math.round(Math.abs(deltaX));
-      if (hSteps > 0) {
-        await execFileAsync2("xdotool", ["click", "--repeat", String(hSteps), deltaX < 0 ? "6" : "7"], {
-          timeout: 3e3
-        });
-      }
-    } else if (this.inputTool === "ydotool") {
-      await execFileAsync2("ydotool", ["mousemove", "--wheel", "-x", String(Math.round(deltaX)), "-y", String(Math.round(-deltaY))], {
-        timeout: 3e3
-      });
-    } else {
-      throw new Error("No Linux input tool found.");
-    }
-  }
-  async keyDown(key) {
-    const parsed = parseKeyChord(key, [], "linux");
-    if (this.inputTool === "xdotool") {
-      await execFileAsync2("xdotool", ["keydown", toXdotoolKey(parsed.key)], { timeout: 3e3 });
-      return;
-    }
-    throw new Error("keyDown requires xdotool or native X11 backend.");
-  }
-  async keyUp(key) {
-    const parsed = parseKeyChord(key, [], "linux");
-    if (this.inputTool === "xdotool") {
-      await execFileAsync2("xdotool", ["keyup", toXdotoolKey(parsed.key)], { timeout: 3e3 });
-      return;
-    }
-    throw new Error("keyUp requires xdotool or native X11 backend.");
-  }
-  async keyTap(key, modifiers = []) {
-    const xdoKey = [...modifiers.map((m) => toXdotoolKey(m)), toXdotoolKey(key)].join("+");
-    if (this.inputTool === "xdotool") {
-      await execFileAsync2("xdotool", ["key", "--clearmodifiers", xdoKey], { timeout: 3e3 });
-      return;
-    }
-    if (this.wtypeAvailable) {
-      const args = [];
-      for (const m of modifiers) {
-        args.push("-M", m === "meta" ? "logo" : m);
-      }
-      args.push("-k", toXdotoolKey(key));
-      for (const m of [...modifiers].reverse()) {
-        args.push("-m", m === "meta" ? "logo" : m);
-      }
-      await execFileAsync2("wtype", args, { timeout: 3e3 });
-      return;
-    }
-    throw new Error("No Linux keyboard tool found (install xdotool or wtype).");
-  }
-  async typeText(text) {
-    if (this.inputTool === "xdotool") {
-      await execFileAsync2("xdotool", ["type", "--clearmodifiers", "--delay", "8", "--", text], { timeout: 1e4 });
-      return;
-    }
-    if (this.wtypeAvailable) {
-      await execFileAsync2("wtype", ["--", text], { timeout: 1e4 });
-      return;
-    }
-    if (this.inputTool === "ydotool") {
-      await execFileAsync2("ydotool", ["type", "--", text], { timeout: 1e4 });
-      return;
-    }
-    throw new Error("No Linux typing tool found (install xdotool, wtype, or ydotool).");
-  }
-  async captureScreen(options = {}) {
-    if (!this.screenshotTool) {
-      throw new Error("No Linux screenshot utility found (grim, scrot, import, or gnome-screenshot).");
-    }
-    const dir = mkdtempSync2(join2(tmpdir2(), "handy-shot-"));
-    const outPath = join2(dir, "screen.png");
-    try {
-      if (this.screenshotTool === "grim") {
-        const args = options.region ? ["-g", `${options.region.x},${options.region.y} ${options.region.width}x${options.region.height}`, outPath] : [outPath];
-        await execFileAsync2("grim", args, { timeout: 5e3 });
-      } else if (this.screenshotTool === "scrot") {
-        await execFileAsync2("scrot", ["--overwrite", outPath], { timeout: 5e3 });
-      } else if (this.screenshotTool === "import") {
-        await execFileAsync2("import", ["-window", "root", outPath], { timeout: 5e3 });
-      } else {
-        await execFileAsync2("gnome-screenshot", ["-f", outPath], { timeout: 5e3 });
-      }
-      const decoded = decodePng(readFileSync2(outPath));
-      this.cachedScreenSize = { width: decoded.width, height: decoded.height };
-      if (options.region && this.screenshotTool !== "grim") {
-        const cropped = cropRgba(
-          decoded.data,
-          decoded.width,
-          decoded.height,
-          options.region.x,
-          options.region.y,
-          options.region.width,
-          options.region.height
-        );
-        return {
-          width: cropped.width,
-          height: cropped.height,
-          data: cropped.data,
-          originX: cropped.x,
-          originY: cropped.y,
-          logicalWidth: cropped.width,
-          logicalHeight: cropped.height,
-          scaleFactor: 1,
-          displayId: 0
-        };
-      }
-      return {
-        width: decoded.width,
-        height: decoded.height,
-        data: decoded.data,
-        originX: options.region?.x ?? 0,
-        originY: options.region?.y ?? 0,
-        logicalWidth: decoded.width,
-        logicalHeight: decoded.height,
-        scaleFactor: 1,
-        displayId: 0
-      };
-    } finally {
-      rmSync2(dir, { recursive: true, force: true });
-    }
-  }
-  async doctor() {
-    await this.init();
-    return [
-      {
-        name: "Linux Screenshot Tool",
-        ok: this.screenshotTool !== null,
-        detail: this.screenshotTool ? `Using ${this.screenshotTool}` : "Missing (install grim or scrot)"
-      },
-      {
-        name: "Linux Input Tool",
-        ok: this.inputTool !== null || this.wtypeAvailable,
-        detail: this.inputTool || this.wtypeAvailable ? `Using ${[this.inputTool, this.wtypeAvailable ? "wtype" : null].filter(Boolean).join(", ")}` : "Missing (install xdotool or ydotool/wtype)"
-      }
-    ];
-  }
-};
-
-// src/backends/linux-x11.ts
-import { existsSync, readFileSync as readFileSync3 } from "node:fs";
-import { createConnection } from "node:net";
-import { homedir, hostname } from "node:os";
-import { join as join3 } from "node:path";
-function pad4(n) {
-  return n + 3 & ~3;
-}
-function parseX11Display(displayEnv) {
-  if (displayEnv.startsWith("unix:/") && !/^unix:\d/.test(displayEnv)) {
-    return {
-      socketPath: displayEnv.slice("unix:".length),
-      displayNum: 0,
-      screenNum: 0
-    };
-  }
-  const tcpMatch = /^tcp:([^:]+):(\d+)$/.exec(displayEnv.trim());
-  if (tcpMatch) {
-    return {
-      host: tcpMatch[1],
-      port: Number(tcpMatch[2]),
-      displayNum: 0,
-      screenNum: 0
-    };
-  }
-  const match = /^([a-zA-Z0-9._-]*):(\d+)(?:\.(\d+))?$/.exec(displayEnv.trim());
-  if (!match) {
-    throw new Error(`Invalid X11 DISPLAY "${displayEnv}". Expected format like ":0" or "127.0.0.1:0".`);
-  }
-  const hostPart = match[1] ?? "";
-  const displayNum = Number(match[2]);
-  const screenNum = match[3] ? Number(match[3]) : 0;
-  if (hostPart === "" || hostPart === "unix") {
-    return {
-      socketPath: `/tmp/.X11-unix/X${displayNum}`,
-      displayNum,
-      screenNum
-    };
-  }
-  return {
-    host: hostPart,
-    port: 6e3 + displayNum,
-    displayNum,
-    screenNum
-  };
-}
-function readXauthorityCookie(displayNum) {
-  const xauthPath = process.env.XAUTHORITY?.trim() || join3(homedir(), ".Xauthority");
-  if (!existsSync(xauthPath)) return null;
-  try {
-    const buf = readFileSync3(xauthPath);
-    let offset = 0;
-    const localHost = hostname();
-    const dispStr = String(displayNum);
-    let fallback = null;
-    const readChunk = () => {
-      if (offset + 2 > buf.length) return null;
-      const len = buf.readUInt16BE(offset);
-      offset += 2;
-      if (offset + len > buf.length) return null;
-      const slice = buf.subarray(offset, offset + len);
-      offset += len;
-      return slice;
-    };
-    while (offset + 2 <= buf.length) {
-      const family = buf.readUInt16BE(offset);
-      offset += 2;
-      const addr = readChunk();
-      const num = readChunk();
-      const name = readChunk();
-      const data = readChunk();
-      if (!addr || !num || !name || !data) break;
-      const numText = num.toString("utf8");
-      const nameText = name.toString("ascii");
-      if (numText !== "" && numText !== dispStr) continue;
-      if (nameText !== "MIT-MAGIC-COOKIE-1") continue;
-      if (family === 65535 || family === 256 && addr.toString("utf8") === localHost) {
-        return { name: nameText, data: Buffer.from(data) };
-      }
-      if (!fallback) {
-        fallback = { name: nameText, data: Buffer.from(data) };
-      }
-    }
-    return fallback;
-  } catch {
-    return null;
-  }
-}
-function maskShift(mask) {
-  if (mask === 0) return 0;
-  let s = 0;
-  let m = mask >>> 0;
-  while ((m & 1) === 0 && s < 32) {
-    m >>>= 1;
-    s++;
-  }
-  return s;
-}
-var LinuxX11Backend = class {
-  name = "linux-x11";
-  platform = "linux";
-  displayStr;
-  socket = null;
-  rxBuf = Buffer.alloc(0);
-  seq = 0;
-  pending = /* @__PURE__ */ new Map();
-  screenInfo = null;
-  minKeycode = 8;
-  maxKeycode = 255;
-  xtestOpcode = null;
-  randrOpcode = null;
-  keysymMap = /* @__PURE__ */ new Map();
-  modifierKeycodes = {
-    shift: 50,
-    ctrl: 37,
-    alt: 64,
-    meta: 133
-  };
-  scratchKeycode = 254;
-  initialized = false;
-  constructor(options = {}) {
-    this.displayStr = options.display ?? process.env.DISPLAY ?? ":0";
-  }
-  async init() {
-    if (this.initialized && this.socket && !this.socket.destroyed) return;
-    const target = parseX11Display(this.displayStr);
-    const socket = await new Promise((resolve2, reject) => {
-      const s = target.socketPath ? createConnection({ path: target.socketPath }) : createConnection({ host: target.host ?? "127.0.0.1", port: target.port ?? 6e3 });
-      const onErr = (err) => {
-        s.removeListener("connect", onConnect);
-        reject(err);
-      };
-      const onConnect = () => {
-        s.removeListener("error", onErr);
-        s.setNoDelay(true);
-        resolve2(s);
-      };
-      s.once("error", onErr);
-      s.once("connect", onConnect);
-    });
-    this.socket = socket;
-    this.seq = 0;
-    this.rxBuf = Buffer.alloc(0);
-    this.pending.clear();
-    const auth = readXauthorityCookie(target.displayNum);
-    const authName = auth ? Buffer.from(auth.name, "ascii") : Buffer.alloc(0);
-    const authData = auth ? auth.data : Buffer.alloc(0);
-    const setupReq = Buffer.alloc(12 + pad4(authName.length) + pad4(authData.length));
-    setupReq[0] = 108;
-    setupReq[1] = 0;
-    setupReq.writeUInt16LE(11, 2);
-    setupReq.writeUInt16LE(0, 4);
-    setupReq.writeUInt16LE(authName.length, 6);
-    setupReq.writeUInt16LE(authData.length, 8);
-    authName.copy(setupReq, 12);
-    authData.copy(setupReq, 12 + pad4(authName.length));
-    const setupReply = await new Promise((resolve2, reject) => {
-      let buf = Buffer.alloc(0);
-      const onData = (chunk) => {
-        buf = Buffer.concat([buf, chunk]);
-        if (buf.length < 8) return;
-        const additionalWords = buf.readUInt16LE(6);
-        const totalBytes = 8 + additionalWords * 4;
-        if (buf.length < totalBytes) return;
-        cleanup();
-        const packet = buf.subarray(0, totalBytes);
-        this.rxBuf = buf.subarray(totalBytes);
-        resolve2(packet);
-      };
-      const onErr = (err) => {
-        cleanup();
-        reject(err);
-      };
-      const onClose = () => {
-        cleanup();
-        reject(new Error("X11 socket closed during setup handshake."));
-      };
-      const cleanup = () => {
-        socket.off("data", onData);
-        socket.off("error", onErr);
-        socket.off("close", onClose);
-      };
-      socket.on("data", onData);
-      socket.on("error", onErr);
-      socket.on("close", onClose);
-      socket.write(setupReq);
-    });
-    const status = setupReply[0];
-    if (status !== 1) {
-      const reasonLen = setupReply[1] ?? 0;
-      const reason = setupReply.subarray(8, 8 + reasonLen).toString("utf8");
-      socket.destroy();
-      throw new Error(`X11 authentication/setup failed (status=${status}): ${reason || "access denied"}`);
-    }
-    this.parseSetupBody(setupReply.subarray(8), target.screenNum);
-    socket.on("data", (chunk) => {
-      this.rxBuf = this.rxBuf.length === 0 ? chunk : Buffer.concat([this.rxBuf, chunk]);
-      this.drainIncoming();
-    });
-    socket.on("error", (err) => {
-      for (const p of this.pending.values()) p.reject(err);
-      this.pending.clear();
-    });
-    socket.on("close", () => {
-      this.initialized = false;
-      const err = new Error("X11 connection closed.");
-      for (const p of this.pending.values()) p.reject(err);
-      this.pending.clear();
-    });
-    const bigReq = await this.queryExtension("BIG-REQUESTS");
-    if (bigReq.present) {
-      const enableReq = Buffer.from([bigReq.majorOpcode, 0, 1, 0]);
-      await this.sendRequestWithReply(enableReq);
-    }
-    const xtest = await this.queryExtension("XTEST");
-    this.xtestOpcode = xtest.present ? xtest.majorOpcode : null;
-    const randr = await this.queryExtension("RANDR");
-    this.randrOpcode = randr.present ? randr.majorOpcode : null;
-    await this.loadKeyboardMapping();
-    this.initialized = true;
-    if (this.rxBuf.length > 0) this.drainIncoming();
-  }
-  parseSetupBody(body, screenIndex) {
-    const vendorLen = body.readUInt16LE(16);
-    const numScreens = body[20];
-    const numFormats = body[21];
-    const imageByteOrder = body[22];
-    this.minKeycode = body[26];
-    this.maxKeycode = body[27];
-    let offset = 32 + pad4(vendorLen);
-    const formats = /* @__PURE__ */ new Map();
-    for (let i = 0; i < numFormats; i++) {
-      const depth = body[offset];
-      const bpp = body[offset + 1];
-      const scanlinePad = body[offset + 2];
-      formats.set(depth, { bpp, scanlinePad });
-      offset += 8;
-    }
-    let chosenScreen = null;
-    for (let s = 0; s < numScreens; s++) {
-      const root = body.readUInt32LE(offset);
-      const width = body.readUInt16LE(offset + 20);
-      const height = body.readUInt16LE(offset + 22);
-      const rootVisual = body.readUInt32LE(offset + 32);
-      const rootDepth = body[offset + 38];
-      const numDepths = body[offset + 39];
-      offset += 40;
-      let redMask = 16711680;
-      let greenMask = 65280;
-      let blueMask = 255;
-      for (let d = 0; d < numDepths; d++) {
-        const numVisuals = body.readUInt16LE(offset + 2);
-        offset += 8;
-        for (let v = 0; v < numVisuals; v++) {
-          const visualId = body.readUInt32LE(offset);
-          if (visualId === rootVisual) {
-            redMask = body.readUInt32LE(offset + 8);
-            greenMask = body.readUInt32LE(offset + 12);
-            blueMask = body.readUInt32LE(offset + 16);
-          }
-          offset += 24;
-        }
-      }
-      const fmt = formats.get(rootDepth) ?? { bpp: 32, scanlinePad: 32 };
-      const info = {
-        root,
-        width,
-        height,
-        rootDepth,
-        rootVisual,
-        bitsPerPixel: fmt.bpp,
-        scanlinePad: fmt.scanlinePad,
-        imageByteOrder,
-        redMask,
-        greenMask,
-        blueMask
-      };
-      if (s === screenIndex || !chosenScreen) {
-        chosenScreen = info;
-      }
-    }
-    if (!chosenScreen) {
-      throw new Error("X11 server reported zero screens.");
-    }
-    this.screenInfo = chosenScreen;
-  }
-  drainIncoming() {
-    while (this.rxBuf.length >= 32) {
-      const packetType = this.rxBuf[0];
-      if (packetType === 1) {
-        const extraWords = this.rxBuf.readUInt32LE(4);
-        const totalLen = 32 + extraWords * 4;
-        if (this.rxBuf.length < totalLen) return;
-        const seq = this.rxBuf.readUInt16LE(2);
-        const packet = this.rxBuf.subarray(0, totalLen);
-        this.rxBuf = this.rxBuf.subarray(totalLen);
-        const waiter = this.pending.get(seq);
-        if (waiter) {
-          this.pending.delete(seq);
-          waiter.resolve(packet);
-        }
-      } else if (packetType === 0) {
-        const errCode = this.rxBuf[1];
-        const seq = this.rxBuf.readUInt16LE(2);
-        const majorOp = this.rxBuf[10];
-        const minorOp = this.rxBuf.readUInt16LE(8);
-        this.rxBuf = this.rxBuf.subarray(32);
-        const waiter = this.pending.get(seq);
-        if (waiter) {
-          this.pending.delete(seq);
-          waiter.reject(new Error(`X11 protocol error code=${errCode} opcode=${majorOp}:${minorOp} seq=${seq}`));
-        }
-      } else {
-        this.rxBuf = this.rxBuf.subarray(32);
-      }
-    }
-  }
-  nextSeq() {
-    this.seq = this.seq + 1 & 65535;
-    return this.seq;
-  }
-  sendOneWay(req) {
-    if (!this.socket || this.socket.destroyed) {
-      throw new Error("X11 socket is not connected.");
-    }
-    this.nextSeq();
-    this.socket.write(req);
-  }
-  sendRequestWithReply(req) {
-    if (!this.socket || this.socket.destroyed) {
-      return Promise.reject(new Error("X11 socket is not connected."));
-    }
-    const seq = this.nextSeq();
-    return new Promise((resolve2, reject) => {
-      this.pending.set(seq, { resolve: resolve2, reject });
-      this.socket.write(req);
-    });
-  }
-  async sync() {
-    const req = Buffer.from([43, 0, 1, 0]);
-    await this.sendRequestWithReply(req);
-  }
-  async queryExtension(name) {
-    const nameBytes = Buffer.from(name, "ascii");
-    const padded = pad4(nameBytes.length);
-    const req = Buffer.alloc(8 + padded);
-    req[0] = 98;
-    req[1] = 0;
-    req.writeUInt16LE((8 + padded) / 4, 2);
-    req.writeUInt16LE(nameBytes.length, 4);
-    nameBytes.copy(req, 8);
-    const reply = await this.sendRequestWithReply(req);
-    return {
-      present: reply[8] === 1,
-      majorOpcode: reply[9]
-    };
-  }
-  async loadKeyboardMapping() {
-    const count = this.maxKeycode - this.minKeycode + 1;
-    const req = Buffer.alloc(8);
-    req[0] = 101;
-    req[1] = 0;
-    req.writeUInt16LE(2, 2);
-    req[4] = this.minKeycode;
-    req[5] = count;
-    const reply = await this.sendRequestWithReply(req);
-    const keysymsPerKeycode = reply[1];
-    if (keysymsPerKeycode === 0) return;
-    this.keysymMap.clear();
-    let unusedCandidate = this.maxKeycode;
-    for (let i = 0; i < count; i++) {
-      const keycode = this.minKeycode + i;
-      const baseOffset = 32 + i * keysymsPerKeycode * 4;
-      let allZero = true;
-      for (let col = 0; col < Math.min(2, keysymsPerKeycode); col++) {
-        const symOffset = baseOffset + col * 4;
-        if (symOffset + 4 > reply.length) break;
-        const sym = reply.readUInt32LE(symOffset);
-        if (sym !== 0) {
-          allZero = false;
-          if (!this.keysymMap.has(sym)) {
-            this.keysymMap.set(sym, { keycode, shift: col === 1 });
-          }
-        }
-      }
-      if (allZero && keycode >= 96) {
-        unusedCandidate = keycode;
-      }
-    }
-    this.scratchKeycode = unusedCandidate;
-    this.modifierKeycodes = {
-      shift: this.keysymMap.get(X11_KEYSYMS.shift)?.keycode ?? 50,
-      ctrl: this.keysymMap.get(X11_KEYSYMS.ctrl)?.keycode ?? 37,
-      alt: this.keysymMap.get(X11_KEYSYMS.alt)?.keycode ?? 64,
-      meta: this.keysymMap.get(X11_KEYSYMS.meta)?.keycode ?? 133
-    };
-  }
-  sendXTestEvent(type, detail, x = 0, y = 0) {
-    if (this.xtestOpcode === null) {
-      throw new Error(
-        "X11 server does not advertise the XTEST extension needed for synthetic keyboard/mouse button injection."
-      );
-    }
-    const req = Buffer.alloc(36);
-    req[0] = this.xtestOpcode;
-    req[1] = 2;
-    req.writeUInt16LE(9, 2);
-    req[4] = type;
-    req[5] = detail & 255;
-    req.writeUInt32LE(0, 8);
-    req.writeUInt32LE(this.screenInfo?.root ?? 0, 12);
-    req.writeInt16LE(Math.round(x), 24);
-    req.writeInt16LE(Math.round(y), 26);
-    this.sendOneWay(req);
-  }
-  async resolveKeycodeForKeysym(keysym) {
-    const existing = this.keysymMap.get(keysym);
-    if (existing) return existing;
-    for (const [sym, entry] of this.keysymMap.entries()) {
-      if (entry.keycode === this.scratchKeycode) {
-        this.keysymMap.delete(sym);
-      }
-    }
-    const req = Buffer.alloc(12);
-    req[0] = 100;
-    req[1] = 1;
-    req.writeUInt16LE(3, 2);
-    req[4] = this.scratchKeycode;
-    req[5] = 1;
-    req.writeUInt32LE(keysym >>> 0, 8);
-    this.sendOneWay(req);
-    await this.sync();
-    const mapped = { keycode: this.scratchKeycode, shift: false };
-    this.keysymMap.set(keysym, mapped);
-    return mapped;
-  }
-  async close() {
-    this.initialized = false;
-    if (this.socket) {
-      this.socket.destroy();
-      this.socket = null;
-    }
-    this.pending.clear();
-  }
-  async ensureReady() {
-    if (!this.initialized || !this.screenInfo || !this.socket || this.socket.destroyed) {
-      await this.init();
-    }
-    return this.screenInfo;
-  }
-  async getDisplays() {
-    const screen = await this.ensureReady();
-    if (this.randrOpcode !== null) {
-      try {
-        const verReq = Buffer.alloc(12);
-        verReq[0] = this.randrOpcode;
-        verReq[1] = 0;
-        verReq.writeUInt16LE(3, 2);
-        verReq.writeUInt32LE(1, 4);
-        verReq.writeUInt32LE(5, 8);
-        const verRep = await this.sendRequestWithReply(verReq);
-        const maj = verRep.readUInt32LE(8);
-        const min = verRep.readUInt32LE(12);
-        if (maj > 1 || maj === 1 && min >= 5) {
-          const monReq = Buffer.alloc(12);
-          monReq[0] = this.randrOpcode;
-          monReq[1] = 42;
-          monReq.writeUInt16LE(3, 2);
-          monReq.writeUInt32LE(screen.root, 4);
-          monReq[8] = 1;
-          const monRep = await this.sendRequestWithReply(monReq);
-          const nMonitors = monRep.readUInt32LE(12);
-          if (nMonitors > 0) {
-            const displays = [];
-            let off = 32;
-            for (let i = 0; i < nMonitors && off + 24 <= monRep.length; i++) {
-              const primary = monRep[off + 4] === 1;
-              const nOutput = monRep.readUInt16LE(off + 6);
-              const mx = monRep.readInt16LE(off + 8);
-              const my = monRep.readInt16LE(off + 10);
-              const mw = monRep.readUInt16LE(off + 12);
-              const mh = monRep.readUInt16LE(off + 14);
-              displays.push({
-                id: i,
-                name: `X11 Monitor ${i}`,
-                x: mx,
-                y: my,
-                width: mw,
-                height: mh,
-                scaleFactor: 1,
-                primary: primary || i === 0
-              });
-              off += 24 + nOutput * 4;
-            }
-            if (displays.length > 0) return displays;
-          }
-        }
-      } catch {
-      }
-    }
-    return [
-      {
-        id: 0,
-        name: `X11 Screen (${this.displayStr})`,
-        x: 0,
-        y: 0,
-        width: screen.width,
-        height: screen.height,
-        scaleFactor: 1,
-        primary: true
-      }
-    ];
-  }
-  async getMousePosition() {
-    const screen = await this.ensureReady();
-    const req = Buffer.alloc(8);
-    req[0] = 38;
-    req[1] = 0;
-    req.writeUInt16LE(2, 2);
-    req.writeUInt32LE(screen.root, 4);
-    const reply = await this.sendRequestWithReply(req);
-    return {
-      x: reply.readInt16LE(16),
-      y: reply.readInt16LE(18)
-    };
-  }
-  async moveMouse(x, y) {
-    const screen = await this.ensureReady();
-    const cx = Math.max(0, Math.min(screen.width - 1, Math.round(x)));
-    const cy = Math.max(0, Math.min(screen.height - 1, Math.round(y)));
-    if (this.xtestOpcode !== null) {
-      this.sendXTestEvent(6, 0, cx, cy);
-    } else {
-      const req = Buffer.alloc(24);
-      req[0] = 41;
-      req[1] = 0;
-      req.writeUInt16LE(6, 2);
-      req.writeUInt32LE(0, 4);
-      req.writeUInt32LE(screen.root, 8);
-      req.writeInt16LE(cx, 20);
-      req.writeInt16LE(cy, 22);
-      this.sendOneWay(req);
-    }
-    await this.sync();
-  }
-  buttonCode(button) {
-    switch (button) {
-      case "left":
-        return 1;
-      case "middle":
-        return 2;
-      case "right":
-        return 3;
-    }
-  }
-  async mouseDown(button) {
-    await this.ensureReady();
-    this.sendXTestEvent(4, this.buttonCode(button));
-    await this.sync();
-  }
-  async mouseUp(button) {
-    await this.ensureReady();
-    this.sendXTestEvent(5, this.buttonCode(button));
-    await this.sync();
-  }
-  async scroll(deltaX, deltaY) {
-    await this.ensureReady();
-    const vSteps = Math.round(Math.abs(deltaY));
-    const vButton = deltaY < 0 ? 4 : 5;
-    for (let i = 0; i < vSteps; i++) {
-      this.sendXTestEvent(4, vButton);
-      this.sendXTestEvent(5, vButton);
-    }
-    const hSteps = Math.round(Math.abs(deltaX));
-    const hButton = deltaX < 0 ? 6 : 7;
-    for (let i = 0; i < hSteps; i++) {
-      this.sendXTestEvent(4, hButton);
-      this.sendXTestEvent(5, hButton);
-    }
-    await this.sync();
-  }
-  async keyDown(key) {
-    await this.ensureReady();
-    const parsed = parseKeyChord(key, [], "linux");
-    const sym = toX11Keysym(parsed.key);
-    const resolved = await this.resolveKeycodeForKeysym(sym);
-    if (resolved.shift) {
-      this.sendXTestEvent(2, this.modifierKeycodes.shift);
-    }
-    this.sendXTestEvent(2, resolved.keycode);
-    await this.sync();
-  }
-  async keyUp(key) {
-    await this.ensureReady();
-    const parsed = parseKeyChord(key, [], "linux");
-    const sym = toX11Keysym(parsed.key);
-    const resolved = await this.resolveKeycodeForKeysym(sym);
-    this.sendXTestEvent(3, resolved.keycode);
-    if (resolved.shift) {
-      this.sendXTestEvent(3, this.modifierKeycodes.shift);
-    }
-    await this.sync();
-  }
-  async keyTap(key, modifiers = []) {
-    await this.ensureReady();
-    const sym = toX11Keysym(key);
-    const resolved = await this.resolveKeycodeForKeysym(sym);
-    const activeMods = [...modifiers];
-    if (resolved.shift && !activeMods.includes("shift")) {
-      activeMods.push("shift");
-    }
-    for (const m of activeMods) {
-      this.sendXTestEvent(2, this.modifierKeycodes[m]);
-    }
-    this.sendXTestEvent(2, resolved.keycode);
-    this.sendXTestEvent(3, resolved.keycode);
-    for (let i = activeMods.length - 1; i >= 0; i--) {
-      this.sendXTestEvent(3, this.modifierKeycodes[activeMods[i]]);
-    }
-    await this.sync();
-  }
-  async typeText(text) {
-    await this.ensureReady();
-    for (const ch of Array.from(text)) {
-      if (ch === "\r") continue;
-      if (ch === "\n") {
-        await this.keyTap("enter");
-        continue;
-      }
-      if (ch === "	") {
-        await this.keyTap("tab");
-        continue;
-      }
-      const cp = ch.codePointAt(0);
-      const sym = cp >= 32 && cp <= 255 ? cp : 16777216 | cp;
-      const resolved = await this.resolveKeycodeForKeysym(sym);
-      if (resolved.shift) {
-        this.sendXTestEvent(2, this.modifierKeycodes.shift);
-      }
-      this.sendXTestEvent(2, resolved.keycode);
-      this.sendXTestEvent(3, resolved.keycode);
-      if (resolved.shift) {
-        this.sendXTestEvent(3, this.modifierKeycodes.shift);
-      }
-      await this.sync();
-    }
-  }
-  async captureScreen(options = {}) {
-    const screen = await this.ensureReady();
-    const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
-    const rx = options.region ? Math.max(0, Math.min(screen.width - 1, Math.round(options.region.x))) : disp.x;
-    const ry = options.region ? Math.max(0, Math.min(screen.height - 1, Math.round(options.region.y))) : disp.y;
-    const rw = options.region ? Math.max(1, Math.min(screen.width - rx, Math.round(options.region.width))) : Math.min(disp.width, screen.width - rx);
-    const rh = options.region ? Math.max(1, Math.min(screen.height - ry, Math.round(options.region.height))) : Math.min(disp.height, screen.height - ry);
-    const bytesPerPixel = Math.max(2, Math.floor(screen.bitsPerPixel / 8));
-    const padBytes = screen.scanlinePad / 8;
-    const scanlineStride = Math.ceil(rw * bytesPerPixel / padBytes) * padBytes;
-    const rowsPerBand = Math.max(1, Math.min(rh, Math.floor(4 * 1024 * 1024 / Math.max(1, scanlineStride))));
-    const rgba = new Uint8Array(rw * rh * 4);
-    const rShift = maskShift(screen.redMask);
-    const gShift = maskShift(screen.greenMask);
-    const bShift = maskShift(screen.blueMask);
-    const msb = screen.imageByteOrder === 1;
-    for (let bandY = 0; bandY < rh; bandY += rowsPerBand) {
-      const bandH = Math.min(rowsPerBand, rh - bandY);
-      const req = Buffer.alloc(20);
-      req[0] = 73;
-      req[1] = 2;
-      req.writeUInt16LE(5, 2);
-      req.writeUInt32LE(screen.root, 4);
-      req.writeInt16LE(rx, 8);
-      req.writeInt16LE(ry + bandY, 10);
-      req.writeUInt16LE(rw, 12);
-      req.writeUInt16LE(bandH, 14);
-      req.writeUInt32LE(4294967295, 16);
-      let reply;
-      try {
-        reply = await this.sendRequestWithReply(req);
-      } catch (err) {
-        if (err instanceof Error && err.message.includes("code=8")) {
-          const fallback = new LinuxCliBackend();
-          await fallback.init();
-          return fallback.captureScreen(options);
-        }
-        throw err;
-      }
-      const data = reply.subarray(32);
-      for (let row = 0; row < bandH; row++) {
-        const srcRowStart = row * scanlineStride;
-        const dstRowStart = (bandY + row) * rw * 4;
-        if (bytesPerPixel === 4) {
-          for (let col = 0; col < rw; col++) {
-            const s = srcRowStart + col * 4;
-            const pixel = msb ? data.readUInt32BE(s) : data.readUInt32LE(s);
-            const d = dstRowStart + col * 4;
-            rgba[d] = (pixel & screen.redMask) >>> rShift & 255;
-            rgba[d + 1] = (pixel & screen.greenMask) >>> gShift & 255;
-            rgba[d + 2] = (pixel & screen.blueMask) >>> bShift & 255;
-            rgba[d + 3] = 255;
-          }
-        } else if (bytesPerPixel === 3) {
-          for (let col = 0; col < rw; col++) {
-            const s = srcRowStart + col * 3;
-            const pixel = msb ? data[s] << 16 | data[s + 1] << 8 | data[s + 2] : data[s] | data[s + 1] << 8 | data[s + 2] << 16;
-            const d = dstRowStart + col * 4;
-            rgba[d] = (pixel & screen.redMask) >>> rShift & 255;
-            rgba[d + 1] = (pixel & screen.greenMask) >>> gShift & 255;
-            rgba[d + 2] = (pixel & screen.blueMask) >>> bShift & 255;
-            rgba[d + 3] = 255;
-          }
-        } else {
-          for (let col = 0; col < rw; col++) {
-            const s = srcRowStart + col * 2;
-            const pixel = msb ? data.readUInt16BE(s) : data.readUInt16LE(s);
-            const d = dstRowStart + col * 4;
-            rgba[d] = (pixel >>> 11 & 31) * 255 / 31;
-            rgba[d + 1] = (pixel >>> 5 & 63) * 255 / 63;
-            rgba[d + 2] = (pixel & 31) * 255 / 31;
-            rgba[d + 3] = 255;
-          }
-        }
-      }
-    }
-    return {
-      width: rw,
-      height: rh,
-      data: rgba,
-      originX: rx,
-      originY: ry,
-      logicalWidth: rw,
-      logicalHeight: rh,
-      scaleFactor: 1,
-      displayId: disp.id
-    };
-  }
-  async doctor() {
-    const checks = [];
-    try {
-      const screen = await this.ensureReady();
-      checks.push({
-        name: "X11 Socket Connection",
-        ok: true,
-        detail: `Connected to ${this.displayStr} (${screen.width}x${screen.height}, depth=${screen.rootDepth})`
-      });
-      checks.push({
-        name: "XTEST Input Extension",
-        ok: this.xtestOpcode !== null,
-        detail: this.xtestOpcode !== null ? `Available (opcode ${this.xtestOpcode})` : "Missing XTEST extension on X server"
-      });
-    } catch (err) {
-      checks.push({
-        name: "X11 Socket Connection",
-        ok: false,
-        detail: err instanceof Error ? err.message : String(err)
-      });
-    }
-    return checks;
-  }
-};
-
-// src/font.ts
-var GLYPHS_5X7 = {
-  " ": [0, 0, 0, 0, 0, 0, 0],
-  "!": [4, 4, 4, 4, 4, 0, 4],
-  '"': [10, 10, 4, 0, 0, 0, 0],
-  "#": [10, 10, 31, 10, 31, 10, 10],
-  $: [4, 15, 20, 14, 5, 30, 4],
-  "%": [24, 25, 2, 4, 8, 19, 3],
-  "&": [12, 18, 20, 8, 21, 18, 13],
-  "'": [4, 4, 2, 0, 0, 0, 0],
-  "(": [2, 4, 8, 8, 8, 4, 2],
-  ")": [8, 4, 2, 2, 2, 4, 8],
-  "*": [0, 4, 21, 14, 21, 4, 0],
-  "+": [0, 4, 4, 31, 4, 4, 0],
-  ",": [0, 0, 0, 0, 6, 4, 8],
-  "-": [0, 0, 0, 31, 0, 0, 0],
-  ".": [0, 0, 0, 0, 0, 6, 6],
-  "/": [1, 2, 2, 4, 8, 8, 16],
-  "0": [14, 17, 19, 21, 25, 17, 14],
-  "1": [4, 12, 4, 4, 4, 4, 14],
-  "2": [14, 17, 1, 6, 8, 16, 31],
-  "3": [31, 2, 4, 6, 1, 17, 14],
-  "4": [2, 6, 10, 18, 31, 2, 2],
-  "5": [31, 16, 30, 1, 1, 17, 14],
-  "6": [6, 8, 16, 30, 17, 17, 14],
-  "7": [31, 1, 2, 4, 8, 8, 8],
-  "8": [14, 17, 17, 14, 17, 17, 14],
-  "9": [14, 17, 17, 15, 1, 2, 12],
-  ":": [0, 6, 6, 0, 6, 6, 0],
-  ";": [0, 6, 6, 0, 6, 4, 8],
-  "<": [2, 4, 8, 16, 8, 4, 2],
-  "=": [0, 0, 31, 0, 31, 0, 0],
-  ">": [8, 4, 2, 1, 2, 4, 8],
-  "?": [14, 17, 1, 2, 4, 0, 4],
-  "@": [14, 17, 23, 21, 23, 16, 14],
-  A: [14, 17, 17, 31, 17, 17, 17],
-  B: [30, 17, 17, 30, 17, 17, 30],
-  C: [14, 17, 16, 16, 16, 17, 14],
-  D: [28, 18, 17, 17, 17, 18, 28],
-  E: [31, 16, 16, 30, 16, 16, 31],
-  F: [31, 16, 16, 30, 16, 16, 16],
-  G: [14, 17, 16, 23, 17, 17, 15],
-  H: [17, 17, 17, 31, 17, 17, 17],
-  I: [14, 4, 4, 4, 4, 4, 14],
-  J: [7, 2, 2, 2, 2, 18, 12],
-  K: [17, 18, 20, 24, 20, 18, 17],
-  L: [16, 16, 16, 16, 16, 16, 31],
-  M: [17, 27, 21, 21, 17, 17, 17],
-  N: [17, 25, 21, 19, 17, 17, 17],
-  O: [14, 17, 17, 17, 17, 17, 14],
-  P: [30, 17, 17, 30, 16, 16, 16],
-  Q: [14, 17, 17, 17, 21, 18, 13],
-  R: [30, 17, 17, 30, 20, 18, 17],
-  S: [15, 16, 16, 14, 1, 1, 30],
-  T: [31, 4, 4, 4, 4, 4, 4],
-  U: [17, 17, 17, 17, 17, 17, 14],
-  V: [17, 17, 17, 17, 17, 10, 4],
-  W: [17, 17, 17, 21, 21, 27, 17],
-  X: [17, 17, 10, 4, 10, 17, 17],
-  Y: [17, 17, 10, 4, 4, 4, 4],
-  Z: [31, 1, 2, 4, 8, 16, 31],
-  "[": [14, 8, 8, 8, 8, 8, 14],
-  "\\": [16, 8, 8, 4, 2, 2, 1],
-  "]": [14, 2, 2, 2, 2, 2, 14],
-  "^": [4, 10, 17, 0, 0, 0, 0],
-  _: [0, 0, 0, 0, 0, 0, 31],
-  "`": [8, 4, 2, 0, 0, 0, 0],
-  a: [0, 0, 14, 1, 15, 17, 15],
-  b: [16, 16, 30, 17, 17, 17, 30],
-  c: [0, 0, 14, 17, 16, 17, 14],
-  d: [1, 1, 15, 17, 17, 17, 15],
-  e: [0, 0, 14, 17, 31, 16, 14],
-  f: [6, 8, 30, 8, 8, 8, 8],
-  g: [0, 15, 17, 17, 15, 1, 14],
-  h: [16, 16, 30, 17, 17, 17, 17],
-  i: [4, 0, 12, 4, 4, 4, 14],
-  j: [2, 0, 6, 2, 2, 18, 12],
-  k: [16, 16, 18, 20, 24, 20, 18],
-  l: [12, 4, 4, 4, 4, 4, 14],
-  m: [0, 0, 26, 21, 21, 21, 21],
-  n: [0, 0, 30, 17, 17, 17, 17],
-  o: [0, 0, 14, 17, 17, 17, 14],
-  p: [0, 0, 30, 17, 30, 16, 16],
-  q: [0, 0, 15, 17, 15, 1, 1],
-  r: [0, 0, 22, 25, 16, 16, 16],
-  s: [0, 0, 15, 16, 14, 1, 30],
-  t: [8, 8, 30, 8, 8, 9, 6],
-  u: [0, 0, 17, 17, 17, 19, 13],
-  v: [0, 0, 17, 17, 17, 10, 4],
-  w: [0, 0, 17, 17, 21, 21, 10],
-  x: [0, 0, 17, 10, 4, 10, 17],
-  y: [0, 0, 17, 17, 15, 1, 14],
-  z: [0, 0, 31, 2, 4, 8, 31],
-  "{": [2, 4, 4, 8, 4, 4, 2],
-  "|": [4, 4, 4, 4, 4, 4, 4],
-  "}": [8, 4, 4, 2, 4, 4, 8],
-  "~": [0, 8, 21, 2, 0, 0, 0]
-};
-var FALLBACK_GLYPH = [
-  31,
-  17,
-  21,
-  17,
-  21,
-  17,
-  31
-];
-function blendPixel(rgba, width, height, x, y, color) {
-  const ix = x | 0;
-  const iy = y | 0;
-  if (ix < 0 || iy < 0 || ix >= width || iy >= height) return;
-  const alpha = color[3];
-  if (alpha <= 0) return;
-  const idx = (iy * width + ix) * 4;
-  if (alpha >= 255) {
-    rgba[idx] = color[0];
-    rgba[idx + 1] = color[1];
-    rgba[idx + 2] = color[2];
-    rgba[idx + 3] = 255;
-    return;
-  }
-  const inv = 255 - alpha;
-  rgba[idx] = (color[0] * alpha + rgba[idx] * inv + 127) / 255 | 0;
-  rgba[idx + 1] = (color[1] * alpha + rgba[idx + 1] * inv + 127) / 255 | 0;
-  rgba[idx + 2] = (color[2] * alpha + rgba[idx + 2] * inv + 127) / 255 | 0;
-  rgba[idx + 3] = 255;
-}
-function fillRect(rgba, width, height, x, y, rectWidth, rectHeight, color) {
-  const x0 = Math.max(0, Math.floor(x));
-  const y0 = Math.max(0, Math.floor(y));
-  const x1 = Math.min(width, Math.ceil(x + rectWidth));
-  const y1 = Math.min(height, Math.ceil(y + rectHeight));
-  if (x1 <= x0 || y1 <= y0) return;
-  for (let py = y0; py < y1; py++) {
-    for (let px = x0; px < x1; px++) {
-      blendPixel(rgba, width, height, px, py, color);
-    }
-  }
-}
-function strokeRect(rgba, width, height, x, y, rectWidth, rectHeight, color, thickness = 1) {
-  fillRect(rgba, width, height, x, y, rectWidth, thickness, color);
-  fillRect(rgba, width, height, x, y + rectHeight - thickness, rectWidth, thickness, color);
-  fillRect(rgba, width, height, x, y + thickness, thickness, rectHeight - thickness * 2, color);
-  fillRect(
-    rgba,
-    width,
-    height,
-    x + rectWidth - thickness,
-    y + thickness,
-    thickness,
-    rectHeight - thickness * 2,
-    color
-  );
-}
-function drawLine(rgba, width, height, x0, y0, x1, y1, color) {
-  let cx = Math.round(x0);
-  let cy = Math.round(y0);
-  const tx = Math.round(x1);
-  const ty = Math.round(y1);
-  const dx = Math.abs(tx - cx);
-  const dy = -Math.abs(ty - cy);
-  const sx = cx < tx ? 1 : -1;
-  const sy = cy < ty ? 1 : -1;
-  let err = dx + dy;
-  for (; ; ) {
-    blendPixel(rgba, width, height, cx, cy, color);
-    if (cx === tx && cy === ty) break;
-    const e2 = 2 * err;
-    if (e2 >= dy) {
-      err += dy;
-      cx += sx;
-    }
-    if (e2 <= dx) {
-      err += dx;
-      cy += sy;
-    }
-  }
-}
-function drawCircleRing(rgba, width, height, cx, cy, radius, thickness, color) {
-  const rOuter = radius + thickness / 2;
-  const rInner = Math.max(0, radius - thickness / 2);
-  const rOuterSq = rOuter * rOuter;
-  const rInnerSq = rInner * rInner;
-  const minX = Math.max(0, Math.floor(cx - rOuter - 1));
-  const maxX = Math.min(width - 1, Math.ceil(cx + rOuter + 1));
-  const minY = Math.max(0, Math.floor(cy - rOuter - 1));
-  const maxY = Math.min(height - 1, Math.ceil(cy + rOuter + 1));
-  for (let py = minY; py <= maxY; py++) {
-    for (let px = minX; px <= maxX; px++) {
-      const dx = px - cx;
-      const dy = py - cy;
-      const distSq = dx * dx + dy * dy;
-      if (distSq >= rInnerSq && distSq <= rOuterSq) {
-        blendPixel(rgba, width, height, px, py, color);
-      }
-    }
-  }
-}
-function measureText(text, scale = 1) {
-  const chars = Array.from(text);
-  if (chars.length === 0) return { width: 0, height: 7 * scale };
-  return {
-    width: (chars.length * 6 - 1) * scale,
-    height: 7 * scale
-  };
-}
-function drawText(rgba, width, height, x, y, text, color, scale = 1) {
-  const chars = Array.from(text);
-  let cursorX = Math.round(x);
-  const startY = Math.round(y);
-  for (const ch of chars) {
-    const glyph = GLYPHS_5X7[ch] ?? FALLBACK_GLYPH;
-    for (let row = 0; row < 7; row++) {
-      const rowBits = glyph[row];
-      for (let col = 0; col < 5; col++) {
-        if ((rowBits & 1 << 4 - col) !== 0) {
-          if (scale === 1) {
-            blendPixel(rgba, width, height, cursorX + col, startY + row, color);
-          } else {
-            fillRect(rgba, width, height, cursorX + col * scale, startY + row * scale, scale, scale, color);
-          }
-        }
-      }
-    }
-    cursorX += 6 * scale;
-  }
-}
-function drawBadge(rgba, width, height, x, y, text, options = {}) {
-  const scale = options.scale ?? 1;
-  const padX = options.padX ?? 4 * scale;
-  const padY = options.padY ?? 3 * scale;
-  const bg = options.bg ?? [15, 23, 42, 220];
-  const fg = options.fg ?? [248, 250, 252, 255];
-  const border = options.border;
-  const metrics = measureText(text, scale);
-  const bw = metrics.width + padX * 2;
-  const bh = metrics.height + padY * 2;
-  fillRect(rgba, width, height, x, y, bw, bh, bg);
-  if (border) {
-    strokeRect(rgba, width, height, x, y, bw, bh, border, 1);
-  }
-  drawText(rgba, width, height, x + padX, y + padY, text, fg, scale);
-  return { width: bw, height: bh };
-}
-
-// src/backends/virtual.ts
-var VirtualDesktopBackend = class _VirtualDesktopBackend {
-  name = "virtual";
-  platform = "virtual";
-  width;
-  height;
-  mouse;
-  heldButtons = /* @__PURE__ */ new Set();
-  heldKeys = /* @__PURE__ */ new Set();
-  lastClickTime = 0;
-  lastClickPos = { x: -1, y: -1 };
-  clickStreak = 0;
-  state = {
-    focusedField: null,
-    fields: {
-      name: "",
-      notes: ""
-    },
-    selectedAll: false,
-    submittedValue: "",
-    counter: 0,
-    lastButton: null,
-    lastClickCount: 0,
-    scrollOffset: 0,
-    cardPosition: { x: 760, y: 150 },
-    draggingCard: false,
-    dragOffset: { x: 0, y: 0 },
-    events: ["Virtual desktop initialized"]
-  };
-  // Fixed widget hitboxes in logical screen coordinates
-  static LAYOUT = {
-    nameInput: { x: 120, y: 150, width: 360, height: 44 },
-    notesInput: { x: 120, y: 230, width: 360, height: 44 },
-    submitButton: { x: 120, y: 305, width: 150, height: 42 },
-    counterButton: { x: 295, y: 305, width: 185, height: 42 },
-    clearButton: { x: 500, y: 305, width: 120, height: 42 },
-    scrollBox: { x: 120, y: 390, width: 500, height: 280 },
-    cardSize: { width: 220, height: 110 }
-  };
-  constructor(options = {}) {
-    this.width = options.width ?? 1280;
-    this.height = options.height ?? 800;
-    this.mouse = { x: Math.round(this.width / 2), y: Math.round(this.height / 2) };
-  }
-  async init() {
-  }
-  async close() {
-    this.heldButtons.clear();
-    this.heldKeys.clear();
-  }
-  async getDisplays() {
-    return [
-      {
-        id: 0,
-        name: "Handy Virtual Display",
-        x: 0,
-        y: 0,
-        width: this.width,
-        height: this.height,
-        scaleFactor: 1,
-        primary: true
-      }
-    ];
-  }
-  async getMousePosition() {
-    return { ...this.mouse };
-  }
-  async moveMouse(x, y) {
-    this.mouse = {
-      x: Math.max(0, Math.min(this.width - 1, Math.round(x))),
-      y: Math.max(0, Math.min(this.height - 1, Math.round(y)))
-    };
-    if (this.state.draggingCard && this.heldButtons.has("left")) {
-      this.state.cardPosition = {
-        x: Math.max(40, Math.min(this.width - 260, this.mouse.x - this.state.dragOffset.x)),
-        y: Math.max(60, Math.min(this.height - 140, this.mouse.y - this.state.dragOffset.y))
-      };
-    }
-  }
-  hitRect(p, r) {
-    return p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height;
-  }
-  pushEvent(msg) {
-    this.state.events.unshift(msg);
-    if (this.state.events.length > 25) {
-      this.state.events.length = 25;
-    }
-  }
-  async mouseDown(button) {
-    this.heldButtons.add(button);
-    this.state.lastButton = button;
-    const now = Date.now();
-    const nearPrev = Math.abs(this.mouse.x - this.lastClickPos.x) <= 6 && Math.abs(this.mouse.y - this.lastClickPos.y) <= 6;
-    if (now - this.lastClickTime <= 450 && nearPrev) {
-      this.clickStreak += 1;
-    } else {
-      this.clickStreak = 1;
-    }
-    this.lastClickTime = now;
-    this.lastClickPos = { ...this.mouse };
-    this.state.lastClickCount = this.clickStreak;
-    if (button === "left") {
-      const L = _VirtualDesktopBackend.LAYOUT;
-      const cardRect = {
-        x: this.state.cardPosition.x,
-        y: this.state.cardPosition.y,
-        width: L.cardSize.width,
-        height: L.cardSize.height
-      };
-      if (this.hitRect(this.mouse, L.nameInput)) {
-        this.state.focusedField = "name";
-        this.state.selectedAll = this.clickStreak >= 2;
-        this.pushEvent(`Focused Name input (${this.mouse.x},${this.mouse.y})`);
-      } else if (this.hitRect(this.mouse, L.notesInput)) {
-        this.state.focusedField = "notes";
-        this.state.selectedAll = this.clickStreak >= 2;
-        this.pushEvent(`Focused Notes input (${this.mouse.x},${this.mouse.y})`);
-      } else if (this.hitRect(this.mouse, L.submitButton)) {
-        this.state.submittedValue = this.state.fields.name;
-        this.pushEvent(`Clicked Submit -> "${this.state.submittedValue}"`);
-      } else if (this.hitRect(this.mouse, L.counterButton)) {
-        this.state.counter += 1;
-        this.pushEvent(`Incremented counter -> ${this.state.counter}`);
-      } else if (this.hitRect(this.mouse, L.clearButton)) {
-        this.state.fields.name = "";
-        this.state.fields.notes = "";
-        this.state.submittedValue = "";
-        this.state.selectedAll = false;
-        this.pushEvent("Cleared form fields");
-      } else if (this.hitRect(this.mouse, cardRect)) {
-        this.state.draggingCard = true;
-        this.state.dragOffset = {
-          x: this.mouse.x - this.state.cardPosition.x,
-          y: this.mouse.y - this.state.cardPosition.y
-        };
-        this.pushEvent(`Started dragging card at (${this.mouse.x},${this.mouse.y})`);
-      } else {
-        this.state.focusedField = null;
-        this.state.selectedAll = false;
-        this.pushEvent(`Left click at (${this.mouse.x},${this.mouse.y})`);
-      }
-    } else {
-      this.pushEvent(`${button} click at (${this.mouse.x},${this.mouse.y})`);
-    }
-  }
-  async mouseUp(button) {
-    this.heldButtons.delete(button);
-    if (button === "left" && this.state.draggingCard) {
-      this.state.draggingCard = false;
-      this.pushEvent(`Dropped card at (${this.state.cardPosition.x},${this.state.cardPosition.y})`);
-    }
-  }
-  async scroll(deltaX, deltaY) {
-    this.state.scrollOffset = Math.max(0, Math.min(200, this.state.scrollOffset + deltaY * 10));
-    this.pushEvent(`Scrolled dx=${deltaX} dy=${deltaY} -> offset=${this.state.scrollOffset}`);
-  }
-  async keyDown(key) {
-    const parsed = parseKeyChord(key, [], "linux");
-    this.heldKeys.add(parsed.key);
-  }
-  async keyUp(key) {
-    const parsed = parseKeyChord(key, [], "linux");
-    this.heldKeys.delete(parsed.key);
-  }
-  async keyTap(key, modifiers = []) {
-    const modSet = new Set(modifiers);
-    if (this.heldKeys.has("ctrl")) modSet.add("ctrl");
-    if (this.heldKeys.has("meta")) modSet.add("meta");
-    if (this.heldKeys.has("shift")) modSet.add("shift");
-    if (this.heldKeys.has("alt")) modSet.add("alt");
-    const field = this.state.focusedField;
-    if ((modSet.has("ctrl") || modSet.has("meta")) && key === "a") {
-      if (field) {
-        this.state.selectedAll = true;
-        this.pushEvent(`Selected all in ${field}`);
-      }
-      return;
-    }
-    if (key === "tab") {
-      this.state.focusedField = field === "name" ? "notes" : "name";
-      this.state.selectedAll = false;
-      this.pushEvent(`Tabbed focus -> ${this.state.focusedField}`);
-      return;
-    }
-    if (key === "enter") {
-      this.state.submittedValue = this.state.fields.name;
-      this.pushEvent(`Enter submit -> "${this.state.submittedValue}"`);
-      return;
-    }
-    if (key === "escape") {
-      this.state.focusedField = null;
-      this.state.selectedAll = false;
-      this.pushEvent("Escape -> blurred focus");
-      return;
-    }
-    if ((key === "backspace" || key === "delete") && field) {
-      if (this.state.selectedAll) {
-        this.state.fields[field] = "";
-        this.state.selectedAll = false;
-      } else {
-        const chars = Array.from(this.state.fields[field]);
-        chars.pop();
-        this.state.fields[field] = chars.join("");
-      }
-      return;
-    }
-    if (key === "space" && field) {
-      await this.typeText(" ");
-      return;
-    }
-    if (key.length === 1 && !modSet.has("ctrl") && !modSet.has("meta") && !modSet.has("alt") && field) {
-      const ch = modSet.has("shift") ? key.toUpperCase() : key;
-      await this.typeText(ch);
-      return;
-    }
-    this.pushEvent(`Key ${[...modSet, key].join("+")}`);
-  }
-  async typeText(text) {
-    const field = this.state.focusedField;
-    if (!field) {
-      this.pushEvent(`Typed "${text}" (no focused input)`);
-      return;
-    }
-    if (this.state.selectedAll) {
-      this.state.fields[field] = "";
-      this.state.selectedAll = false;
-    }
-    for (const ch of text) {
-      if (ch === "\n") {
-        this.state.submittedValue = this.state.fields.name;
-      } else if (ch !== "\r") {
-        this.state.fields[field] += ch;
-      }
-    }
-    this.pushEvent(`Typed "${text}" into ${field}`);
-  }
-  renderDesktop() {
-    const w = this.width;
-    const h = this.height;
-    const rgba = new Uint8Array(w * h * 4);
-    fillRect(rgba, w, h, 0, 0, w, h, [241, 245, 249, 255]);
-    fillRect(rgba, w, h, 0, 0, w, 46, [15, 23, 42, 255]);
-    drawText(rgba, w, h, 24, 16, "HANDY VIRTUAL DESKTOP", [248, 250, 252, 255], 2);
-    fillRect(rgba, w, h, 80, 80, 580, 630, [255, 255, 255, 255]);
-    strokeRect(rgba, w, h, 80, 80, 580, 630, [203, 213, 225, 255], 2);
-    drawText(rgba, w, h, 120, 102, "AGENT CONTROL WORKBENCH", [30, 41, 59, 255], 2);
-    const L = _VirtualDesktopBackend.LAYOUT;
-    drawText(rgba, w, h, L.nameInput.x, L.nameInput.y - 16, "NAME:", [71, 85, 105, 255], 1);
-    const nameFocused = this.state.focusedField === "name";
-    fillRect(rgba, w, h, L.nameInput.x, L.nameInput.y, L.nameInput.width, L.nameInput.height, [248, 250, 252, 255]);
-    strokeRect(
-      rgba,
-      w,
-      h,
-      L.nameInput.x,
-      L.nameInput.y,
-      L.nameInput.width,
-      L.nameInput.height,
-      nameFocused ? [2, 132, 199, 255] : [148, 163, 184, 255],
-      nameFocused ? 2 : 1
-    );
-    const nameDisplay = this.state.fields.name || (nameFocused ? "|" : "Click here to type...");
-    const nameColor = this.state.fields.name ? [15, 23, 42, 255] : [148, 163, 184, 255];
-    drawText(rgba, w, h, L.nameInput.x + 12, L.nameInput.y + 15, nameDisplay.slice(0, 28), nameColor, 2);
-    drawText(rgba, w, h, L.notesInput.x, L.notesInput.y - 16, "NOTES:", [71, 85, 105, 255], 1);
-    const notesFocused = this.state.focusedField === "notes";
-    fillRect(
-      rgba,
-      w,
-      h,
-      L.notesInput.x,
-      L.notesInput.y,
-      L.notesInput.width,
-      L.notesInput.height,
-      [248, 250, 252, 255]
-    );
-    strokeRect(
-      rgba,
-      w,
-      h,
-      L.notesInput.x,
-      L.notesInput.y,
-      L.notesInput.width,
-      L.notesInput.height,
-      notesFocused ? [2, 132, 199, 255] : [148, 163, 184, 255],
-      notesFocused ? 2 : 1
-    );
-    const notesDisplay = this.state.fields.notes || (notesFocused ? "|" : "Secondary field");
-    const notesColor = this.state.fields.notes ? [15, 23, 42, 255] : [148, 163, 184, 255];
-    drawText(rgba, w, h, L.notesInput.x + 12, L.notesInput.y + 15, notesDisplay.slice(0, 28), notesColor, 2);
-    fillRect(rgba, w, h, L.submitButton.x, L.submitButton.y, L.submitButton.width, L.submitButton.height, [
-      2,
-      132,
-      199,
-      255
-    ]);
-    drawText(rgba, w, h, L.submitButton.x + 38, L.submitButton.y + 14, "SUBMIT", [255, 255, 255, 255], 2);
-    fillRect(rgba, w, h, L.counterButton.x, L.counterButton.y, L.counterButton.width, L.counterButton.height, [
-      16,
-      185,
-      129,
-      255
-    ]);
-    drawText(
-      rgba,
-      w,
-      h,
-      L.counterButton.x + 18,
-      L.counterButton.y + 14,
-      `COUNT: ${this.state.counter}`,
-      [255, 255, 255, 255],
-      2
-    );
-    fillRect(rgba, w, h, L.clearButton.x, L.clearButton.y, L.clearButton.width, L.clearButton.height, [
-      100,
-      116,
-      139,
-      255
-    ]);
-    drawText(rgba, w, h, L.clearButton.x + 30, L.clearButton.y + 14, "CLEAR", [255, 255, 255, 255], 2);
-    if (this.state.submittedValue) {
-      fillRect(rgba, w, h, 120, 356, 500, 26, [220, 252, 231, 255]);
-      strokeRect(rgba, w, h, 120, 356, 500, 26, [34, 197, 94, 255], 1);
-      drawText(
-        rgba,
-        w,
-        h,
-        130,
-        365,
-        `SUBMITTED: ${this.state.submittedValue}`.slice(0, 64),
-        [22, 101, 52, 255],
-        1
-      );
-    }
-    fillRect(rgba, w, h, L.scrollBox.x, L.scrollBox.y, L.scrollBox.width, L.scrollBox.height, [15, 23, 42, 255]);
-    drawText(
-      rgba,
-      w,
-      h,
-      L.scrollBox.x + 12,
-      L.scrollBox.y + 10,
-      `EVENT LOG (SCROLL=${this.state.scrollOffset})`,
-      [56, 189, 248, 255],
-      1
-    );
-    const startIdx = Math.min(Math.floor(this.state.scrollOffset / 20), Math.max(0, this.state.events.length - 1));
-    for (let i = 0; i < 12; i++) {
-      const ev = this.state.events[startIdx + i];
-      if (!ev) break;
-      drawText(
-        rgba,
-        w,
-        h,
-        L.scrollBox.x + 12,
-        L.scrollBox.y + 32 + i * 18,
-        ev.slice(0, 76),
-        [226, 232, 240, 255],
-        1
-      );
-    }
-    const cx = this.state.cardPosition.x;
-    const cy = this.state.cardPosition.y;
-    fillRect(rgba, w, h, cx, cy, L.cardSize.width, L.cardSize.height, [254, 243, 199, 255]);
-    strokeRect(rgba, w, h, cx, cy, L.cardSize.width, L.cardSize.height, [245, 158, 11, 255], 2);
-    drawText(rgba, w, h, cx + 14, cy + 16, "DRAG CARD", [146, 64, 14, 255], 2);
-    drawText(rgba, w, h, cx + 14, cy + 48, `POS: ${cx},${cy}`, [180, 83, 9, 255], 1);
-    return rgba;
-  }
-  async captureScreen(options = {}) {
-    const full = this.renderDesktop();
-    if (options.region) {
-      const cropped = cropRgba(
-        full,
-        this.width,
-        this.height,
-        options.region.x,
-        options.region.y,
-        options.region.width,
-        options.region.height
-      );
-      return {
-        width: cropped.width,
-        height: cropped.height,
-        data: cropped.data,
-        originX: cropped.x,
-        originY: cropped.y,
-        logicalWidth: cropped.width,
-        logicalHeight: cropped.height,
-        scaleFactor: 1,
-        displayId: 0
-      };
-    }
-    return {
-      width: this.width,
-      height: this.height,
-      data: full,
-      originX: 0,
-      originY: 0,
-      logicalWidth: this.width,
-      logicalHeight: this.height,
-      scaleFactor: 1,
-      displayId: 0
-    };
-  }
-  async doctor() {
-    return [
-      {
-        name: "Virtual Desktop Backend",
-        ok: true,
-        detail: `Ready (${this.width}x${this.height} interactive virtual screen)`
-      }
-    ];
-  }
-};
-
-// src/backends/win32.ts
-var WIN32_POWERSHELL_SCRIPT = `
-$ErrorActionPreference = "Stop"
-[Console]::InputEncoding = [System.Text.Encoding]::UTF8
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-
-$csharp = @"
-using System;
-using System.Drawing;
-using System.Drawing.Imaging;
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Windows.Forms;
-
-public static class HandyWin32 {
-    [DllImport("user32.dll")]
-    private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiFlag);
-
-    [DllImport("user32.dll")]
-    private static extern bool SetProcessDPIAware();
-
-    [DllImport("user32.dll")]
-    public static extern bool SetCursorPos(int X, int Y);
-
-    [DllImport("user32.dll")]
-    public static extern bool GetCursorPos(out POINT lpPoint);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct POINT {
-        public int X;
-        public int Y;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct INPUT {
-        public uint type;
-        public InputUnion U;
-    }
-
-    [StructLayout(LayoutKind.Explicit)]
-    public struct InputUnion {
-        [FieldOffset(0)] public MOUSEINPUT mi;
-        [FieldOffset(0)] public KEYBDINPUT ki;
-        [FieldOffset(0)] public HARDWAREINPUT hi;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct MOUSEINPUT {
-        public int dx;
-        public int dy;
-        public uint mouseData;
-        public uint dwFlags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct KEYBDINPUT {
-        public ushort wVk;
-        public ushort wScan;
-        public uint dwFlags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public struct HARDWAREINPUT {
-        public uint uMsg;
-        public ushort wParamL;
-        public ushort wParamH;
-    }
-
-    public const uint INPUT_MOUSE = 0;
-    public const uint INPUT_KEYBOARD = 1;
-
-    public const uint MOUSEEVENTF_MOVE = 0x0001;
-    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
-    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
-    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
-    public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
-    public const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
-    public const uint MOUSEEVENTF_WHEEL = 0x0800;
-    public const uint MOUSEEVENTF_HWHEEL = 0x01000;
-    public const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
-    public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
-
-    public const uint KEYEVENTF_KEYUP = 0x0002;
-    public const uint KEYEVENTF_UNICODE = 0x0004;
-
-    public static void InitDpi() {
-        try {
-            if (!SetProcessDpiAwarenessContext(new IntPtr(-4))) {
-                SetProcessDPIAware();
-            }
-        } catch {
-            try { SetProcessDPIAware(); } catch { }
-        }
-    }
-
-    public static void MoveMouseAbs(int x, int y) {
-        SetCursorPos(x, y);
-        Rectangle vs = SystemInformation.VirtualScreen;
-        int vw = Math.Max(1, vs.Width - 1);
-        int vh = Math.Max(1, vs.Height - 1);
-        int normX = (int)Math.Round(((x - vs.Left) * 65535.0) / vw);
-        int normY = (int)Math.Round(((y - vs.Top) * 65535.0) / vh);
-        INPUT[] inputs = new INPUT[1];
-        inputs[0].type = INPUT_MOUSE;
-        inputs[0].U.mi.dx = normX;
-        inputs[0].U.mi.dy = normY;
-        inputs[0].U.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
-        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
-    }
-
-    public static void MouseButton(uint flag) {
-        INPUT[] inputs = new INPUT[1];
-        inputs[0].type = INPUT_MOUSE;
-        inputs[0].U.mi.dwFlags = flag;
-        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
-    }
-
-    public static void ScrollWheel(int dx, int dy) {
-        if (dy != 0) {
-            INPUT[] v = new INPUT[1];
-            v[0].type = INPUT_MOUSE;
-            v[0].U.mi.dwFlags = MOUSEEVENTF_WHEEL;
-            v[0].U.mi.mouseData = unchecked((uint)(-dy * 120));
-            SendInput(1, v, Marshal.SizeOf(typeof(INPUT)));
-        }
-        if (dx != 0) {
-            INPUT[] h = new INPUT[1];
-            h[0].type = INPUT_MOUSE;
-            h[0].U.mi.dwFlags = MOUSEEVENTF_HWHEEL;
-            h[0].U.mi.mouseData = unchecked((uint)(dx * 120));
-            SendInput(1, h, Marshal.SizeOf(typeof(INPUT)));
-        }
-    }
-
-    public static void SendVk(ushort vk, bool down) {
-        INPUT[] inputs = new INPUT[1];
-        inputs[0].type = INPUT_KEYBOARD;
-        inputs[0].U.ki.wVk = vk;
-        inputs[0].U.ki.dwFlags = down ? 0u : KEYEVENTF_KEYUP;
-        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
-    }
-
-    public static void SendUnicodeString(string text) {
-        if (string.IsNullOrEmpty(text)) return;
-        INPUT[] inputs = new INPUT[text.Length * 2];
-        for (int i = 0; i < text.Length; i++) {
-            ushort codeUnit = (ushort)text[i];
-            inputs[i * 2].type = INPUT_KEYBOARD;
-            inputs[i * 2].U.ki.wScan = codeUnit;
-            inputs[i * 2].U.ki.dwFlags = KEYEVENTF_UNICODE;
-
-            inputs[i * 2 + 1].type = INPUT_KEYBOARD;
-            inputs[i * 2 + 1].U.ki.wScan = codeUnit;
-            inputs[i * 2 + 1].U.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
-        }
-        SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
-    }
-
-    public static string CapturePngBase64(int x, int y, int width, int height) {
-        using (Bitmap bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb)) {
-            using (Graphics g = Graphics.FromImage(bmp)) {
-                g.CopyFromScreen(x, y, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
-            }
-            using (MemoryStream ms = new MemoryStream()) {
-                bmp.Save(ms, ImageFormat.Png);
-                return Convert.ToBase64String(ms.ToArray());
-            }
-        }
-    }
-}
-"@
-
-Add-Type -TypeDefinition $csharp -ReferencedAssemblies System.Windows.Forms, System.Drawing
-[HandyWin32]::InitDpi()
-
-while (($line = [Console]::In.ReadLine()) -ne $null) {
-    $trimmed = $line.Trim()
-    if ($trimmed.Length -eq 0) { continue }
-    $id = -1
-    try {
-        $cmd = $trimmed | ConvertFrom-Json
-        $id = [int]$cmd.id
-        $op = [string]$cmd.op
-        if ($op -eq "doctor") {
-            $resp = @{ id = $id; ok = $true; dpiAware = $true } | ConvertTo-Json -Compress
-            [Console]::Out.WriteLine($resp)
-        }
-        elseif ($op -eq "displays") {
-            $screens = [System.Windows.Forms.Screen]::AllScreens
-            $list = @()
-            for ($i = 0; $i -lt $screens.Length; $i++) {
-                $s = $screens[$i]
-                $b = $s.Bounds
-                $list += @{
-                    id = $i
-                    name = [string]$s.DeviceName
-                    x = [int]$b.X
-                    y = [int]$b.Y
-                    width = [int]$b.Width
-                    height = [int]$b.Height
-                    scaleFactor = 1
-                    primary = [bool]$s.Primary
-                }
-            }
-            $resp = @{ id = $id; ok = $true; displays = $list } | ConvertTo-Json -Compress -Depth 4
-            [Console]::Out.WriteLine($resp)
-        }
-        elseif ($op -eq "mouse_pos") {
-            $pt = New-Object HandyWin32+POINT
-            [void][HandyWin32]::GetCursorPos([ref]$pt)
-            $resp = @{ id = $id; ok = $true; x = [int]$pt.X; y = [int]$pt.Y } | ConvertTo-Json -Compress
-            [Console]::Out.WriteLine($resp)
-        }
-        elseif ($op -eq "move") {
-            [HandyWin32]::MoveMouseAbs([int]$cmd.x, [int]$cmd.y)
-            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
-            [Console]::Out.WriteLine($resp)
-        }
-        elseif ($op -eq "mouse_btn") {
-            [HandyWin32]::MouseButton([uint32]$cmd.flag)
-            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
-            [Console]::Out.WriteLine($resp)
-        }
-        elseif ($op -eq "scroll") {
-            [HandyWin32]::ScrollWheel([int]$cmd.dx, [int]$cmd.dy)
-            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
-            [Console]::Out.WriteLine($resp)
-        }
-        elseif ($op -eq "vk") {
-            [HandyWin32]::SendVk([uint16]$cmd.vk, [bool]$cmd.down)
-            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
-            [Console]::Out.WriteLine($resp)
-        }
-        elseif ($op -eq "unicode") {
-            [HandyWin32]::SendUnicodeString([string]$cmd.text)
-            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
-            [Console]::Out.WriteLine($resp)
-        }
-        elseif ($op -eq "capture") {
-            $b64 = [HandyWin32]::CapturePngBase64([int]$cmd.x, [int]$cmd.y, [int]$cmd.width, [int]$cmd.height)
-            $resp = @{ id = $id; ok = $true; pngBase64 = $b64 } | ConvertTo-Json -Compress
-            [Console]::Out.WriteLine($resp)
-        }
-        else {
-            $resp = @{ id = $id; ok = $false; error = "Unknown op: $op" } | ConvertTo-Json -Compress
-            [Console]::Out.WriteLine($resp)
-        }
-    } catch {
-        $errMsg = $_.Exception.Message
-        $resp = @{ id = $id; ok = $false; error = [string]$errMsg } | ConvertTo-Json -Compress
-        [Console]::Out.WriteLine($resp)
-    }
-}
-`;
-var Win32Backend = class {
-  name = "win32-sendinput";
-  platform = "win32";
-  worker;
-  constructor(options = {}) {
-    const encoded = Buffer.from(WIN32_POWERSHELL_SCRIPT, "utf16le").toString("base64");
-    this.worker = new JsonlWorker(
-      options.workerOptions ?? {
-        command: "powershell.exe",
-        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
-        requestTimeoutMs: 15e3
-      }
-    );
-  }
-  async init() {
-    await this.worker.start();
-  }
-  async close() {
-    await this.worker.stop();
-  }
-  async getDisplays() {
-    const res = await this.worker.request({ op: "displays" });
-    const raw = res.displays;
-    const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
-    if (list.length > 0) return list;
-    return [
-      {
-        id: 0,
-        name: "Windows Primary Display",
-        x: 0,
-        y: 0,
-        width: 1920,
-        height: 1080,
-        scaleFactor: 1,
-        primary: true
-      }
-    ];
-  }
-  async getMousePosition() {
-    const res = await this.worker.request({ op: "mouse_pos" });
-    return { x: Number(res.x ?? 0), y: Number(res.y ?? 0) };
-  }
-  async moveMouse(x, y) {
-    await this.worker.request({ op: "move", x: Math.round(x), y: Math.round(y) });
-  }
-  async mouseDown(button) {
-    const flag = button === "left" ? 2 : button === "right" ? 8 : 32;
-    await this.worker.request({ op: "mouse_btn", flag });
-  }
-  async mouseUp(button) {
-    const flag = button === "left" ? 4 : button === "right" ? 16 : 64;
-    await this.worker.request({ op: "mouse_btn", flag });
-  }
-  async scroll(deltaX, deltaY) {
-    await this.worker.request({ op: "scroll", dx: Math.round(deltaX), dy: Math.round(deltaY) });
-  }
-  async keyDown(key) {
-    const parsed = parseKeyChord(key, [], "win32");
-    const mapped = toWin32Vk(parsed.key);
-    if (!mapped) {
-      throw new Error(`Unsupported Windows keyDown key "${key}".`);
-    }
-    if (mapped.shift) {
-      await this.worker.request({ op: "vk", vk: WIN32_VK_CODES.shift.vk, down: true });
-    }
-    await this.worker.request({ op: "vk", vk: mapped.vk, down: true });
-  }
-  async keyUp(key) {
-    const parsed = parseKeyChord(key, [], "win32");
-    const mapped = toWin32Vk(parsed.key);
-    if (!mapped) {
-      throw new Error(`Unsupported Windows keyUp key "${key}".`);
-    }
-    await this.worker.request({ op: "vk", vk: mapped.vk, down: false });
-    if (mapped.shift) {
-      await this.worker.request({ op: "vk", vk: WIN32_VK_CODES.shift.vk, down: false });
-    }
-  }
-  async keyTap(key, modifiers = []) {
-    const mapped = toWin32Vk(key);
-    if (!mapped) {
-      if (modifiers.length === 0) {
-        await this.typeText(key);
-        return;
-      }
-      throw new Error(`Unsupported Windows key "${key}".`);
-    }
-    const activeMods = [...modifiers];
-    if (mapped.shift && !activeMods.includes("shift")) {
-      activeMods.push("shift");
-    }
-    for (const m of activeMods) {
-      await this.worker.request({ op: "vk", vk: WIN32_VK_CODES[m].vk, down: true });
-    }
-    await this.worker.request({ op: "vk", vk: mapped.vk, down: true });
-    await this.worker.request({ op: "vk", vk: mapped.vk, down: false });
-    for (const m of [...activeMods].reverse()) {
-      await this.worker.request({ op: "vk", vk: WIN32_VK_CODES[m].vk, down: false });
-    }
-  }
-  async typeText(text) {
-    let chunk = "";
-    const flush = async () => {
-      if (chunk.length > 0) {
-        await this.worker.request({ op: "unicode", text: chunk });
-        chunk = "";
-      }
-    };
-    for (const ch of text) {
-      if (ch === "\r") continue;
-      if (ch === "\n") {
-        await flush();
-        await this.keyTap("enter");
-      } else if (ch === "	") {
-        await flush();
-        await this.keyTap("tab");
-      } else {
-        chunk += ch;
-      }
-    }
-    await flush();
-  }
-  async captureScreen(options = {}) {
-    const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
-    const rx = options.region ? Math.round(options.region.x) : disp.x;
-    const ry = options.region ? Math.round(options.region.y) : disp.y;
-    const rw = options.region ? Math.max(1, Math.round(options.region.width)) : disp.width;
-    const rh = options.region ? Math.max(1, Math.round(options.region.height)) : disp.height;
-    const res = await this.worker.request({ op: "capture", x: rx, y: ry, width: rw, height: rh }, 15e3);
-    const pngBase64 = String(res.pngBase64 ?? "");
-    if (!pngBase64) {
-      throw new Error("Windows screen capture returned empty PNG buffer.");
-    }
-    const decoded = decodePng(Buffer.from(pngBase64, "base64"));
-    return {
-      width: decoded.width,
-      height: decoded.height,
-      data: decoded.data,
-      originX: rx,
-      originY: ry,
-      logicalWidth: decoded.width,
-      logicalHeight: decoded.height,
-      scaleFactor: 1,
-      displayId: disp.id
-    };
-  }
-  async doctor() {
-    try {
-      await this.worker.request({ op: "doctor" });
-      const displays = await this.getDisplays();
-      return [
-        {
-          name: "Win32 SendInput + GDI Bridge",
-          ok: true,
-          detail: `Ready (${displays.length} display${displays.length === 1 ? "" : "s"} detected, Per-Monitor V2 DPI aware)`
-        }
-      ];
-    } catch (err) {
-      return [
-        {
-          name: "Win32 SendInput + GDI Bridge",
-          ok: false,
-          detail: err instanceof Error ? err.message : String(err)
-        }
-      ];
-    }
-  }
-};
-
-// src/backends/index.ts
-function createBackend(options = {}) {
-  const rawKind = (options.kind ?? process.env.HANDY_BACKEND ?? "auto").trim().toLowerCase();
-  if (rawKind === "virtual") {
-    return new VirtualDesktopBackend();
-  }
-  if (rawKind === "x11" || rawKind === "linux-x11") {
-    return new LinuxX11Backend({ display: options.display });
-  }
-  if (rawKind === "linux-cli" || rawKind === "wayland") {
-    return new LinuxCliBackend();
-  }
-  if (rawKind === "darwin" || rawKind === "macos") {
-    return new DarwinBackend();
-  }
-  if (rawKind === "win32" || rawKind === "windows") {
-    return new Win32Backend();
-  }
-  if (process.platform === "win32") {
-    return new Win32Backend();
-  }
-  if (process.platform === "darwin") {
-    return new DarwinBackend();
-  }
-  if (process.platform === "linux") {
-    const display = options.display ?? process.env.DISPLAY;
-    if (!display && process.env.WAYLAND_DISPLAY) {
-      return new LinuxCliBackend();
-    }
-    return new LinuxX11Backend({ display });
-  }
-  throw new Error(`Unsupported OS platform "${process.platform}". Set HANDY_BACKEND=virtual for headless testing.`);
-}
-
-// src/overlay.ts
-var NICE_STEPS = [25, 50, 100, 200, 250, 400, 500, 1e3];
-function chooseGridStep(logicalWidth, logicalHeight) {
-  const maxDim = Math.max(logicalWidth, logicalHeight);
-  const targetIntervals = 8;
-  const raw = maxDim / targetIntervals;
-  for (const step of NICE_STEPS) {
-    if (step >= raw) return step;
-  }
-  return 1e3;
-}
-function renderScreenOverlay(rgba, imageWidth, imageHeight, options) {
-  const drawGrid = options.grid ?? true;
-  const drawMouse = options.showMouse ?? true;
-  const toImgX = (screenX) => Math.round((screenX - options.originX) / Math.max(1, options.logicalWidth) * imageWidth);
-  const toImgY = (screenY) => Math.round((screenY - options.originY) / Math.max(1, options.logicalHeight) * imageHeight);
-  let resolvedStep = null;
-  if (drawGrid) {
-    const majorStep = options.gridStep && options.gridStep >= 10 ? Math.round(options.gridStep) : chooseGridStep(options.logicalWidth, options.logicalHeight);
-    resolvedStep = majorStep;
-    const minorStep = majorStep >= 50 ? Math.round(majorStep / 2) : 0;
-    const majorColor = [14, 165, 233, 78];
-    const minorColor = [148, 163, 184, 36];
-    const tickColor = [56, 189, 248, 220];
-    const startX = Math.ceil(options.originX / (minorStep || majorStep)) * (minorStep || majorStep);
-    const endX = options.originX + options.logicalWidth;
-    const startY = Math.ceil(options.originY / (minorStep || majorStep)) * (minorStep || majorStep);
-    const endY = options.originY + options.logicalHeight;
-    const stepIterX = minorStep || majorStep;
-    for (let sx = startX; sx <= endX; sx += stepIterX) {
-      const ix = toImgX(sx);
-      if (ix <= 0 || ix >= imageWidth) continue;
-      const isMajor = sx % majorStep === 0;
-      const col = isMajor ? majorColor : minorColor;
-      for (let py = 0; py < imageHeight; py++) {
-        if (isMajor || (py & 3) < 2) {
-          blendPixel(rgba, imageWidth, imageHeight, ix, py, col);
-        }
-      }
-    }
-    const stepIterY = minorStep || majorStep;
-    for (let sy = startY; sy <= endY; sy += stepIterY) {
-      const iy = toImgY(sy);
-      if (iy <= 0 || iy >= imageHeight) continue;
-      const isMajor = sy % majorStep === 0;
-      const col = isMajor ? majorColor : minorColor;
-      for (let px = 0; px < imageWidth; px++) {
-        if (isMajor || (px & 3) < 2) {
-          blendPixel(rgba, imageWidth, imageHeight, px, iy, col);
-        }
-      }
-    }
-    fillRect(rgba, imageWidth, imageHeight, 0, 0, imageWidth, 15, [15, 23, 42, 175]);
-    fillRect(rgba, imageWidth, imageHeight, 0, 15, 34, imageHeight - 15, [15, 23, 42, 155]);
-    const majorStartX = Math.ceil(options.originX / majorStep) * majorStep;
-    const majorStartY = Math.ceil(options.originY / majorStep) * majorStep;
-    let rowIdx = 0;
-    for (let sy = majorStartY; sy < endY; sy += majorStep) {
-      const iy = toImgY(sy);
-      rowIdx++;
-      if (iy < 32 || iy > imageHeight - 24) continue;
-      let colIdx = 0;
-      for (let sx = majorStartX; sx < endX; sx += majorStep) {
-        const ix = toImgX(sx);
-        colIdx++;
-        if (ix < 52 || ix > imageWidth - 64) continue;
-        if ((rowIdx + colIdx) % 2 === 0) {
-          drawLine(rgba, imageWidth, imageHeight, ix - 3, iy, ix + 3, iy, [56, 189, 248, 170]);
-          drawLine(rgba, imageWidth, imageHeight, ix, iy - 3, ix, iy + 3, [56, 189, 248, 170]);
-          drawBadge(rgba, imageWidth, imageHeight, ix + 3, iy + 3, `${sx},${sy}`, {
-            bg: [15, 23, 42, 145],
-            fg: [186, 230, 253, 225],
-            padX: 2,
-            padY: 1
-          });
-        }
-      }
-    }
-    for (let sx = majorStartX; sx <= endX; sx += majorStep) {
-      const ix = toImgX(sx);
-      if (ix < 36 || ix > imageWidth - 20) continue;
-      drawLine(rgba, imageWidth, imageHeight, ix, 0, ix, 14, tickColor);
-      const label = String(sx);
-      const m = measureText(label, 1);
-      drawBadge(rgba, imageWidth, imageHeight, Math.max(36, ix - Math.floor(m.width / 2) - 2), 2, label, {
-        bg: [15, 23, 42, 215],
-        fg: [125, 211, 252, 255],
-        padX: 2,
-        padY: 2
-      });
-    }
-    for (let sy = majorStartY; sy <= endY; sy += majorStep) {
-      const iy = toImgY(sy);
-      if (iy < 20 || iy > imageHeight - 12) continue;
-      drawLine(rgba, imageWidth, imageHeight, 0, iy, 12, iy, tickColor);
-      drawBadge(rgba, imageWidth, imageHeight, 2, Math.max(16, iy - 5), String(sy), {
-        bg: [15, 23, 42, 215],
-        fg: [125, 211, 252, 255],
-        padX: 2,
-        padY: 2
-      });
-    }
-    drawBadge(rgba, imageWidth, imageHeight, 2, 2, `${options.originX},${options.originY}`, {
-      bg: [2, 132, 199, 235],
-      fg: [255, 255, 255, 255],
-      padX: 3,
-      padY: 2
-    });
-  }
-  if (drawMouse) {
-    const mx = Math.round(options.mouse.x);
-    const my = Math.round(options.mouse.y);
-    const inBounds = mx >= options.originX && mx <= options.originX + options.logicalWidth && my >= options.originY && my <= options.originY + options.logicalHeight;
-    if (inBounds) {
-      const cx = Math.max(0, Math.min(imageWidth - 1, toImgX(mx)));
-      const cy = Math.max(0, Math.min(imageHeight - 1, toImgY(my)));
-      const whiteHalo = [255, 255, 255, 235];
-      const redCore = [239, 68, 68, 250];
-      drawCircleRing(rgba, imageWidth, imageHeight, cx, cy, 12, 3.2, whiteHalo);
-      drawCircleRing(rgba, imageWidth, imageHeight, cx, cy, 12, 1.8, redCore);
-      drawCircleRing(rgba, imageWidth, imageHeight, cx, cy, 4, 1.5, redCore);
-      drawLine(rgba, imageWidth, imageHeight, cx - 18, cy, cx - 5, cy, redCore);
-      drawLine(rgba, imageWidth, imageHeight, cx + 5, cy, cx + 18, cy, redCore);
-      drawLine(rgba, imageWidth, imageHeight, cx, cy - 18, cx, cy - 5, redCore);
-      drawLine(rgba, imageWidth, imageHeight, cx, cy + 5, cx, cy + 18, redCore);
-      const badgeText = `MOUSE (${mx},${my})`;
-      const textMetrics = measureText(badgeText, 1);
-      const badgeW = textMetrics.width + 10;
-      const badgeH = textMetrics.height + 6;
-      let bx = cx + 15;
-      let by = cy + 14;
-      if (bx + badgeW > imageWidth - 4) {
-        bx = Math.max(4, cx - 15 - badgeW);
-      }
-      if (by + badgeH > imageHeight - 4) {
-        by = Math.max(4, cy - 14 - badgeH);
-      }
-      drawBadge(rgba, imageWidth, imageHeight, bx, by, badgeText, {
-        bg: [127, 29, 29, 235],
-        fg: [255, 255, 255, 255],
-        border: [248, 113, 113, 255],
-        padX: 5,
-        padY: 3
-      });
-    } else {
-      const badgeText = `MOUSE (${mx},${my}) [outside region]`;
-      const textMetrics = measureText(badgeText, 1);
-      const badgeW = textMetrics.width + 10;
-      const badgeH = textMetrics.height + 6;
-      drawBadge(
-        rgba,
-        imageWidth,
-        imageHeight,
-        Math.max(4, imageWidth - badgeW - 6),
-        Math.max(4, imageHeight - badgeH - 6),
-        badgeText,
-        {
-          bg: [127, 29, 29, 230],
-          fg: [254, 226, 226, 255],
-          border: [248, 113, 113, 255],
-          padX: 5,
-          padY: 3
-        }
-      );
-    }
-  }
-  return { gridStep: resolvedStep };
-}
-
-// src/permissions.ts
-import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync4, renameSync, statSync, watch, writeFileSync } from "node:fs";
-import { homedir as homedir2 } from "node:os";
-import { join as join4 } from "node:path";
-var HandyPermissionError = class extends Error {
-  code = "HANDY_PERMISSION_DENIED";
-  state;
-  constructor(message, state) {
-    super(message);
-    this.name = "HandyPermissionError";
-    this.state = state;
-  }
-};
-function parseBoolEnv(raw) {
-  if (raw === void 0) return void 0;
-  const normalized = raw.trim().toLowerCase();
-  if (normalized === "" || normalized === "${user_config.enabled}") return void 0;
-  if (["1", "true", "yes", "on", "enabled"].includes(normalized)) return true;
-  if (["0", "false", "no", "off", "disabled"].includes(normalized)) return false;
-  return void 0;
-}
-function resolveConfigDir(overrideDir) {
-  if (overrideDir) return overrideDir;
-  const fromEnv = process.env.HANDY_CONFIG_DIR?.trim();
-  if (fromEnv) return fromEnv;
-  return join4(homedir2(), ".handy");
-}
-function parseDurationMs(input2) {
-  const match = /^(\d+(?:\.\d+)?)\s*(ms|s|sec|secs|m|min|mins|h|hr|hrs)?$/i.exec(input2.trim());
-  if (!match) {
-    throw new Error(`Invalid duration "${input2}". Examples: 30s, 15m, 2h.`);
-  }
-  const value = Number(match[1]);
-  const unit = (match[2] ?? "s").toLowerCase();
-  const multipliers = {
-    ms: 1,
-    s: 1e3,
-    sec: 1e3,
-    secs: 1e3,
-    m: 6e4,
-    min: 6e4,
-    mins: 6e4,
-    h: 36e5,
-    hr: 36e5,
-    hrs: 36e5
-  };
-  const ms = Math.round(value * (multipliers[unit] ?? 1e3));
-  if (!Number.isFinite(ms) || ms <= 0) {
-    throw new Error(`Duration must be positive: "${input2}".`);
-  }
-  return ms;
-}
-var PermissionStore = class {
-  configDir;
-  filePath;
-  allowMcpEnableOption;
-  constructor(options = {}) {
-    this.configDir = resolveConfigDir(options.configDir);
-    this.filePath = join4(this.configDir, "permissions.json");
-    this.allowMcpEnableOption = options.allowMcpEnable;
-  }
-  get allowMcpEnable() {
-    if (this.allowMcpEnableOption !== void 0) return this.allowMcpEnableOption;
-    return parseBoolEnv(process.env.HANDY_ALLOW_MCP_ENABLE) === true;
-  }
-  getState() {
-    const envEnabled = parseBoolEnv(process.env.HANDY_ENABLED);
-    if (envEnabled === false) {
-      return {
-        enabled: false,
-        mode: "full",
-        expiresAt: null,
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        updatedBy: "env"
-      };
-    }
-    const disk = this.readDiskState();
-    if (disk) {
-      if (disk.enabled && disk.expiresAt) {
-        const exp = Date.parse(disk.expiresAt);
-        if (!Number.isNaN(exp) && Date.now() >= exp) {
-          const expiredState = {
-            ...disk,
-            enabled: false,
-            expiresAt: null,
-            updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-            updatedBy: "expired"
-          };
-          this.writeDiskState(expiredState);
-          return expiredState;
-        }
-      }
-      return disk;
-    }
-    const defaultEnabled = parseBoolEnv(process.env.HANDY_DEFAULT_ENABLED) ?? true;
-    const defaultMode = process.env.HANDY_DEFAULT_MODE?.trim().toLowerCase() === "view_only" ? "view_only" : "full";
-    return {
-      enabled: envEnabled ?? defaultEnabled,
-      mode: defaultMode,
-      expiresAt: null,
-      updatedAt: (/* @__PURE__ */ new Date(0)).toISOString(),
-      updatedBy: envEnabled !== void 0 ? "env" : "default"
-    };
-  }
-  setEnabled(enabled, options = {}) {
-    const updatedBy = options.updatedBy ?? "cli";
-    const current = this.getState();
-    if (updatedBy === "mcp" && enabled && !current.enabled && !this.allowMcpEnable) {
-      throw new HandyPermissionError(
-        "Handy is currently turned OFF by user permission controls and cannot re-enable itself via MCP. Ask the user to run `handy on` (or `/handy:on`).",
-        current
-      );
-    }
-    if (enabled && parseBoolEnv(process.env.HANDY_ENABLED) === false && updatedBy === "mcp") {
-      throw new HandyPermissionError(
-        "Handy is disabled via HANDY_ENABLED=false in the host configuration.",
-        current
-      );
-    }
-    const now = Date.now();
-    const next = {
-      enabled,
-      mode: options.mode ?? current.mode ?? "full",
-      expiresAt: enabled && options.ttlMs && options.ttlMs > 0 ? new Date(now + options.ttlMs).toISOString() : null,
-      updatedAt: new Date(now).toISOString(),
-      updatedBy
-    };
-    this.writeDiskState(next);
-    return next;
-  }
-  toggle(options = {}) {
-    const current = this.getState();
-    return this.setEnabled(!current.enabled, {
-      mode: options.mode ?? current.mode,
-      updatedBy: options.updatedBy ?? "cli"
-    });
-  }
-  assertCanSee() {
-    const state = this.getState();
-    if (!state.enabled) {
-      throw new HandyPermissionError(
-        "Handy permission is OFF \u2014 screen capture and computer control are disabled. Run `handy on` (or `/handy:on`) to enable.",
-        state
-      );
-    }
-    return state;
-  }
-  assertCanControl() {
-    const state = this.assertCanSee();
-    if (state.mode === "view_only") {
-      throw new HandyPermissionError(
-        "Handy is in VIEW-ONLY permission mode \u2014 screen viewing is allowed, but mouse and keyboard control are disabled. Run `handy on` (without --view-only) to allow input control.",
-        state
-      );
-    }
-    return state;
-  }
-  watch(onChange) {
-    this.ensureDir();
-    let closed = false;
-    let watcher = null;
-    let lastMtime = this.getMtimeMs();
-    const check2 = () => {
-      if (closed) return;
-      const mtime = this.getMtimeMs();
-      if (mtime !== lastMtime) {
-        lastMtime = mtime;
-        onChange(this.getState());
-      }
-    };
-    try {
-      watcher = watch(this.configDir, (_event, filename) => {
-        if (!filename || filename === "permissions.json") {
-          check2();
-        }
-      });
-      watcher.unref?.();
-    } catch {
-    }
-    const interval = setInterval(check2, 1e3);
-    interval.unref?.();
-    return () => {
-      closed = true;
-      clearInterval(interval);
-      watcher?.close();
-    };
-  }
-  getMtimeMs() {
-    try {
-      return statSync(this.filePath).mtimeMs;
-    } catch {
-      return -1;
-    }
-  }
-  ensureDir() {
-    if (!existsSync2(this.configDir)) {
-      mkdirSync(this.configDir, { recursive: true, mode: 448 });
-    }
-  }
-  readDiskState() {
-    if (!existsSync2(this.filePath)) return null;
-    try {
-      const raw = JSON.parse(readFileSync4(this.filePath, "utf8"));
-      if (typeof raw.enabled !== "boolean") return null;
-      return {
-        enabled: raw.enabled,
-        mode: raw.mode === "view_only" ? "view_only" : "full",
-        expiresAt: typeof raw.expiresAt === "string" ? raw.expiresAt : null,
-        updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : (/* @__PURE__ */ new Date(0)).toISOString(),
-        updatedBy: raw.updatedBy === "cli" || raw.updatedBy === "mcp" || raw.updatedBy === "env" || raw.updatedBy === "expired" ? raw.updatedBy : "default"
-      };
-    } catch {
-      return null;
-    }
-  }
-  writeDiskState(state) {
-    this.ensureDir();
-    const tmpPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
-    writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}
-`, { encoding: "utf8", mode: 384 });
-    renameSync(tmpPath, this.filePath);
-  }
-};
-
-// src/controller.ts
-function sleepAbortable(ms, signal) {
-  if (ms <= 0) return Promise.resolve();
-  return new Promise((resolve2, reject) => {
-    if (signal?.aborted) {
-      reject(new Error("Action chain aborted."));
-      return;
-    }
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(new Error("Action chain aborted."));
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve2();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-var HandyController = class _HandyController {
-  backend;
-  permissions;
-  heldButtons = /* @__PURE__ */ new Set();
-  heldKeys = /* @__PURE__ */ new Set();
-  queueTail = Promise.resolve();
-  queuedCount = 0;
-  static MAX_QUEUED_CHAINS = 8;
-  constructor(options) {
-    this.backend = options.backend;
-    this.permissions = options.permissions ?? new PermissionStore();
-  }
-  async init() {
-    await this.backend.init();
-  }
-  async close() {
-    await this.releaseHeldInputs();
-    await this.backend.close();
-  }
-  async releaseHeldInputs() {
-    for (const btn of Array.from(this.heldButtons)) {
-      try {
-        await this.backend.mouseUp(btn);
-      } catch {
-      }
-      this.heldButtons.delete(btn);
-    }
-    for (const key of Array.from(this.heldKeys).reverse()) {
-      try {
-        await this.backend.keyUp(key);
-      } catch {
-      }
-      this.heldKeys.delete(key);
-    }
-  }
-  async status() {
-    const perm = this.permissions.getState();
-    const base = {
-      enabled: perm.enabled,
-      mode: perm.mode,
-      expiresAt: perm.expiresAt,
-      updatedAt: perm.updatedAt,
-      updatedBy: perm.updatedBy,
-      platform: process.platform,
-      backend: this.backend.name
-    };
-    if (!perm.enabled) {
-      return base;
-    }
-    try {
-      const [displays, mouse] = await Promise.all([this.backend.getDisplays(), this.backend.getMousePosition()]);
-      return { ...base, displays, mouse };
-    } catch {
-      return base;
-    }
-  }
-  async doctor() {
-    const permission = this.permissions.getState();
-    const checks = await this.backend.doctor();
-    return {
-      permission,
-      backend: this.backend.name,
-      checks
-    };
-  }
-  async see(options = {}) {
-    this.permissions.assertCanSee();
-    const t0 = performance.now();
-    const [frame, mouse] = await Promise.all([
-      this.backend.captureScreen({ display: options.display, region: options.region }),
-      this.backend.getMousePosition()
-    ]);
-    const maxWidth = options.maxWidth ?? 1280;
-    let outWidth = frame.width;
-    let outHeight = frame.height;
-    let rgba;
-    if (frame.width > maxWidth) {
-      const ratio = maxWidth / frame.width;
-      outWidth = maxWidth;
-      outHeight = Math.max(1, Math.round(frame.height * ratio));
-      rgba = resizeRgba(frame.data, frame.width, frame.height, outWidth, outHeight);
-    } else {
-      rgba = new Uint8Array(frame.data);
-    }
-    const overlayMeta = renderScreenOverlay(rgba, outWidth, outHeight, {
-      originX: frame.originX,
-      originY: frame.originY,
-      logicalWidth: frame.logicalWidth,
-      logicalHeight: frame.logicalHeight,
-      mouse,
-      grid: options.grid ?? true,
-      gridStep: options.gridStep,
-      showMouse: options.showMouse ?? true
-    });
-    const pngBuffer = encodePng(outWidth, outHeight, rgba, { compressionLevel: 3 });
-    const captureMs = Math.round((performance.now() - t0) * 10) / 10;
-    return {
-      pngBuffer,
-      base64Png: pngBuffer.toString("base64"),
-      imageWidth: outWidth,
-      imageHeight: outHeight,
-      screen: {
-        displayId: frame.displayId,
-        originX: frame.originX,
-        originY: frame.originY,
-        width: frame.logicalWidth,
-        height: frame.logicalHeight,
-        scaleFactor: frame.scaleFactor
-      },
-      region: {
-        x: frame.originX,
-        y: frame.originY,
-        width: frame.logicalWidth,
-        height: frame.logicalHeight
-      },
-      mouse,
-      gridStep: overlayMeta.gridStep,
-      coordinateSpace: "screen",
-      captureMs,
-      timestamp: (/* @__PURE__ */ new Date()).toISOString()
-    };
-  }
-  async act(options) {
-    if (!options.actions || options.actions.length === 0) {
-      throw new Error("actions must contain at least one step.");
-    }
-    if (options.actions.length > 100) {
-      throw new Error("actions cannot exceed 100 steps in a single chain.");
-    }
-    if (this.queuedCount >= _HandyController.MAX_QUEUED_CHAINS) {
-      throw new Error("Too many concurrent action chains queued; wait for active chain to finish.");
-    }
-    this.queuedCount += 1;
-    const run = this.queueTail.then(
-      () => this.executeChainInternal(options),
-      () => this.executeChainInternal(options)
-    );
-    this.queueTail = run.then(
-      () => void 0,
-      () => void 0
-    );
-    try {
-      return await run;
-    } finally {
-      this.queuedCount -= 1;
-    }
-  }
-  async resolvePoint(x, y, space, displayIndex, cachedDisplays) {
-    if (!space || space === "screen") {
-      return { point: { x: Math.round(x), y: Math.round(y) }, displays: cachedDisplays };
-    }
-    const displays = cachedDisplays ?? await this.backend.getDisplays();
-    const disp = displays.find((d) => d.id === (displayIndex ?? 0)) ?? displays[0];
-    if (!disp) {
-      throw new Error("No display found for normalized coordinate conversion.");
-    }
-    const clampedX = Math.max(0, Math.min(1e3, x));
-    const clampedY = Math.max(0, Math.min(1e3, y));
-    return {
-      point: {
-        x: Math.round(disp.x + clampedX / 1e3 * Math.max(1, disp.width - 1)),
-        y: Math.round(disp.y + clampedY / 1e3 * Math.max(1, disp.height - 1))
-      },
-      displays
-    };
-  }
-  async interpolateMove(from, to, durationMs, steps, signal) {
-    const count = steps ?? Math.max(2, Math.min(60, Math.round(durationMs / 10)));
-    const interval = durationMs / count;
-    for (let i = 1; i <= count; i++) {
-      this.permissions.assertCanControl();
-      if (signal?.aborted) throw new Error("Action chain aborted.");
-      const t = i / count;
-      const eased = 1 - (1 - t) * (1 - t);
-      const nx = Math.round(from.x + (to.x - from.x) * eased);
-      const ny = Math.round(from.y + (to.y - from.y) * eased);
-      await this.backend.moveMouse(nx, ny);
-      if (i < count && interval >= 1) {
-        await sleepAbortable(interval, signal);
-      }
-    }
-  }
-  async performClick(button, count, modifiers, signal) {
-    const resolvedMods = (modifiers ?? []).map((m) => resolveModifier(m, this.backend.platform));
-    for (const mod of resolvedMods) {
-      await this.backend.keyDown(mod);
-      this.heldKeys.add(mod);
-    }
-    try {
-      for (let c = 1; c <= count; c++) {
-        this.permissions.assertCanControl();
-        if (this.backend instanceof DarwinBackend) {
-          await this.backend.mouseDown(button, c, resolvedMods);
-          this.heldButtons.add(button);
-          await this.backend.mouseUp(button, c, resolvedMods);
-          this.heldButtons.delete(button);
-        } else {
-          await this.backend.mouseDown(button);
-          this.heldButtons.add(button);
-          await this.backend.mouseUp(button);
-          this.heldButtons.delete(button);
-        }
-        if (c < count) {
-          await sleepAbortable(20, signal);
-        }
-      }
-    } finally {
-      for (const mod of [...resolvedMods].reverse()) {
-        await this.backend.keyUp(mod);
-        this.heldKeys.delete(mod);
-      }
-    }
-  }
-  async executeChainInternal(options) {
-    this.permissions.assertCanControl();
-    const chainStart = performance.now();
-    const stepDelayMs = options.stepDelayMs ?? 15;
-    const receipts = [];
-    const screenshots = [];
-    let cachedDisplays = null;
-    try {
-      for (let i = 0; i < options.actions.length; i++) {
-        const step = options.actions[i];
-        if (options.signal?.aborted) {
-          throw new Error("Action chain aborted.");
-        }
-        if (step.type === "screenshot") {
-          this.permissions.assertCanSee();
-        } else {
-          this.permissions.assertCanControl();
-        }
-        const stepStart = performance.now();
-        let detail;
-        switch (step.type) {
-          case "move": {
-            let target;
-            if (step.relative) {
-              const cur = await this.backend.getMousePosition();
-              target = { x: Math.round(cur.x + step.x), y: Math.round(cur.y + step.y) };
-            } else {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
-              target = res.point;
-            }
-            if (step.durationMs && step.durationMs > 0) {
-              const startPos = await this.backend.getMousePosition();
-              await this.interpolateMove(startPos, target, step.durationMs, step.steps, options.signal);
-            } else {
-              await this.backend.moveMouse(target.x, target.y);
-            }
-            detail = `moved to (${target.x},${target.y})`;
-            break;
-          }
-          case "click":
-          case "double_click":
-          case "triple_click":
-          case "right_click": {
-            if (step.x !== void 0 && step.y !== void 0) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
-              await this.backend.moveMouse(res.point.x, res.point.y);
-              await sleepAbortable(6, options.signal);
-            }
-            const button = step.type === "right_click" ? "right" : "button" in step && step.button ? step.button : "left";
-            const count = step.type === "double_click" ? 2 : step.type === "triple_click" ? 3 : "count" in step && step.count ? step.count : 1;
-            await this.performClick(button, count, step.modifiers, options.signal);
-            detail = `${button} click x${count}`;
-            break;
-          }
-          case "mouse_down": {
-            if (step.x !== void 0 && step.y !== void 0) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
-              await this.backend.moveMouse(res.point.x, res.point.y);
-            }
-            const btn = step.button ?? "left";
-            await this.backend.mouseDown(btn);
-            this.heldButtons.add(btn);
-            detail = `${btn} mouse_down`;
-            break;
-          }
-          case "mouse_up": {
-            if (step.x !== void 0 && step.y !== void 0) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
-              await this.backend.moveMouse(res.point.x, res.point.y);
-            }
-            const btn = step.button ?? "left";
-            await this.backend.mouseUp(btn);
-            this.heldButtons.delete(btn);
-            detail = `${btn} mouse_up`;
-            break;
-          }
-          case "drag": {
-            let startPos;
-            if (step.fromX !== void 0 && step.fromY !== void 0) {
-              const fromRes = await this.resolvePoint(
-                step.fromX,
-                step.fromY,
-                step.coordinateSpace,
-                options.display,
-                cachedDisplays
-              );
-              cachedDisplays = fromRes.displays;
-              startPos = fromRes.point;
-              await this.backend.moveMouse(startPos.x, startPos.y);
-              await sleepAbortable(8, options.signal);
-            } else {
-              startPos = await this.backend.getMousePosition();
-            }
-            const toRes = await this.resolvePoint(
-              step.toX,
-              step.toY,
-              step.coordinateSpace,
-              options.display,
-              cachedDisplays
-            );
-            cachedDisplays = toRes.displays;
-            const btn = step.button ?? "left";
-            await this.backend.mouseDown(btn);
-            this.heldButtons.add(btn);
-            try {
-              await this.interpolateMove(
-                startPos,
-                toRes.point,
-                step.durationMs ?? 160,
-                step.steps ?? 16,
-                options.signal
-              );
-            } finally {
-              await this.backend.mouseUp(btn);
-              this.heldButtons.delete(btn);
-            }
-            detail = `dragged (${startPos.x},${startPos.y}) -> (${toRes.point.x},${toRes.point.y})`;
-            break;
-          }
-          case "scroll": {
-            if (step.x !== void 0 && step.y !== void 0) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
-              await this.backend.moveMouse(res.point.x, res.point.y);
-            }
-            const amount = step.amount ?? 3;
-            let dx = step.deltaX ?? 0;
-            let dy = step.deltaY ?? 0;
-            if (step.direction === "up") dy -= amount;
-            else if (step.direction === "down") dy += amount;
-            else if (step.direction === "left") dx -= amount;
-            else if (step.direction === "right") dx += amount;
-            await this.backend.scroll(dx, dy);
-            detail = `scrolled dx=${dx} dy=${dy}`;
-            break;
-          }
-          case "type": {
-            if (step.delayMs && step.delayMs > 0) {
-              const chars = Array.from(step.text);
-              for (let cIdx = 0; cIdx < chars.length; cIdx++) {
-                this.permissions.assertCanControl();
-                if (options.signal?.aborted) throw new Error("Action chain aborted.");
-                await this.backend.typeText(chars[cIdx]);
-                if (cIdx < chars.length - 1) {
-                  await sleepAbortable(step.delayMs, options.signal);
-                }
-              }
-            } else if (step.text.length > 0) {
-              await this.backend.typeText(step.text);
-            }
-            if (step.submit) {
-              await sleepAbortable(10, options.signal);
-              await this.backend.keyTap("enter", []);
-            }
-            detail = `typed ${Array.from(step.text).length} chars${step.submit ? " + Enter" : ""}`;
-            break;
-          }
-          case "key": {
-            const parsed = parseKeyChord(step.key, step.modifiers ?? [], this.backend.platform);
-            const repeat = step.count ?? 1;
-            for (let r = 0; r < repeat; r++) {
-              this.permissions.assertCanControl();
-              await this.backend.keyTap(parsed.key, parsed.modifiers);
-              if (r < repeat - 1) {
-                await sleepAbortable(15, options.signal);
-              }
-            }
-            const chordLabel = [...parsed.modifiers, parsed.key].join("+");
-            detail = repeat > 1 ? `key ${chordLabel} x${repeat}` : `key ${chordLabel}`;
-            break;
-          }
-          case "key_down": {
-            await this.backend.keyDown(step.key);
-            this.heldKeys.add(step.key);
-            detail = `key_down ${step.key}`;
-            break;
-          }
-          case "key_up": {
-            await this.backend.keyUp(step.key);
-            this.heldKeys.delete(step.key);
-            detail = `key_up ${step.key}`;
-            break;
-          }
-          case "wait": {
-            await sleepAbortable(step.ms, options.signal);
-            detail = `waited ${step.ms}ms`;
-            break;
-          }
-          case "screenshot": {
-            const shot = await this.see({
-              display: options.display,
-              region: step.region,
-              grid: step.grid ?? options.grid ?? true,
-              showMouse: step.showMouse ?? options.showMouse ?? true,
-              maxWidth: step.maxWidth ?? options.maxWidth
-            });
-            if (step.label) shot.label = step.label;
-            screenshots.push(shot);
-            detail = `captured ${shot.imageWidth}x${shot.imageHeight}`;
-            break;
-          }
-        }
-        const stepDurationMs = Math.round((performance.now() - stepStart) * 10) / 10;
-        receipts.push({
-          index: i,
-          type: step.type,
-          durationMs: stepDurationMs,
-          detail
-        });
-        if (i < options.actions.length - 1 && stepDelayMs > 0 && step.type !== "wait" && step.type !== "screenshot") {
-          await sleepAbortable(stepDelayMs, options.signal);
-        }
-      }
-      if (options.screenshotAfter) {
-        const settleMs = options.settleMs ?? 50;
-        if (settleMs > 0) {
-          await sleepAbortable(settleMs, options.signal);
-        }
-        const postShot = await this.see({
-          display: options.display,
-          grid: options.grid ?? true,
-          showMouse: options.showMouse ?? true,
-          maxWidth: options.maxWidth
-        });
-        postShot.label = "after";
-        screenshots.push(postShot);
-      }
-      const finalMouse = await this.backend.getMousePosition();
-      const totalDurationMs = Math.round((performance.now() - chainStart) * 10) / 10;
-      return {
-        ok: true,
-        stepsCompleted: receipts.length,
-        totalDurationMs,
-        mouse: finalMouse,
-        receipts,
-        screenshots
-      };
-    } catch (err) {
-      await this.releaseHeldInputs();
-      throw err;
-    }
-  }
-};
-function parseChainInput(input2) {
-  const trimmed = input2.trim();
-  if (!trimmed) {
-    throw new Error("Empty action input.");
-  }
-  if (trimmed.startsWith("[")) {
-    const parsed = JSON.parse(trimmed);
-    if (!Array.isArray(parsed)) {
-      throw new Error("JSON action input must be an array of steps.");
-    }
-    return parsed;
-  }
-  if (trimmed.startsWith("{")) {
-    return [JSON.parse(trimmed)];
-  }
-  const segments = [];
-  let current = "";
-  let quote = null;
-  for (let i = 0; i < trimmed.length; i++) {
-    const ch = trimmed[i];
-    if (quote) {
-      if (ch === "\\" && i + 1 < trimmed.length) {
-        current += ch + trimmed[i + 1];
-        i++;
-        continue;
-      }
-      if (ch === quote) quote = null;
-      current += ch;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      current += ch;
-      continue;
-    }
-    if (ch === ";") {
-      if (current.trim()) segments.push(current.trim());
-      current = "";
-      continue;
-    }
-    if (ch === "-" && trimmed[i + 1] === ">") {
-      if (current.trim()) segments.push(current.trim());
-      current = "";
-      i++;
-      continue;
-    }
-    current += ch;
-  }
-  if (current.trim()) segments.push(current.trim());
-  const tokenize = (seg) => {
-    const out = [];
-    let tok = "";
-    let q = null;
-    for (let i = 0; i < seg.length; i++) {
-      const ch = seg[i];
-      if (q) {
-        if (ch === "\\" && i + 1 < seg.length) {
-          const next = seg[i + 1];
-          tok += next === "n" ? "\n" : next === "t" ? "	" : next;
-          i++;
-          continue;
-        }
-        if (ch === q) {
-          q = null;
-          continue;
-        }
-        tok += ch;
-        continue;
-      }
-      if (ch === '"' || ch === "'") {
-        q = ch;
-        continue;
-      }
-      if (/\s/.test(ch)) {
-        if (tok.length > 0) {
-          out.push(tok);
-          tok = "";
-        }
-        continue;
-      }
-      tok += ch;
-    }
-    if (tok.length > 0) out.push(tok);
-    return out;
-  };
-  return segments.map((seg) => {
-    const tokens = tokenize(seg);
-    const cmd = (tokens[0] ?? "").toLowerCase();
-    const parseCoords = (a, b) => {
-      if (a && a.includes(",") && b === void 0) {
-        const [xs, ys] = a.split(",");
-        const x = Number(xs);
-        const y = Number(ys);
-        if (!Number.isNaN(x) && !Number.isNaN(y)) return [x, y];
-      }
-      if (a !== void 0 && b !== void 0) {
-        const x = Number(a);
-        const y = Number(b);
-        if (!Number.isNaN(x) && !Number.isNaN(y)) return [x, y];
-      }
-      return null;
-    };
-    switch (cmd) {
-      case "move": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        if (!coords) throw new Error(`Invalid move step "${seg}". Expected: move <x> <y>`);
-        return { type: "move", x: coords[0], y: coords[1] };
-      }
-      case "click": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "click", x: coords[0], y: coords[1] } : { type: "click" };
-      }
-      case "double_click":
-      case "doubleclick":
-      case "dblclick": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "double_click", x: coords[0], y: coords[1] } : { type: "double_click" };
-      }
-      case "triple_click":
-      case "tripleclick": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "triple_click", x: coords[0], y: coords[1] } : { type: "triple_click" };
-      }
-      case "right_click":
-      case "rightclick":
-      case "rclick": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "right_click", x: coords[0], y: coords[1] } : { type: "right_click" };
-      }
-      case "drag": {
-        if (tokens.length >= 5) {
-          return {
-            type: "drag",
-            fromX: Number(tokens[1]),
-            fromY: Number(tokens[2]),
-            toX: Number(tokens[3]),
-            toY: Number(tokens[4])
-          };
-        }
-        const coords = parseCoords(tokens[1], tokens[2]);
-        if (!coords) throw new Error(`Invalid drag step "${seg}". Expected: drag [fromX fromY] <toX> <toY>`);
-        return { type: "drag", toX: coords[0], toY: coords[1] };
-      }
-      case "scroll": {
-        const dir = tokens[1]?.toLowerCase();
-        if (dir === "up" || dir === "down" || dir === "left" || dir === "right") {
-          const amount = tokens[2] ? Number(tokens[2]) : 3;
-          return { type: "scroll", direction: dir, amount };
-        }
-        const coords = parseCoords(tokens[1], tokens[2]);
-        if (coords) return { type: "scroll", deltaX: coords[0], deltaY: coords[1] };
-        throw new Error(`Invalid scroll step "${seg}". Expected: scroll <up|down|left|right> [amount]`);
-      }
-      case "type": {
-        const rawAfterCmd = seg.replace(/^type\s+/i, "");
-        const text = rawAfterCmd.startsWith('"') && rawAfterCmd.endsWith('"') || rawAfterCmd.startsWith("'") && rawAfterCmd.endsWith("'") ? tokens[1] ?? "" : rawAfterCmd;
-        return { type: "type", text };
-      }
-      case "key":
-      case "press": {
-        if (!tokens[1]) throw new Error(`Invalid key step "${seg}". Expected: key <KeyOrChord>`);
-        return { type: "key", key: tokens[1] };
-      }
-      case "wait":
-      case "sleep": {
-        const ms = Number(tokens[1] ?? 0);
-        if (Number.isNaN(ms) || ms < 0) throw new Error(`Invalid wait step "${seg}". Expected: wait <ms>`);
-        return { type: "wait", ms };
-      }
-      case "screenshot":
-      case "see":
-        return { type: "screenshot" };
-      default:
-        throw new Error(
-          `Unknown step "${cmd}" in "${seg}". Supported steps: move, click, double_click, triple_click, right_click, drag, scroll, type, key, wait, screenshot.`
-        );
-    }
-  });
-}
-
-// node_modules/zod/v3/helpers/util.js
-var util;
-(function(util2) {
-  util2.assertEqual = (_) => {
-  };
-  function assertIs2(_arg) {
-  }
-  util2.assertIs = assertIs2;
-  function assertNever2(_x) {
-    throw new Error();
-  }
-  util2.assertNever = assertNever2;
-  util2.arrayToEnum = (items) => {
-    const obj = {};
-    for (const item of items) {
-      obj[item] = item;
-    }
-    return obj;
-  };
-  util2.getValidEnumValues = (obj) => {
-    const validKeys = util2.objectKeys(obj).filter((k) => typeof obj[obj[k]] !== "number");
-    const filtered = {};
-    for (const k of validKeys) {
-      filtered[k] = obj[k];
-    }
-    return util2.objectValues(filtered);
-  };
-  util2.objectValues = (obj) => {
-    return util2.objectKeys(obj).map(function(e) {
-      return obj[e];
-    });
-  };
-  util2.objectKeys = typeof Object.keys === "function" ? (obj) => Object.keys(obj) : (object3) => {
-    const keys = [];
-    for (const key in object3) {
-      if (Object.prototype.hasOwnProperty.call(object3, key)) {
-        keys.push(key);
-      }
-    }
-    return keys;
-  };
-  util2.find = (arr, checker) => {
-    for (const item of arr) {
-      if (checker(item))
-        return item;
-    }
-    return void 0;
-  };
-  util2.isInteger = typeof Number.isInteger === "function" ? (val) => Number.isInteger(val) : (val) => typeof val === "number" && Number.isFinite(val) && Math.floor(val) === val;
-  function joinValues2(array2, separator = " | ") {
-    return array2.map((val) => typeof val === "string" ? `'${val}'` : val).join(separator);
-  }
-  util2.joinValues = joinValues2;
-  util2.jsonStringifyReplacer = (_, value) => {
-    if (typeof value === "bigint") {
-      return value.toString();
-    }
-    return value;
-  };
-})(util || (util = {}));
-var objectUtil;
-(function(objectUtil2) {
-  objectUtil2.mergeShapes = (first, second) => {
-    return {
-      ...first,
-      ...second
-      // second overwrites first
-    };
-  };
-})(objectUtil || (objectUtil = {}));
-var ZodParsedType = util.arrayToEnum([
-  "string",
-  "nan",
-  "number",
-  "integer",
-  "float",
-  "boolean",
-  "date",
-  "bigint",
-  "symbol",
-  "function",
-  "undefined",
-  "null",
-  "array",
-  "object",
-  "unknown",
-  "promise",
-  "void",
-  "never",
-  "map",
-  "set"
-]);
-var getParsedType = (data) => {
-  const t = typeof data;
-  switch (t) {
-    case "undefined":
-      return ZodParsedType.undefined;
-    case "string":
-      return ZodParsedType.string;
-    case "number":
-      return Number.isNaN(data) ? ZodParsedType.nan : ZodParsedType.number;
-    case "boolean":
-      return ZodParsedType.boolean;
-    case "function":
-      return ZodParsedType.function;
-    case "bigint":
-      return ZodParsedType.bigint;
-    case "symbol":
-      return ZodParsedType.symbol;
-    case "object":
-      if (Array.isArray(data)) {
-        return ZodParsedType.array;
-      }
-      if (data === null) {
-        return ZodParsedType.null;
-      }
-      if (data.then && typeof data.then === "function" && data.catch && typeof data.catch === "function") {
-        return ZodParsedType.promise;
-      }
-      if (typeof Map !== "undefined" && data instanceof Map) {
-        return ZodParsedType.map;
-      }
-      if (typeof Set !== "undefined" && data instanceof Set) {
-        return ZodParsedType.set;
-      }
-      if (typeof Date !== "undefined" && data instanceof Date) {
-        return ZodParsedType.date;
-      }
-      return ZodParsedType.object;
-    default:
-      return ZodParsedType.unknown;
-  }
-};
-
-// node_modules/zod/v3/ZodError.js
-var ZodIssueCode = util.arrayToEnum([
-  "invalid_type",
-  "invalid_literal",
-  "custom",
-  "invalid_union",
-  "invalid_union_discriminator",
-  "invalid_enum_value",
-  "unrecognized_keys",
-  "invalid_arguments",
-  "invalid_return_type",
-  "invalid_date",
-  "invalid_string",
-  "too_small",
-  "too_big",
-  "invalid_intersection_types",
-  "not_multiple_of",
-  "not_finite"
-]);
-var ZodError = class _ZodError extends Error {
-  get errors() {
-    return this.issues;
-  }
-  constructor(issues) {
-    super();
-    this.issues = [];
-    this.addIssue = (sub) => {
-      this.issues = [...this.issues, sub];
-    };
-    this.addIssues = (subs = []) => {
-      this.issues = [...this.issues, ...subs];
-    };
-    const actualProto = new.target.prototype;
-    if (Object.setPrototypeOf) {
-      Object.setPrototypeOf(this, actualProto);
-    } else {
-      this.__proto__ = actualProto;
-    }
-    this.name = "ZodError";
-    this.issues = issues;
-  }
-  format(_mapper) {
-    const mapper = _mapper || function(issue2) {
-      return issue2.message;
-    };
-    const fieldErrors = { _errors: [] };
-    const processError = (error62) => {
-      for (const issue2 of error62.issues) {
-        if (issue2.code === "invalid_union") {
-          issue2.unionErrors.map(processError);
-        } else if (issue2.code === "invalid_return_type") {
-          processError(issue2.returnTypeError);
-        } else if (issue2.code === "invalid_arguments") {
-          processError(issue2.argumentsError);
-        } else if (issue2.path.length === 0) {
-          fieldErrors._errors.push(mapper(issue2));
-        } else {
-          let curr = fieldErrors;
-          let i = 0;
-          while (i < issue2.path.length) {
-            const el = issue2.path[i];
-            const terminal = i === issue2.path.length - 1;
-            if (el === "_errors") {
-              if (terminal)
-                curr._errors.push(mapper(issue2));
-              i++;
-              continue;
-            }
-            if (!Object.prototype.hasOwnProperty.call(curr, el)) {
-              if (el === "__proto__") {
-                Object.defineProperty(curr, el, {
-                  value: { _errors: [] },
-                  writable: true,
-                  enumerable: true,
-                  configurable: true
-                });
-              } else {
-                curr[el] = { _errors: [] };
-              }
-            }
-            curr = curr[el];
-            if (terminal) {
-              curr._errors.push(mapper(issue2));
-            }
-            i++;
-          }
-        }
-      }
-    };
-    processError(this);
-    return fieldErrors;
-  }
-  static assert(value) {
-    if (!(value instanceof _ZodError)) {
-      throw new Error(`Not a ZodError: ${value}`);
-    }
-  }
-  toString() {
-    return this.message;
-  }
-  get message() {
-    return JSON.stringify(this.issues, util.jsonStringifyReplacer, 2);
-  }
-  get isEmpty() {
-    return this.issues.length === 0;
-  }
-  flatten(mapper = (issue2) => issue2.message) {
-    const fieldErrors = /* @__PURE__ */ Object.create(null);
-    const formErrors = [];
-    for (const sub of this.issues) {
-      if (sub.path.length > 0) {
-        const firstEl = sub.path[0];
-        fieldErrors[firstEl] = fieldErrors[firstEl] || [];
-        fieldErrors[firstEl].push(mapper(sub));
-      } else {
-        formErrors.push(mapper(sub));
-      }
-    }
-    return { formErrors, fieldErrors };
-  }
-  get formErrors() {
-    return this.flatten();
-  }
-};
-ZodError.create = (issues) => {
-  const error62 = new ZodError(issues);
-  return error62;
-};
-
-// node_modules/zod/v3/locales/en.js
-var errorMap = (issue2, _ctx) => {
-  let message;
-  switch (issue2.code) {
-    case ZodIssueCode.invalid_type:
-      if (issue2.received === ZodParsedType.undefined) {
-        message = "Required";
-      } else {
-        message = `Expected ${issue2.expected}, received ${issue2.received}`;
-      }
-      break;
-    case ZodIssueCode.invalid_literal:
-      message = `Invalid literal value, expected ${JSON.stringify(issue2.expected, util.jsonStringifyReplacer)}`;
-      break;
-    case ZodIssueCode.unrecognized_keys:
-      message = `Unrecognized key(s) in object: ${util.joinValues(issue2.keys, ", ")}`;
-      break;
-    case ZodIssueCode.invalid_union:
-      message = `Invalid input`;
-      break;
-    case ZodIssueCode.invalid_union_discriminator:
-      message = `Invalid discriminator value. Expected ${util.joinValues(issue2.options)}`;
-      break;
-    case ZodIssueCode.invalid_enum_value:
-      message = `Invalid enum value. Expected ${util.joinValues(issue2.options)}, received '${issue2.received}'`;
-      break;
-    case ZodIssueCode.invalid_arguments:
-      message = `Invalid function arguments`;
-      break;
-    case ZodIssueCode.invalid_return_type:
-      message = `Invalid function return type`;
-      break;
-    case ZodIssueCode.invalid_date:
-      message = `Invalid date`;
-      break;
-    case ZodIssueCode.invalid_string:
-      if (typeof issue2.validation === "object") {
-        if ("includes" in issue2.validation) {
-          message = `Invalid input: must include "${issue2.validation.includes}"`;
-          if (typeof issue2.validation.position === "number") {
-            message = `${message} at one or more positions greater than or equal to ${issue2.validation.position}`;
-          }
-        } else if ("startsWith" in issue2.validation) {
-          message = `Invalid input: must start with "${issue2.validation.startsWith}"`;
-        } else if ("endsWith" in issue2.validation) {
-          message = `Invalid input: must end with "${issue2.validation.endsWith}"`;
-        } else {
-          util.assertNever(issue2.validation);
-        }
-      } else if (issue2.validation !== "regex") {
-        message = `Invalid ${issue2.validation}`;
-      } else {
-        message = "Invalid";
-      }
-      break;
-    case ZodIssueCode.too_small:
-      if (issue2.type === "array")
-        message = `Array must contain ${issue2.exact ? "exactly" : issue2.inclusive ? `at least` : `more than`} ${issue2.minimum} element(s)`;
-      else if (issue2.type === "string")
-        message = `String must contain ${issue2.exact ? "exactly" : issue2.inclusive ? `at least` : `over`} ${issue2.minimum} character(s)`;
-      else if (issue2.type === "number")
-        message = `Number must be ${issue2.exact ? `exactly equal to ` : issue2.inclusive ? `greater than or equal to ` : `greater than `}${issue2.minimum}`;
-      else if (issue2.type === "bigint")
-        message = `Number must be ${issue2.exact ? `exactly equal to ` : issue2.inclusive ? `greater than or equal to ` : `greater than `}${issue2.minimum}`;
-      else if (issue2.type === "date")
-        message = `Date must be ${issue2.exact ? `exactly equal to ` : issue2.inclusive ? `greater than or equal to ` : `greater than `}${new Date(Number(issue2.minimum))}`;
-      else
-        message = "Invalid input";
-      break;
-    case ZodIssueCode.too_big:
-      if (issue2.type === "array")
-        message = `Array must contain ${issue2.exact ? `exactly` : issue2.inclusive ? `at most` : `less than`} ${issue2.maximum} element(s)`;
-      else if (issue2.type === "string")
-        message = `String must contain ${issue2.exact ? `exactly` : issue2.inclusive ? `at most` : `under`} ${issue2.maximum} character(s)`;
-      else if (issue2.type === "number")
-        message = `Number must be ${issue2.exact ? `exactly` : issue2.inclusive ? `less than or equal to` : `less than`} ${issue2.maximum}`;
-      else if (issue2.type === "bigint")
-        message = `BigInt must be ${issue2.exact ? `exactly` : issue2.inclusive ? `less than or equal to` : `less than`} ${issue2.maximum}`;
-      else if (issue2.type === "date")
-        message = `Date must be ${issue2.exact ? `exactly` : issue2.inclusive ? `smaller than or equal to` : `smaller than`} ${new Date(Number(issue2.maximum))}`;
-      else
-        message = "Invalid input";
-      break;
-    case ZodIssueCode.custom:
-      message = `Invalid input`;
-      break;
-    case ZodIssueCode.invalid_intersection_types:
-      message = `Intersection results could not be merged`;
-      break;
-    case ZodIssueCode.not_multiple_of:
-      message = `Number must be a multiple of ${issue2.multipleOf}`;
-      break;
-    case ZodIssueCode.not_finite:
-      message = "Number must be finite";
-      break;
-    default:
-      message = _ctx.defaultError;
-      util.assertNever(issue2);
-  }
-  return { message };
-};
-var en_default = errorMap;
-
-// node_modules/zod/v3/errors.js
-var overrideErrorMap = en_default;
-function getErrorMap() {
-  return overrideErrorMap;
-}
-
-// node_modules/zod/v3/helpers/parseUtil.js
-var makeIssue = (params) => {
-  const { data, path, errorMaps, issueData } = params;
-  const fullPath = [...path, ...issueData.path || []];
-  const fullIssue = {
-    ...issueData,
-    path: fullPath
-  };
-  if (issueData.message !== void 0) {
-    return {
-      ...issueData,
-      path: fullPath,
-      message: issueData.message
-    };
-  }
-  let errorMessage = "";
-  const maps = errorMaps.filter((m) => !!m).slice().reverse();
-  for (const map2 of maps) {
-    errorMessage = map2(fullIssue, { data, defaultError: errorMessage }).message;
-  }
-  return {
-    ...issueData,
-    path: fullPath,
-    message: errorMessage
-  };
-};
-function addIssueToContext(ctx, issueData) {
-  const overrideMap = getErrorMap();
-  const issue2 = makeIssue({
-    issueData,
-    data: ctx.data,
-    path: ctx.path,
-    errorMaps: [
-      ctx.common.contextualErrorMap,
-      // contextual error map is first priority
-      ctx.schemaErrorMap,
-      // then schema-bound map if available
-      overrideMap,
-      // then global override map
-      overrideMap === en_default ? void 0 : en_default
-      // then global default map
-    ].filter((x) => !!x)
-  });
-  ctx.common.issues.push(issue2);
-}
-var ParseStatus = class _ParseStatus {
-  constructor() {
-    this.value = "valid";
-  }
-  dirty() {
-    if (this.value === "valid")
-      this.value = "dirty";
-  }
-  abort() {
-    if (this.value !== "aborted")
-      this.value = "aborted";
-  }
-  static mergeArray(status, results) {
-    const arrayValue = [];
-    for (const s of results) {
-      if (s.status === "aborted")
-        return INVALID;
-      if (s.status === "dirty")
-        status.dirty();
-      arrayValue.push(s.value);
-    }
-    return { status: status.value, value: arrayValue };
-  }
-  static async mergeObjectAsync(status, pairs) {
-    const syncPairs = [];
-    for (const pair of pairs) {
-      const key = await pair.key;
-      const value = await pair.value;
-      syncPairs.push({
-        key,
-        value
-      });
-    }
-    return _ParseStatus.mergeObjectSync(status, syncPairs);
-  }
-  static mergeObjectSync(status, pairs) {
-    const finalObject = {};
-    for (const pair of pairs) {
-      const { key, value } = pair;
-      if (key.status === "aborted")
-        return INVALID;
-      if (value.status === "aborted")
-        return INVALID;
-      if (key.status === "dirty")
-        status.dirty();
-      if (value.status === "dirty")
-        status.dirty();
-      if (key.value !== "__proto__" && (typeof value.value !== "undefined" || pair.alwaysSet)) {
-        finalObject[key.value] = value.value;
-      }
-    }
-    return { status: status.value, value: finalObject };
-  }
-};
-var INVALID = Object.freeze({
-  status: "aborted"
+// node_modules/zod/v4/classic/external.js
+var external_exports = {};
+__export(external_exports, {
+  $brand: () => $brand,
+  $input: () => $input,
+  $output: () => $output,
+  INVALID: () => INVALID,
+  NEVER: () => NEVER,
+  TimePrecision: () => TimePrecision,
+  ZodAny: () => ZodAny,
+  ZodArray: () => ZodArray,
+  ZodBase64: () => ZodBase64,
+  ZodBase64URL: () => ZodBase64URL,
+  ZodBigInt: () => ZodBigInt,
+  ZodBigIntFormat: () => ZodBigIntFormat,
+  ZodBoolean: () => ZodBoolean,
+  ZodCIDRv4: () => ZodCIDRv4,
+  ZodCIDRv6: () => ZodCIDRv6,
+  ZodCUID: () => ZodCUID,
+  ZodCUID2: () => ZodCUID2,
+  ZodCatch: () => ZodCatch,
+  ZodCodec: () => ZodCodec,
+  ZodCompileAsyncError: () => ZodCompileAsyncError,
+  ZodCompileUnsupportedError: () => ZodCompileUnsupportedError,
+  ZodCreditCard: () => ZodCreditCard,
+  ZodCustom: () => ZodCustom,
+  ZodCustomStringFormat: () => ZodCustomStringFormat,
+  ZodDate: () => ZodDate,
+  ZodDefault: () => ZodDefault,
+  ZodDiscriminatedUnion: () => ZodDiscriminatedUnion,
+  ZodE164: () => ZodE164,
+  ZodEmail: () => ZodEmail,
+  ZodEmoji: () => ZodEmoji,
+  ZodEnum: () => ZodEnum,
+  ZodError: () => ZodError,
+  ZodExactOptional: () => ZodExactOptional,
+  ZodFile: () => ZodFile,
+  ZodFirstPartyTypeKind: () => ZodFirstPartyTypeKind,
+  ZodFunction: () => ZodFunction,
+  ZodGUID: () => ZodGUID,
+  ZodIBAN: () => ZodIBAN,
+  ZodIPv4: () => ZodIPv4,
+  ZodIPv6: () => ZodIPv6,
+  ZodISODate: () => ZodISODate,
+  ZodISODateTime: () => ZodISODateTime,
+  ZodISODuration: () => ZodISODuration,
+  ZodISOTime: () => ZodISOTime,
+  ZodInstanceOf: () => ZodInstanceOf,
+  ZodIntersection: () => ZodIntersection,
+  ZodIssueCode: () => ZodIssueCode,
+  ZodJWT: () => ZodJWT,
+  ZodKSUID: () => ZodKSUID,
+  ZodLazy: () => ZodLazy,
+  ZodLiteral: () => ZodLiteral,
+  ZodMAC: () => ZodMAC,
+  ZodMap: () => ZodMap,
+  ZodNaN: () => ZodNaN,
+  ZodNanoID: () => ZodNanoID,
+  ZodNever: () => ZodNever,
+  ZodNonOptional: () => ZodNonOptional,
+  ZodNull: () => ZodNull,
+  ZodNullable: () => ZodNullable,
+  ZodNumber: () => ZodNumber,
+  ZodNumberFormat: () => ZodNumberFormat,
+  ZodObject: () => ZodObject,
+  ZodOptional: () => ZodOptional,
+  ZodPipe: () => ZodPipe,
+  ZodPrefault: () => ZodPrefault,
+  ZodPreprocess: () => ZodPreprocess,
+  ZodPromise: () => ZodPromise,
+  ZodReadonly: () => ZodReadonly,
+  ZodRealError: () => ZodRealError,
+  ZodRecord: () => ZodRecord,
+  ZodSet: () => ZodSet,
+  ZodString: () => ZodString,
+  ZodStringFormat: () => ZodStringFormat,
+  ZodSuccess: () => ZodSuccess,
+  ZodSymbol: () => ZodSymbol,
+  ZodTemplateLiteral: () => ZodTemplateLiteral,
+  ZodTransform: () => ZodTransform,
+  ZodTuple: () => ZodTuple,
+  ZodType: () => ZodType,
+  ZodULID: () => ZodULID,
+  ZodURL: () => ZodURL,
+  ZodUUID: () => ZodUUID,
+  ZodUndefined: () => ZodUndefined,
+  ZodUnion: () => ZodUnion,
+  ZodUnknown: () => ZodUnknown,
+  ZodVoid: () => ZodVoid,
+  ZodXID: () => ZodXID,
+  ZodXor: () => ZodXor,
+  _ZodString: () => _ZodString,
+  _default: () => _default2,
+  _function: () => _function,
+  any: () => any,
+  array: () => array,
+  base64: () => base642,
+  base64url: () => base64url2,
+  bigint: () => bigint2,
+  boolean: () => boolean2,
+  catch: () => _catch2,
+  check: () => check,
+  cidrv4: () => cidrv42,
+  cidrv6: () => cidrv62,
+  clone: () => clone,
+  codec: () => codec,
+  coerce: () => coerce_exports,
+  compile: () => compile,
+  config: () => config,
+  core: () => core_exports2,
+  creditCard: () => creditCard2,
+  cuid: () => cuid3,
+  cuid2: () => cuid22,
+  currencyCode: () => currencyCode2,
+  custom: () => custom,
+  date: () => date2,
+  decode: () => decode2,
+  decodeAsync: () => decodeAsync2,
+  deepPartial: () => deepPartial,
+  describe: () => describe2,
+  discriminatedUnion: () => discriminatedUnion,
+  e164: () => e1642,
+  email: () => email2,
+  emoji: () => emoji2,
+  encode: () => encode2,
+  encodeAsync: () => encodeAsync2,
+  endsWith: () => _endsWith,
+  enum: () => _enum2,
+  exactOptional: () => exactOptional,
+  file: () => file,
+  flattenError: () => flattenError,
+  float32: () => float32,
+  float64: () => float64,
+  formatError: () => formatError,
+  fromJSONSchema: () => fromJSONSchema,
+  function: () => _function,
+  getDiscriminatedOption: () => getDiscriminatedOption,
+  getErrorMap: () => getErrorMap,
+  globalRegistry: () => globalRegistry,
+  gt: () => _gt,
+  gte: () => _gte,
+  guid: () => guid2,
+  hash: () => hash,
+  hex: () => hex2,
+  hostname: () => hostname2,
+  httpUrl: () => httpUrl,
+  iban: () => iban2,
+  includes: () => _includes,
+  input: () => input,
+  instanceof: () => _instanceof,
+  int: () => int,
+  int32: () => int32,
+  int64: () => int64,
+  intersection: () => intersection,
+  invertCodec: () => invertCodec,
+  ipv4: () => ipv42,
+  ipv6: () => ipv62,
+  iso: () => iso_exports,
+  json: () => json,
+  jwt: () => jwt,
+  keyof: () => keyof,
+  ksuid: () => ksuid2,
+  lazy: () => lazy,
+  length: () => _length,
+  literal: () => literal,
+  locales: () => locales_exports,
+  looseObject: () => looseObject,
+  looseRecord: () => looseRecord,
+  lowercase: () => _lowercase,
+  lt: () => _lt,
+  lte: () => _lte,
+  mac: () => mac2,
+  map: () => map,
+  maxLength: () => _maxLength,
+  maxSize: () => _maxSize,
+  memoizer: () => memoizer,
+  meta: () => meta2,
+  mime: () => _mime,
+  minLength: () => _minLength,
+  minSize: () => _minSize,
+  multipleOf: () => _multipleOf,
+  nan: () => nan,
+  nanoid: () => nanoid2,
+  nativeEnum: () => nativeEnum,
+  negative: () => _negative,
+  never: () => never,
+  nonnegative: () => _nonnegative,
+  nonoptional: () => nonoptional,
+  nonpositive: () => _nonpositive,
+  normalize: () => _normalize,
+  null: () => _null3,
+  nullable: () => nullable,
+  nullish: () => nullish2,
+  number: () => number2,
+  object: () => object,
+  optional: () => optional,
+  output: () => output,
+  overwrite: () => _overwrite,
+  parse: () => parse2,
+  parseAsync: () => parseAsync2,
+  partialRecord: () => partialRecord,
+  pipe: () => pipe,
+  positive: () => _positive,
+  prefault: () => prefault,
+  preprocess: () => preprocess,
+  prettifyError: () => prettifyError,
+  promise: () => promise,
+  properties: () => _properties,
+  property: () => _property,
+  readonly: () => readonly,
+  record: () => record,
+  refine: () => refine,
+  regex: () => _regex,
+  regexes: () => regexes_exports,
+  registry: () => registry,
+  safeDecode: () => safeDecode2,
+  safeDecodeAsync: () => safeDecodeAsync2,
+  safeEncode: () => safeEncode2,
+  safeEncodeAsync: () => safeEncodeAsync2,
+  safeParse: () => safeParse2,
+  safeParseAsync: () => safeParseAsync2,
+  set: () => set,
+  setErrorMap: () => setErrorMap,
+  size: () => _size,
+  slugify: () => _slugify,
+  startsWith: () => _startsWith,
+  strictObject: () => strictObject,
+  string: () => string2,
+  stringFormat: () => stringFormat,
+  stringbool: () => stringbool,
+  success: () => success,
+  superRefine: () => superRefine,
+  symbol: () => symbol,
+  templateLiteral: () => templateLiteral,
+  toJSONSchema: () => toJSONSchema,
+  toLowerCase: () => _toLowerCase,
+  toUpperCase: () => _toUpperCase,
+  toZod: () => toZod,
+  transform: () => transform,
+  treeifyError: () => treeifyError,
+  trim: () => _trim,
+  tuple: () => tuple,
+  uint32: () => uint32,
+  uint64: () => uint64,
+  ulid: () => ulid2,
+  undefined: () => _undefined3,
+  union: () => union,
+  unknown: () => unknown,
+  uppercase: () => _uppercase,
+  url: () => url,
+  util: () => util_exports,
+  uuid: () => uuid2,
+  uuidv4: () => uuidv4,
+  uuidv6: () => uuidv6,
+  uuidv7: () => uuidv7,
+  validate: () => validate,
+  validateAsync: () => validateAsync,
+  void: () => _void2,
+  withParser: () => withParser,
+  xid: () => xid2,
+  xor: () => xor
 });
-var DIRTY = (value) => ({ status: "dirty", value });
-var OK = (value) => ({ status: "valid", value });
-var isAborted = (x) => x.status === "aborted";
-var isDirty = (x) => x.status === "dirty";
-var isValid = (x) => x.status === "valid";
-var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
-
-// node_modules/zod/v3/helpers/errorUtil.js
-var errorUtil;
-(function(errorUtil2) {
-  errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
-  errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
-})(errorUtil || (errorUtil = {}));
-
-// node_modules/zod/v3/types.js
-var ParseInputLazyPath = class {
-  constructor(parent, value, path, key) {
-    this._cachedPath = [];
-    this.parent = parent;
-    this.data = value;
-    this._path = path;
-    this._key = key;
-  }
-  get path() {
-    if (!this._cachedPath.length) {
-      if (Array.isArray(this._key)) {
-        this._cachedPath.push(...this._path, ...this._key);
-      } else {
-        this._cachedPath.push(...this._path, this._key);
-      }
-    }
-    return this._cachedPath;
-  }
-};
-var handleResult = (ctx, result) => {
-  if (isValid(result)) {
-    return { success: true, data: result.value };
-  } else {
-    if (!ctx.common.issues.length) {
-      throw new Error("Validation failed but no issues detected.");
-    }
-    return {
-      success: false,
-      get error() {
-        if (this._error)
-          return this._error;
-        const error62 = new ZodError(ctx.common.issues);
-        this._error = error62;
-        return this._error;
-      }
-    };
-  }
-};
-function processCreateParams(params) {
-  if (!params)
-    return {};
-  const { errorMap: errorMap2, invalid_type_error, required_error, description } = params;
-  if (errorMap2 && (invalid_type_error || required_error)) {
-    throw new Error(`Can't use "invalid_type_error" or "required_error" in conjunction with custom error map.`);
-  }
-  if (errorMap2)
-    return { errorMap: errorMap2, description };
-  const customMap = (iss, ctx) => {
-    const { message } = params;
-    if (iss.code === "invalid_enum_value") {
-      return { message: message ?? ctx.defaultError };
-    }
-    if (typeof ctx.data === "undefined") {
-      return { message: message ?? required_error ?? ctx.defaultError };
-    }
-    if (iss.code !== "invalid_type")
-      return { message: ctx.defaultError };
-    return { message: message ?? invalid_type_error ?? ctx.defaultError };
-  };
-  return { errorMap: customMap, description };
-}
-var ZodType = class {
-  get description() {
-    return this._def.description;
-  }
-  _getType(input2) {
-    return getParsedType(input2.data);
-  }
-  _getOrReturnCtx(input2, ctx) {
-    return ctx || {
-      common: input2.parent.common,
-      data: input2.data,
-      parsedType: getParsedType(input2.data),
-      schemaErrorMap: this._def.errorMap,
-      path: input2.path,
-      parent: input2.parent
-    };
-  }
-  _processInputParams(input2) {
-    return {
-      status: new ParseStatus(),
-      ctx: {
-        common: input2.parent.common,
-        data: input2.data,
-        parsedType: getParsedType(input2.data),
-        schemaErrorMap: this._def.errorMap,
-        path: input2.path,
-        parent: input2.parent
-      }
-    };
-  }
-  _parseSync(input2) {
-    const result = this._parse(input2);
-    if (isAsync(result)) {
-      throw new Error("Synchronous parse encountered promise.");
-    }
-    return result;
-  }
-  _parseAsync(input2) {
-    const result = this._parse(input2);
-    return Promise.resolve(result);
-  }
-  parse(data, params) {
-    const result = this.safeParse(data, params);
-    if (result.success)
-      return result.data;
-    throw result.error;
-  }
-  safeParse(data, params) {
-    const ctx = {
-      common: {
-        issues: [],
-        async: params?.async ?? false,
-        contextualErrorMap: params?.errorMap
-      },
-      path: params?.path || [],
-      schemaErrorMap: this._def.errorMap,
-      parent: null,
-      data,
-      parsedType: getParsedType(data)
-    };
-    const result = this._parseSync({ data, path: ctx.path, parent: ctx });
-    return handleResult(ctx, result);
-  }
-  "~validate"(data) {
-    const ctx = {
-      common: {
-        issues: [],
-        async: !!this["~standard"].async
-      },
-      path: [],
-      schemaErrorMap: this._def.errorMap,
-      parent: null,
-      data,
-      parsedType: getParsedType(data)
-    };
-    if (!this["~standard"].async) {
-      try {
-        const result = this._parseSync({ data, path: [], parent: ctx });
-        return isValid(result) ? {
-          value: result.value
-        } : {
-          issues: ctx.common.issues
-        };
-      } catch (err) {
-        if (err?.message?.toLowerCase()?.includes("encountered")) {
-          this["~standard"].async = true;
-        }
-        ctx.common = {
-          issues: [],
-          async: true
-        };
-      }
-    }
-    return this._parseAsync({ data, path: [], parent: ctx }).then((result) => isValid(result) ? {
-      value: result.value
-    } : {
-      issues: ctx.common.issues
-    });
-  }
-  async parseAsync(data, params) {
-    const result = await this.safeParseAsync(data, params);
-    if (result.success)
-      return result.data;
-    throw result.error;
-  }
-  async safeParseAsync(data, params) {
-    const ctx = {
-      common: {
-        issues: [],
-        contextualErrorMap: params?.errorMap,
-        async: true
-      },
-      path: params?.path || [],
-      schemaErrorMap: this._def.errorMap,
-      parent: null,
-      data,
-      parsedType: getParsedType(data)
-    };
-    const maybeAsyncResult = this._parse({ data, path: ctx.path, parent: ctx });
-    const result = await (isAsync(maybeAsyncResult) ? maybeAsyncResult : Promise.resolve(maybeAsyncResult));
-    return handleResult(ctx, result);
-  }
-  refine(check2, message) {
-    const getIssueProperties = (val) => {
-      if (typeof message === "string" || typeof message === "undefined") {
-        return { message };
-      } else if (typeof message === "function") {
-        return message(val);
-      } else {
-        return message;
-      }
-    };
-    return this._refinement((val, ctx) => {
-      const result = check2(val);
-      const setError = () => ctx.addIssue({
-        code: ZodIssueCode.custom,
-        ...getIssueProperties(val)
-      });
-      if (typeof Promise !== "undefined" && result instanceof Promise) {
-        return result.then((data) => {
-          if (!data) {
-            setError();
-            return false;
-          } else {
-            return true;
-          }
-        });
-      }
-      if (!result) {
-        setError();
-        return false;
-      } else {
-        return true;
-      }
-    });
-  }
-  refinement(check2, refinementData) {
-    return this._refinement((val, ctx) => {
-      if (!check2(val)) {
-        ctx.addIssue(typeof refinementData === "function" ? refinementData(val, ctx) : refinementData);
-        return false;
-      } else {
-        return true;
-      }
-    });
-  }
-  _refinement(refinement) {
-    return new ZodEffects({
-      schema: this,
-      typeName: ZodFirstPartyTypeKind.ZodEffects,
-      effect: { type: "refinement", refinement }
-    });
-  }
-  superRefine(refinement) {
-    return this._refinement(refinement);
-  }
-  constructor(def) {
-    this.spa = this.safeParseAsync;
-    this._def = def;
-    this.parse = this.parse.bind(this);
-    this.safeParse = this.safeParse.bind(this);
-    this.parseAsync = this.parseAsync.bind(this);
-    this.safeParseAsync = this.safeParseAsync.bind(this);
-    this.spa = this.spa.bind(this);
-    this.refine = this.refine.bind(this);
-    this.refinement = this.refinement.bind(this);
-    this.superRefine = this.superRefine.bind(this);
-    this.optional = this.optional.bind(this);
-    this.nullable = this.nullable.bind(this);
-    this.nullish = this.nullish.bind(this);
-    this.array = this.array.bind(this);
-    this.promise = this.promise.bind(this);
-    this.or = this.or.bind(this);
-    this.and = this.and.bind(this);
-    this.transform = this.transform.bind(this);
-    this.brand = this.brand.bind(this);
-    this.default = this.default.bind(this);
-    this.catch = this.catch.bind(this);
-    this.describe = this.describe.bind(this);
-    this.pipe = this.pipe.bind(this);
-    this.readonly = this.readonly.bind(this);
-    this.isNullable = this.isNullable.bind(this);
-    this.isOptional = this.isOptional.bind(this);
-    this["~standard"] = {
-      version: 1,
-      vendor: "zod",
-      validate: (data) => this["~validate"](data)
-    };
-  }
-  optional() {
-    return ZodOptional.create(this, this._def);
-  }
-  nullable() {
-    return ZodNullable.create(this, this._def);
-  }
-  nullish() {
-    return this.nullable().optional();
-  }
-  array() {
-    return ZodArray.create(this);
-  }
-  promise() {
-    return ZodPromise.create(this, this._def);
-  }
-  or(option) {
-    return ZodUnion.create([this, option], this._def);
-  }
-  and(incoming) {
-    return ZodIntersection.create(this, incoming, this._def);
-  }
-  transform(transform2) {
-    return new ZodEffects({
-      ...processCreateParams(this._def),
-      schema: this,
-      typeName: ZodFirstPartyTypeKind.ZodEffects,
-      effect: { type: "transform", transform: transform2 }
-    });
-  }
-  default(def) {
-    const defaultValueFunc = typeof def === "function" ? def : () => def;
-    return new ZodDefault({
-      ...processCreateParams(this._def),
-      innerType: this,
-      defaultValue: defaultValueFunc,
-      typeName: ZodFirstPartyTypeKind.ZodDefault
-    });
-  }
-  brand() {
-    return new ZodBranded({
-      typeName: ZodFirstPartyTypeKind.ZodBranded,
-      type: this,
-      ...processCreateParams(this._def)
-    });
-  }
-  catch(def) {
-    const catchValueFunc = typeof def === "function" ? def : () => def;
-    return new ZodCatch({
-      ...processCreateParams(this._def),
-      innerType: this,
-      catchValue: catchValueFunc,
-      typeName: ZodFirstPartyTypeKind.ZodCatch
-    });
-  }
-  describe(description) {
-    const This = this.constructor;
-    return new This({
-      ...this._def,
-      description
-    });
-  }
-  pipe(target) {
-    return ZodPipeline.create(this, target);
-  }
-  readonly() {
-    return ZodReadonly.create(this);
-  }
-  isOptional() {
-    return this.safeParse(void 0).success;
-  }
-  isNullable() {
-    return this.safeParse(null).success;
-  }
-};
-var cuidRegex = /^c[^\s-]{8,}$/i;
-var cuid2Regex = /^[0-9a-z]+$/;
-var ulidRegex = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
-var uuidRegex = /^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$/i;
-var nanoidRegex = /^[a-z0-9_-]{21}$/i;
-var jwtRegex = /^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]*$/;
-var durationRegex = /^[-+]?P(?!$)(?:(?:[-+]?\d+Y)|(?:[-+]?\d+[.,]\d+Y$))?(?:(?:[-+]?\d+M)|(?:[-+]?\d+[.,]\d+M$))?(?:(?:[-+]?\d+W)|(?:[-+]?\d+[.,]\d+W$))?(?:(?:[-+]?\d+D)|(?:[-+]?\d+[.,]\d+D$))?(?:T(?=[\d+-])(?:(?:[-+]?\d+H)|(?:[-+]?\d+[.,]\d+H$))?(?:(?:[-+]?\d+M)|(?:[-+]?\d+[.,]\d+M$))?(?:[-+]?\d+(?:[.,]\d+)?S)?)??$/;
-var emailRegex = /^(?!\.)(?!.*\.\.)([A-Z0-9_'+\-\.]*)[A-Z0-9_+-]@([A-Z0-9][A-Z0-9\-]*\.)+[A-Z]{2,}$/i;
-var _emojiRegex = `^[\\p{Extended_Pictographic}\\p{Emoji_Component}]+$`;
-var emojiRegex;
-var ipv4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
-var ipv4CidrRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/(3[0-2]|[12]?[0-9])$/;
-var ipv6Regex = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$/;
-var ipv6CidrRegex = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/;
-var base64Regex = /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$/;
-var base64urlRegex = /^([0-9a-zA-Z-_]{4})*(([0-9a-zA-Z-_]{2}(==)?)|([0-9a-zA-Z-_]{3}(=)?))?$/;
-var dateRegexSource = `((\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-((0[13578]|1[02])-(0[1-9]|[12]\\d|3[01])|(0[469]|11)-(0[1-9]|[12]\\d|30)|(02)-(0[1-9]|1\\d|2[0-8])))`;
-var dateRegex = new RegExp(`^${dateRegexSource}$`);
-function timeRegexSource(args) {
-  let secondsRegexSource = `[0-5]\\d`;
-  if (args.precision) {
-    secondsRegexSource = `${secondsRegexSource}\\.\\d{${args.precision}}`;
-  } else if (args.precision == null) {
-    secondsRegexSource = `${secondsRegexSource}(\\.\\d+)?`;
-  }
-  const secondsQuantifier = args.precision ? "+" : "?";
-  return `([01]\\d|2[0-3]):[0-5]\\d(:${secondsRegexSource})${secondsQuantifier}`;
-}
-function timeRegex(args) {
-  return new RegExp(`^${timeRegexSource(args)}$`);
-}
-function datetimeRegex(args) {
-  let regex = `${dateRegexSource}T${timeRegexSource(args)}`;
-  const opts = [];
-  opts.push(args.local ? `Z?` : `Z`);
-  if (args.offset)
-    opts.push(`([+-]\\d{2}:?\\d{2})`);
-  regex = `${regex}(${opts.join("|")})`;
-  return new RegExp(`^${regex}$`);
-}
-function isValidIP(ip, version2) {
-  if ((version2 === "v4" || !version2) && ipv4Regex.test(ip)) {
-    return true;
-  }
-  if ((version2 === "v6" || !version2) && ipv6Regex.test(ip)) {
-    return true;
-  }
-  return false;
-}
-function isValidJWT(jwt2, alg) {
-  if (!jwtRegex.test(jwt2))
-    return false;
-  try {
-    const [header] = jwt2.split(".");
-    if (!header)
-      return false;
-    const base643 = header.replace(/-/g, "+").replace(/_/g, "/").padEnd(header.length + (4 - header.length % 4) % 4, "=");
-    const decoded = JSON.parse(atob(base643));
-    if (typeof decoded !== "object" || decoded === null)
-      return false;
-    if ("typ" in decoded && decoded?.typ !== "JWT")
-      return false;
-    if (!decoded.alg)
-      return false;
-    if (alg && decoded.alg !== alg)
-      return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-function isValidCidr(ip, version2) {
-  if ((version2 === "v4" || !version2) && ipv4CidrRegex.test(ip)) {
-    return true;
-  }
-  if ((version2 === "v6" || !version2) && ipv6CidrRegex.test(ip)) {
-    return true;
-  }
-  return false;
-}
-var ZodString = class _ZodString2 extends ZodType {
-  _parse(input2) {
-    if (this._def.coerce) {
-      input2.data = String(input2.data);
-    }
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 !== ZodParsedType.string) {
-      const ctx2 = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx2, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.string,
-        received: ctx2.parsedType
-      });
-      return INVALID;
-    }
-    const status = new ParseStatus();
-    let ctx = void 0;
-    for (const check2 of this._def.checks) {
-      if (check2.kind === "min") {
-        if (input2.data.length < check2.value) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.too_small,
-            minimum: check2.value,
-            type: "string",
-            inclusive: true,
-            exact: false,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "max") {
-        if (input2.data.length > check2.value) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.too_big,
-            maximum: check2.value,
-            type: "string",
-            inclusive: true,
-            exact: false,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "length") {
-        const tooBig = input2.data.length > check2.value;
-        const tooSmall = input2.data.length < check2.value;
-        if (tooBig || tooSmall) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          if (tooBig) {
-            addIssueToContext(ctx, {
-              code: ZodIssueCode.too_big,
-              maximum: check2.value,
-              type: "string",
-              inclusive: true,
-              exact: true,
-              message: check2.message
-            });
-          } else if (tooSmall) {
-            addIssueToContext(ctx, {
-              code: ZodIssueCode.too_small,
-              minimum: check2.value,
-              type: "string",
-              inclusive: true,
-              exact: true,
-              message: check2.message
-            });
-          }
-          status.dirty();
-        }
-      } else if (check2.kind === "email") {
-        if (!emailRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "email",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "emoji") {
-        if (!emojiRegex) {
-          emojiRegex = new RegExp(_emojiRegex, "u");
-        }
-        if (!emojiRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "emoji",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "uuid") {
-        if (!uuidRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "uuid",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "nanoid") {
-        if (!nanoidRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "nanoid",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "cuid") {
-        if (!cuidRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "cuid",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "cuid2") {
-        if (!cuid2Regex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "cuid2",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "ulid") {
-        if (!ulidRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "ulid",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "url") {
-        try {
-          new URL(input2.data);
-        } catch {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "url",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "regex") {
-        check2.regex.lastIndex = 0;
-        const testResult = check2.regex.test(input2.data);
-        if (!testResult) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "regex",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "trim") {
-        input2.data = input2.data.trim();
-      } else if (check2.kind === "includes") {
-        if (!input2.data.includes(check2.value, check2.position)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.invalid_string,
-            validation: { includes: check2.value, position: check2.position },
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "toLowerCase") {
-        input2.data = input2.data.toLowerCase();
-      } else if (check2.kind === "toUpperCase") {
-        input2.data = input2.data.toUpperCase();
-      } else if (check2.kind === "startsWith") {
-        if (!input2.data.startsWith(check2.value)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.invalid_string,
-            validation: { startsWith: check2.value },
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "endsWith") {
-        if (!input2.data.endsWith(check2.value)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.invalid_string,
-            validation: { endsWith: check2.value },
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "datetime") {
-        const regex = datetimeRegex(check2);
-        if (!regex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.invalid_string,
-            validation: "datetime",
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "date") {
-        const regex = dateRegex;
-        if (!regex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.invalid_string,
-            validation: "date",
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "time") {
-        const regex = timeRegex(check2);
-        if (!regex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.invalid_string,
-            validation: "time",
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "duration") {
-        if (!durationRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "duration",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "ip") {
-        if (!isValidIP(input2.data, check2.version)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "ip",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "jwt") {
-        if (!isValidJWT(input2.data, check2.alg)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "jwt",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "cidr") {
-        if (!isValidCidr(input2.data, check2.version)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "cidr",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "base64") {
-        if (!base64Regex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "base64",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "base64url") {
-        if (!base64urlRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            validation: "base64url",
-            code: ZodIssueCode.invalid_string,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else {
-        util.assertNever(check2);
-      }
-    }
-    return { status: status.value, value: input2.data };
-  }
-  _regex(regex, validation, message) {
-    return this.refinement((data) => regex.test(data), {
-      validation,
-      code: ZodIssueCode.invalid_string,
-      ...errorUtil.errToObj(message)
-    });
-  }
-  _addCheck(check2) {
-    return new _ZodString2({
-      ...this._def,
-      checks: [...this._def.checks, check2]
-    });
-  }
-  email(message) {
-    return this._addCheck({ kind: "email", ...errorUtil.errToObj(message) });
-  }
-  url(message) {
-    return this._addCheck({ kind: "url", ...errorUtil.errToObj(message) });
-  }
-  emoji(message) {
-    return this._addCheck({ kind: "emoji", ...errorUtil.errToObj(message) });
-  }
-  uuid(message) {
-    return this._addCheck({ kind: "uuid", ...errorUtil.errToObj(message) });
-  }
-  nanoid(message) {
-    return this._addCheck({ kind: "nanoid", ...errorUtil.errToObj(message) });
-  }
-  cuid(message) {
-    return this._addCheck({ kind: "cuid", ...errorUtil.errToObj(message) });
-  }
-  cuid2(message) {
-    return this._addCheck({ kind: "cuid2", ...errorUtil.errToObj(message) });
-  }
-  ulid(message) {
-    return this._addCheck({ kind: "ulid", ...errorUtil.errToObj(message) });
-  }
-  base64(message) {
-    return this._addCheck({ kind: "base64", ...errorUtil.errToObj(message) });
-  }
-  base64url(message) {
-    return this._addCheck({
-      kind: "base64url",
-      ...errorUtil.errToObj(message)
-    });
-  }
-  jwt(options) {
-    return this._addCheck({ kind: "jwt", ...errorUtil.errToObj(options) });
-  }
-  ip(options) {
-    return this._addCheck({ kind: "ip", ...errorUtil.errToObj(options) });
-  }
-  cidr(options) {
-    return this._addCheck({ kind: "cidr", ...errorUtil.errToObj(options) });
-  }
-  datetime(options) {
-    if (typeof options === "string") {
-      return this._addCheck({
-        kind: "datetime",
-        precision: null,
-        offset: false,
-        local: false,
-        message: options
-      });
-    }
-    return this._addCheck({
-      kind: "datetime",
-      precision: typeof options?.precision === "undefined" ? null : options?.precision,
-      offset: options?.offset ?? false,
-      local: options?.local ?? false,
-      ...errorUtil.errToObj(options?.message)
-    });
-  }
-  date(message) {
-    return this._addCheck({ kind: "date", message });
-  }
-  time(options) {
-    if (typeof options === "string") {
-      return this._addCheck({
-        kind: "time",
-        precision: null,
-        message: options
-      });
-    }
-    return this._addCheck({
-      kind: "time",
-      precision: typeof options?.precision === "undefined" ? null : options?.precision,
-      ...errorUtil.errToObj(options?.message)
-    });
-  }
-  duration(message) {
-    return this._addCheck({ kind: "duration", ...errorUtil.errToObj(message) });
-  }
-  regex(regex, message) {
-    return this._addCheck({
-      kind: "regex",
-      regex,
-      ...errorUtil.errToObj(message)
-    });
-  }
-  includes(value, options) {
-    return this._addCheck({
-      kind: "includes",
-      value,
-      position: options?.position,
-      ...errorUtil.errToObj(options?.message)
-    });
-  }
-  startsWith(value, message) {
-    return this._addCheck({
-      kind: "startsWith",
-      value,
-      ...errorUtil.errToObj(message)
-    });
-  }
-  endsWith(value, message) {
-    return this._addCheck({
-      kind: "endsWith",
-      value,
-      ...errorUtil.errToObj(message)
-    });
-  }
-  min(minLength, message) {
-    return this._addCheck({
-      kind: "min",
-      value: minLength,
-      ...errorUtil.errToObj(message)
-    });
-  }
-  max(maxLength, message) {
-    return this._addCheck({
-      kind: "max",
-      value: maxLength,
-      ...errorUtil.errToObj(message)
-    });
-  }
-  length(len, message) {
-    return this._addCheck({
-      kind: "length",
-      value: len,
-      ...errorUtil.errToObj(message)
-    });
-  }
-  /**
-   * Equivalent to `.min(1)`
-   */
-  nonempty(message) {
-    return this.min(1, errorUtil.errToObj(message));
-  }
-  trim() {
-    return new _ZodString2({
-      ...this._def,
-      checks: [...this._def.checks, { kind: "trim" }]
-    });
-  }
-  toLowerCase() {
-    return new _ZodString2({
-      ...this._def,
-      checks: [...this._def.checks, { kind: "toLowerCase" }]
-    });
-  }
-  toUpperCase() {
-    return new _ZodString2({
-      ...this._def,
-      checks: [...this._def.checks, { kind: "toUpperCase" }]
-    });
-  }
-  get isDatetime() {
-    return !!this._def.checks.find((ch) => ch.kind === "datetime");
-  }
-  get isDate() {
-    return !!this._def.checks.find((ch) => ch.kind === "date");
-  }
-  get isTime() {
-    return !!this._def.checks.find((ch) => ch.kind === "time");
-  }
-  get isDuration() {
-    return !!this._def.checks.find((ch) => ch.kind === "duration");
-  }
-  get isEmail() {
-    return !!this._def.checks.find((ch) => ch.kind === "email");
-  }
-  get isURL() {
-    return !!this._def.checks.find((ch) => ch.kind === "url");
-  }
-  get isEmoji() {
-    return !!this._def.checks.find((ch) => ch.kind === "emoji");
-  }
-  get isUUID() {
-    return !!this._def.checks.find((ch) => ch.kind === "uuid");
-  }
-  get isNANOID() {
-    return !!this._def.checks.find((ch) => ch.kind === "nanoid");
-  }
-  get isCUID() {
-    return !!this._def.checks.find((ch) => ch.kind === "cuid");
-  }
-  get isCUID2() {
-    return !!this._def.checks.find((ch) => ch.kind === "cuid2");
-  }
-  get isULID() {
-    return !!this._def.checks.find((ch) => ch.kind === "ulid");
-  }
-  get isIP() {
-    return !!this._def.checks.find((ch) => ch.kind === "ip");
-  }
-  get isCIDR() {
-    return !!this._def.checks.find((ch) => ch.kind === "cidr");
-  }
-  get isBase64() {
-    return !!this._def.checks.find((ch) => ch.kind === "base64");
-  }
-  get isBase64url() {
-    return !!this._def.checks.find((ch) => ch.kind === "base64url");
-  }
-  get minLength() {
-    let min = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "min") {
-        if (min === null || ch.value > min)
-          min = ch.value;
-      }
-    }
-    return min;
-  }
-  get maxLength() {
-    let max = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "max") {
-        if (max === null || ch.value < max)
-          max = ch.value;
-      }
-    }
-    return max;
-  }
-};
-ZodString.create = (params) => {
-  return new ZodString({
-    checks: [],
-    typeName: ZodFirstPartyTypeKind.ZodString,
-    coerce: params?.coerce ?? false,
-    ...processCreateParams(params)
-  });
-};
-function floatSafeRemainder(val, step) {
-  const valDecCount = (val.toString().split(".")[1] || "").length;
-  const stepDecCount = (step.toString().split(".")[1] || "").length;
-  const decCount = valDecCount > stepDecCount ? valDecCount : stepDecCount;
-  const valInt = Number.parseInt(val.toFixed(decCount).replace(".", ""));
-  const stepInt = Number.parseInt(step.toFixed(decCount).replace(".", ""));
-  return valInt % stepInt / 10 ** decCount;
-}
-var ZodNumber = class _ZodNumber extends ZodType {
-  constructor() {
-    super(...arguments);
-    this.min = this.gte;
-    this.max = this.lte;
-    this.step = this.multipleOf;
-  }
-  _parse(input2) {
-    if (this._def.coerce) {
-      input2.data = Number(input2.data);
-    }
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 !== ZodParsedType.number) {
-      const ctx2 = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx2, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.number,
-        received: ctx2.parsedType
-      });
-      return INVALID;
-    }
-    let ctx = void 0;
-    const status = new ParseStatus();
-    for (const check2 of this._def.checks) {
-      if (check2.kind === "int") {
-        if (!util.isInteger(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.invalid_type,
-            expected: "integer",
-            received: "float",
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "min") {
-        const tooSmall = check2.inclusive ? input2.data < check2.value : input2.data <= check2.value;
-        if (tooSmall) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.too_small,
-            minimum: check2.value,
-            type: "number",
-            inclusive: check2.inclusive,
-            exact: false,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "max") {
-        const tooBig = check2.inclusive ? input2.data > check2.value : input2.data >= check2.value;
-        if (tooBig) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.too_big,
-            maximum: check2.value,
-            type: "number",
-            inclusive: check2.inclusive,
-            exact: false,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "multipleOf") {
-        if (floatSafeRemainder(input2.data, check2.value) !== 0) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.not_multiple_of,
-            multipleOf: check2.value,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "finite") {
-        if (!Number.isFinite(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.not_finite,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else {
-        util.assertNever(check2);
-      }
-    }
-    return { status: status.value, value: input2.data };
-  }
-  gte(value, message) {
-    return this.setLimit("min", value, true, errorUtil.toString(message));
-  }
-  gt(value, message) {
-    return this.setLimit("min", value, false, errorUtil.toString(message));
-  }
-  lte(value, message) {
-    return this.setLimit("max", value, true, errorUtil.toString(message));
-  }
-  lt(value, message) {
-    return this.setLimit("max", value, false, errorUtil.toString(message));
-  }
-  setLimit(kind, value, inclusive, message) {
-    return new _ZodNumber({
-      ...this._def,
-      checks: [
-        ...this._def.checks,
-        {
-          kind,
-          value,
-          inclusive,
-          message: errorUtil.toString(message)
-        }
-      ]
-    });
-  }
-  _addCheck(check2) {
-    return new _ZodNumber({
-      ...this._def,
-      checks: [...this._def.checks, check2]
-    });
-  }
-  int(message) {
-    return this._addCheck({
-      kind: "int",
-      message: errorUtil.toString(message)
-    });
-  }
-  positive(message) {
-    return this._addCheck({
-      kind: "min",
-      value: 0,
-      inclusive: false,
-      message: errorUtil.toString(message)
-    });
-  }
-  negative(message) {
-    return this._addCheck({
-      kind: "max",
-      value: 0,
-      inclusive: false,
-      message: errorUtil.toString(message)
-    });
-  }
-  nonpositive(message) {
-    return this._addCheck({
-      kind: "max",
-      value: 0,
-      inclusive: true,
-      message: errorUtil.toString(message)
-    });
-  }
-  nonnegative(message) {
-    return this._addCheck({
-      kind: "min",
-      value: 0,
-      inclusive: true,
-      message: errorUtil.toString(message)
-    });
-  }
-  multipleOf(value, message) {
-    return this._addCheck({
-      kind: "multipleOf",
-      value,
-      message: errorUtil.toString(message)
-    });
-  }
-  finite(message) {
-    return this._addCheck({
-      kind: "finite",
-      message: errorUtil.toString(message)
-    });
-  }
-  safe(message) {
-    return this._addCheck({
-      kind: "min",
-      inclusive: true,
-      value: Number.MIN_SAFE_INTEGER,
-      message: errorUtil.toString(message)
-    })._addCheck({
-      kind: "max",
-      inclusive: true,
-      value: Number.MAX_SAFE_INTEGER,
-      message: errorUtil.toString(message)
-    });
-  }
-  get minValue() {
-    let min = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "min") {
-        if (min === null || ch.value > min)
-          min = ch.value;
-      }
-    }
-    return min;
-  }
-  get maxValue() {
-    let max = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "max") {
-        if (max === null || ch.value < max)
-          max = ch.value;
-      }
-    }
-    return max;
-  }
-  get isInt() {
-    return !!this._def.checks.find((ch) => ch.kind === "int" || ch.kind === "multipleOf" && util.isInteger(ch.value));
-  }
-  get isFinite() {
-    let max = null;
-    let min = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "finite" || ch.kind === "int" || ch.kind === "multipleOf") {
-        return true;
-      } else if (ch.kind === "min") {
-        if (min === null || ch.value > min)
-          min = ch.value;
-      } else if (ch.kind === "max") {
-        if (max === null || ch.value < max)
-          max = ch.value;
-      }
-    }
-    return Number.isFinite(min) && Number.isFinite(max);
-  }
-};
-ZodNumber.create = (params) => {
-  return new ZodNumber({
-    checks: [],
-    typeName: ZodFirstPartyTypeKind.ZodNumber,
-    coerce: params?.coerce || false,
-    ...processCreateParams(params)
-  });
-};
-var ZodBigInt = class _ZodBigInt extends ZodType {
-  constructor() {
-    super(...arguments);
-    this.min = this.gte;
-    this.max = this.lte;
-  }
-  _parse(input2) {
-    if (this._def.coerce) {
-      try {
-        input2.data = BigInt(input2.data);
-      } catch {
-        return this._getInvalidInput(input2);
-      }
-    }
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 !== ZodParsedType.bigint) {
-      return this._getInvalidInput(input2);
-    }
-    let ctx = void 0;
-    const status = new ParseStatus();
-    for (const check2 of this._def.checks) {
-      if (check2.kind === "min") {
-        const tooSmall = check2.inclusive ? input2.data < check2.value : input2.data <= check2.value;
-        if (tooSmall) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.too_small,
-            type: "bigint",
-            minimum: check2.value,
-            inclusive: check2.inclusive,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "max") {
-        const tooBig = check2.inclusive ? input2.data > check2.value : input2.data >= check2.value;
-        if (tooBig) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.too_big,
-            type: "bigint",
-            maximum: check2.value,
-            inclusive: check2.inclusive,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "multipleOf") {
-        if (input2.data % check2.value !== BigInt(0)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.not_multiple_of,
-            multipleOf: check2.value,
-            message: check2.message
-          });
-          status.dirty();
-        }
-      } else {
-        util.assertNever(check2);
-      }
-    }
-    return { status: status.value, value: input2.data };
-  }
-  _getInvalidInput(input2) {
-    const ctx = this._getOrReturnCtx(input2);
-    addIssueToContext(ctx, {
-      code: ZodIssueCode.invalid_type,
-      expected: ZodParsedType.bigint,
-      received: ctx.parsedType
-    });
-    return INVALID;
-  }
-  gte(value, message) {
-    return this.setLimit("min", value, true, errorUtil.toString(message));
-  }
-  gt(value, message) {
-    return this.setLimit("min", value, false, errorUtil.toString(message));
-  }
-  lte(value, message) {
-    return this.setLimit("max", value, true, errorUtil.toString(message));
-  }
-  lt(value, message) {
-    return this.setLimit("max", value, false, errorUtil.toString(message));
-  }
-  setLimit(kind, value, inclusive, message) {
-    return new _ZodBigInt({
-      ...this._def,
-      checks: [
-        ...this._def.checks,
-        {
-          kind,
-          value,
-          inclusive,
-          message: errorUtil.toString(message)
-        }
-      ]
-    });
-  }
-  _addCheck(check2) {
-    return new _ZodBigInt({
-      ...this._def,
-      checks: [...this._def.checks, check2]
-    });
-  }
-  positive(message) {
-    return this._addCheck({
-      kind: "min",
-      value: BigInt(0),
-      inclusive: false,
-      message: errorUtil.toString(message)
-    });
-  }
-  negative(message) {
-    return this._addCheck({
-      kind: "max",
-      value: BigInt(0),
-      inclusive: false,
-      message: errorUtil.toString(message)
-    });
-  }
-  nonpositive(message) {
-    return this._addCheck({
-      kind: "max",
-      value: BigInt(0),
-      inclusive: true,
-      message: errorUtil.toString(message)
-    });
-  }
-  nonnegative(message) {
-    return this._addCheck({
-      kind: "min",
-      value: BigInt(0),
-      inclusive: true,
-      message: errorUtil.toString(message)
-    });
-  }
-  multipleOf(value, message) {
-    return this._addCheck({
-      kind: "multipleOf",
-      value,
-      message: errorUtil.toString(message)
-    });
-  }
-  get minValue() {
-    let min = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "min") {
-        if (min === null || ch.value > min)
-          min = ch.value;
-      }
-    }
-    return min;
-  }
-  get maxValue() {
-    let max = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "max") {
-        if (max === null || ch.value < max)
-          max = ch.value;
-      }
-    }
-    return max;
-  }
-};
-ZodBigInt.create = (params) => {
-  return new ZodBigInt({
-    checks: [],
-    typeName: ZodFirstPartyTypeKind.ZodBigInt,
-    coerce: params?.coerce ?? false,
-    ...processCreateParams(params)
-  });
-};
-var ZodBoolean = class extends ZodType {
-  _parse(input2) {
-    if (this._def.coerce) {
-      input2.data = Boolean(input2.data);
-    }
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 !== ZodParsedType.boolean) {
-      const ctx = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.boolean,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    return OK(input2.data);
-  }
-};
-ZodBoolean.create = (params) => {
-  return new ZodBoolean({
-    typeName: ZodFirstPartyTypeKind.ZodBoolean,
-    coerce: params?.coerce || false,
-    ...processCreateParams(params)
-  });
-};
-var ZodDate = class _ZodDate extends ZodType {
-  _parse(input2) {
-    if (this._def.coerce) {
-      input2.data = new Date(input2.data);
-    }
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 !== ZodParsedType.date) {
-      const ctx2 = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx2, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.date,
-        received: ctx2.parsedType
-      });
-      return INVALID;
-    }
-    if (Number.isNaN(input2.data.getTime())) {
-      const ctx2 = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx2, {
-        code: ZodIssueCode.invalid_date
-      });
-      return INVALID;
-    }
-    const status = new ParseStatus();
-    let ctx = void 0;
-    for (const check2 of this._def.checks) {
-      if (check2.kind === "min") {
-        if (input2.data.getTime() < check2.value) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.too_small,
-            message: check2.message,
-            inclusive: true,
-            exact: false,
-            minimum: check2.value,
-            type: "date"
-          });
-          status.dirty();
-        }
-      } else if (check2.kind === "max") {
-        if (input2.data.getTime() > check2.value) {
-          ctx = this._getOrReturnCtx(input2, ctx);
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.too_big,
-            message: check2.message,
-            inclusive: true,
-            exact: false,
-            maximum: check2.value,
-            type: "date"
-          });
-          status.dirty();
-        }
-      } else {
-        util.assertNever(check2);
-      }
-    }
-    return {
-      status: status.value,
-      value: new Date(input2.data.getTime())
-    };
-  }
-  _addCheck(check2) {
-    return new _ZodDate({
-      ...this._def,
-      checks: [...this._def.checks, check2]
-    });
-  }
-  min(minDate, message) {
-    return this._addCheck({
-      kind: "min",
-      value: minDate.getTime(),
-      message: errorUtil.toString(message)
-    });
-  }
-  max(maxDate, message) {
-    return this._addCheck({
-      kind: "max",
-      value: maxDate.getTime(),
-      message: errorUtil.toString(message)
-    });
-  }
-  get minDate() {
-    let min = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "min") {
-        if (min === null || ch.value > min)
-          min = ch.value;
-      }
-    }
-    return min != null ? new Date(min) : null;
-  }
-  get maxDate() {
-    let max = null;
-    for (const ch of this._def.checks) {
-      if (ch.kind === "max") {
-        if (max === null || ch.value < max)
-          max = ch.value;
-      }
-    }
-    return max != null ? new Date(max) : null;
-  }
-};
-ZodDate.create = (params) => {
-  return new ZodDate({
-    checks: [],
-    coerce: params?.coerce || false,
-    typeName: ZodFirstPartyTypeKind.ZodDate,
-    ...processCreateParams(params)
-  });
-};
-var ZodSymbol = class extends ZodType {
-  _parse(input2) {
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 !== ZodParsedType.symbol) {
-      const ctx = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.symbol,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    return OK(input2.data);
-  }
-};
-ZodSymbol.create = (params) => {
-  return new ZodSymbol({
-    typeName: ZodFirstPartyTypeKind.ZodSymbol,
-    ...processCreateParams(params)
-  });
-};
-var ZodUndefined = class extends ZodType {
-  _parse(input2) {
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 !== ZodParsedType.undefined) {
-      const ctx = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.undefined,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    return OK(input2.data);
-  }
-};
-ZodUndefined.create = (params) => {
-  return new ZodUndefined({
-    typeName: ZodFirstPartyTypeKind.ZodUndefined,
-    ...processCreateParams(params)
-  });
-};
-var ZodNull = class extends ZodType {
-  _parse(input2) {
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 !== ZodParsedType.null) {
-      const ctx = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.null,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    return OK(input2.data);
-  }
-};
-ZodNull.create = (params) => {
-  return new ZodNull({
-    typeName: ZodFirstPartyTypeKind.ZodNull,
-    ...processCreateParams(params)
-  });
-};
-var ZodAny = class extends ZodType {
-  constructor() {
-    super(...arguments);
-    this._any = true;
-  }
-  _parse(input2) {
-    return OK(input2.data);
-  }
-};
-ZodAny.create = (params) => {
-  return new ZodAny({
-    typeName: ZodFirstPartyTypeKind.ZodAny,
-    ...processCreateParams(params)
-  });
-};
-var ZodUnknown = class extends ZodType {
-  constructor() {
-    super(...arguments);
-    this._unknown = true;
-  }
-  _parse(input2) {
-    return OK(input2.data);
-  }
-};
-ZodUnknown.create = (params) => {
-  return new ZodUnknown({
-    typeName: ZodFirstPartyTypeKind.ZodUnknown,
-    ...processCreateParams(params)
-  });
-};
-var ZodNever = class extends ZodType {
-  _parse(input2) {
-    const ctx = this._getOrReturnCtx(input2);
-    addIssueToContext(ctx, {
-      code: ZodIssueCode.invalid_type,
-      expected: ZodParsedType.never,
-      received: ctx.parsedType
-    });
-    return INVALID;
-  }
-};
-ZodNever.create = (params) => {
-  return new ZodNever({
-    typeName: ZodFirstPartyTypeKind.ZodNever,
-    ...processCreateParams(params)
-  });
-};
-var ZodVoid = class extends ZodType {
-  _parse(input2) {
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 !== ZodParsedType.undefined) {
-      const ctx = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.void,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    return OK(input2.data);
-  }
-};
-ZodVoid.create = (params) => {
-  return new ZodVoid({
-    typeName: ZodFirstPartyTypeKind.ZodVoid,
-    ...processCreateParams(params)
-  });
-};
-var ZodArray = class _ZodArray extends ZodType {
-  _parse(input2) {
-    const { ctx, status } = this._processInputParams(input2);
-    const def = this._def;
-    if (ctx.parsedType !== ZodParsedType.array) {
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.array,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    if (def.exactLength !== null) {
-      const tooBig = ctx.data.length > def.exactLength.value;
-      const tooSmall = ctx.data.length < def.exactLength.value;
-      if (tooBig || tooSmall) {
-        addIssueToContext(ctx, {
-          code: tooBig ? ZodIssueCode.too_big : ZodIssueCode.too_small,
-          minimum: tooSmall ? def.exactLength.value : void 0,
-          maximum: tooBig ? def.exactLength.value : void 0,
-          type: "array",
-          inclusive: true,
-          exact: true,
-          message: def.exactLength.message
-        });
-        status.dirty();
-      }
-    }
-    if (def.minLength !== null) {
-      if (ctx.data.length < def.minLength.value) {
-        addIssueToContext(ctx, {
-          code: ZodIssueCode.too_small,
-          minimum: def.minLength.value,
-          type: "array",
-          inclusive: true,
-          exact: false,
-          message: def.minLength.message
-        });
-        status.dirty();
-      }
-    }
-    if (def.maxLength !== null) {
-      if (ctx.data.length > def.maxLength.value) {
-        addIssueToContext(ctx, {
-          code: ZodIssueCode.too_big,
-          maximum: def.maxLength.value,
-          type: "array",
-          inclusive: true,
-          exact: false,
-          message: def.maxLength.message
-        });
-        status.dirty();
-      }
-    }
-    if (ctx.common.async) {
-      return Promise.all([...ctx.data].map((item, i) => {
-        return def.type._parseAsync(new ParseInputLazyPath(ctx, item, ctx.path, i));
-      })).then((result2) => {
-        return ParseStatus.mergeArray(status, result2);
-      });
-    }
-    const result = [...ctx.data].map((item, i) => {
-      return def.type._parseSync(new ParseInputLazyPath(ctx, item, ctx.path, i));
-    });
-    return ParseStatus.mergeArray(status, result);
-  }
-  get element() {
-    return this._def.type;
-  }
-  min(minLength, message) {
-    return new _ZodArray({
-      ...this._def,
-      minLength: { value: minLength, message: errorUtil.toString(message) }
-    });
-  }
-  max(maxLength, message) {
-    return new _ZodArray({
-      ...this._def,
-      maxLength: { value: maxLength, message: errorUtil.toString(message) }
-    });
-  }
-  length(len, message) {
-    return new _ZodArray({
-      ...this._def,
-      exactLength: { value: len, message: errorUtil.toString(message) }
-    });
-  }
-  nonempty(message) {
-    return this.min(1, message);
-  }
-};
-ZodArray.create = (schema, params) => {
-  return new ZodArray({
-    type: schema,
-    minLength: null,
-    maxLength: null,
-    exactLength: null,
-    typeName: ZodFirstPartyTypeKind.ZodArray,
-    ...processCreateParams(params)
-  });
-};
-function deepPartialify(schema) {
-  if (schema instanceof ZodObject) {
-    const newShape = {};
-    for (const key in schema.shape) {
-      const fieldSchema = schema.shape[key];
-      newShape[key] = ZodOptional.create(deepPartialify(fieldSchema));
-    }
-    return new ZodObject({
-      ...schema._def,
-      shape: () => newShape
-    });
-  } else if (schema instanceof ZodArray) {
-    return new ZodArray({
-      ...schema._def,
-      type: deepPartialify(schema.element)
-    });
-  } else if (schema instanceof ZodOptional) {
-    return ZodOptional.create(deepPartialify(schema.unwrap()));
-  } else if (schema instanceof ZodNullable) {
-    return ZodNullable.create(deepPartialify(schema.unwrap()));
-  } else if (schema instanceof ZodTuple) {
-    return ZodTuple.create(schema.items.map((item) => deepPartialify(item)));
-  } else {
-    return schema;
-  }
-}
-var ZodObject = class _ZodObject extends ZodType {
-  constructor() {
-    super(...arguments);
-    this._cached = null;
-    this.nonstrict = this.passthrough;
-    this.augment = this.extend;
-  }
-  _getCached() {
-    if (this._cached !== null)
-      return this._cached;
-    const shape = this._def.shape();
-    const keys = util.objectKeys(shape);
-    this._cached = { shape, keys };
-    return this._cached;
-  }
-  _parse(input2) {
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 !== ZodParsedType.object) {
-      const ctx2 = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx2, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.object,
-        received: ctx2.parsedType
-      });
-      return INVALID;
-    }
-    const { status, ctx } = this._processInputParams(input2);
-    const { shape, keys: shapeKeys } = this._getCached();
-    const extraKeys = [];
-    if (!(this._def.catchall instanceof ZodNever && this._def.unknownKeys === "strip")) {
-      for (const key in ctx.data) {
-        if (!shapeKeys.includes(key)) {
-          extraKeys.push(key);
-        }
-      }
-    }
-    const pairs = [];
-    for (const key of shapeKeys) {
-      const keyValidator = shape[key];
-      const value = ctx.data[key];
-      pairs.push({
-        key: { status: "valid", value: key },
-        value: keyValidator._parse(new ParseInputLazyPath(ctx, value, ctx.path, key)),
-        alwaysSet: key in ctx.data
-      });
-    }
-    if (this._def.catchall instanceof ZodNever) {
-      const unknownKeys = this._def.unknownKeys;
-      if (unknownKeys === "passthrough") {
-        for (const key of extraKeys) {
-          pairs.push({
-            key: { status: "valid", value: key },
-            value: { status: "valid", value: ctx.data[key] }
-          });
-        }
-      } else if (unknownKeys === "strict") {
-        if (extraKeys.length > 0) {
-          addIssueToContext(ctx, {
-            code: ZodIssueCode.unrecognized_keys,
-            keys: extraKeys
-          });
-          status.dirty();
-        }
-      } else if (unknownKeys === "strip") {
-      } else {
-        throw new Error(`Internal ZodObject error: invalid unknownKeys value.`);
-      }
-    } else {
-      const catchall = this._def.catchall;
-      for (const key of extraKeys) {
-        const value = ctx.data[key];
-        pairs.push({
-          key: { status: "valid", value: key },
-          value: catchall._parse(
-            new ParseInputLazyPath(ctx, value, ctx.path, key)
-            //, ctx.child(key), value, getParsedType(value)
-          ),
-          alwaysSet: key in ctx.data
-        });
-      }
-    }
-    if (ctx.common.async) {
-      return Promise.resolve().then(async () => {
-        const syncPairs = [];
-        for (const pair of pairs) {
-          const key = await pair.key;
-          const value = await pair.value;
-          syncPairs.push({
-            key,
-            value,
-            alwaysSet: pair.alwaysSet
-          });
-        }
-        return syncPairs;
-      }).then((syncPairs) => {
-        return ParseStatus.mergeObjectSync(status, syncPairs);
-      });
-    } else {
-      return ParseStatus.mergeObjectSync(status, pairs);
-    }
-  }
-  get shape() {
-    return this._def.shape();
-  }
-  strict(message) {
-    errorUtil.errToObj;
-    return new _ZodObject({
-      ...this._def,
-      unknownKeys: "strict",
-      ...message !== void 0 ? {
-        errorMap: (issue2, ctx) => {
-          const defaultError = this._def.errorMap?.(issue2, ctx).message ?? ctx.defaultError;
-          if (issue2.code === "unrecognized_keys")
-            return {
-              message: errorUtil.errToObj(message).message ?? defaultError
-            };
-          return {
-            message: defaultError
-          };
-        }
-      } : {}
-    });
-  }
-  strip() {
-    return new _ZodObject({
-      ...this._def,
-      unknownKeys: "strip"
-    });
-  }
-  passthrough() {
-    return new _ZodObject({
-      ...this._def,
-      unknownKeys: "passthrough"
-    });
-  }
-  // const AugmentFactory =
-  //   <Def extends ZodObjectDef>(def: Def) =>
-  //   <Augmentation extends ZodRawShape>(
-  //     augmentation: Augmentation
-  //   ): ZodObject<
-  //     extendShape<ReturnType<Def["shape"]>, Augmentation>,
-  //     Def["unknownKeys"],
-  //     Def["catchall"]
-  //   > => {
-  //     return new ZodObject({
-  //       ...def,
-  //       shape: () => ({
-  //         ...def.shape(),
-  //         ...augmentation,
-  //       }),
-  //     }) as any;
-  //   };
-  extend(augmentation) {
-    return new _ZodObject({
-      ...this._def,
-      shape: () => ({
-        ...this._def.shape(),
-        ...augmentation
-      })
-    });
-  }
-  /**
-   * Prior to zod@1.0.12 there was a bug in the
-   * inferred type of merged objects. Please
-   * upgrade if you are experiencing issues.
-   */
-  merge(merging) {
-    const merged = new _ZodObject({
-      unknownKeys: merging._def.unknownKeys,
-      catchall: merging._def.catchall,
-      shape: () => ({
-        ...this._def.shape(),
-        ...merging._def.shape()
-      }),
-      typeName: ZodFirstPartyTypeKind.ZodObject
-    });
-    return merged;
-  }
-  // merge<
-  //   Incoming extends AnyZodObject,
-  //   Augmentation extends Incoming["shape"],
-  //   NewOutput extends {
-  //     [k in keyof Augmentation | keyof Output]: k extends keyof Augmentation
-  //       ? Augmentation[k]["_output"]
-  //       : k extends keyof Output
-  //       ? Output[k]
-  //       : never;
-  //   },
-  //   NewInput extends {
-  //     [k in keyof Augmentation | keyof Input]: k extends keyof Augmentation
-  //       ? Augmentation[k]["_input"]
-  //       : k extends keyof Input
-  //       ? Input[k]
-  //       : never;
-  //   }
-  // >(
-  //   merging: Incoming
-  // ): ZodObject<
-  //   extendShape<T, ReturnType<Incoming["_def"]["shape"]>>,
-  //   Incoming["_def"]["unknownKeys"],
-  //   Incoming["_def"]["catchall"],
-  //   NewOutput,
-  //   NewInput
-  // > {
-  //   const merged: any = new ZodObject({
-  //     unknownKeys: merging._def.unknownKeys,
-  //     catchall: merging._def.catchall,
-  //     shape: () =>
-  //       objectUtil.mergeShapes(this._def.shape(), merging._def.shape()),
-  //     typeName: ZodFirstPartyTypeKind.ZodObject,
-  //   }) as any;
-  //   return merged;
-  // }
-  setKey(key, schema) {
-    return this.augment({ [key]: schema });
-  }
-  // merge<Incoming extends AnyZodObject>(
-  //   merging: Incoming
-  // ): //ZodObject<T & Incoming["_shape"], UnknownKeys, Catchall> = (merging) => {
-  // ZodObject<
-  //   extendShape<T, ReturnType<Incoming["_def"]["shape"]>>,
-  //   Incoming["_def"]["unknownKeys"],
-  //   Incoming["_def"]["catchall"]
-  // > {
-  //   // const mergedShape = objectUtil.mergeShapes(
-  //   //   this._def.shape(),
-  //   //   merging._def.shape()
-  //   // );
-  //   const merged: any = new ZodObject({
-  //     unknownKeys: merging._def.unknownKeys,
-  //     catchall: merging._def.catchall,
-  //     shape: () =>
-  //       objectUtil.mergeShapes(this._def.shape(), merging._def.shape()),
-  //     typeName: ZodFirstPartyTypeKind.ZodObject,
-  //   }) as any;
-  //   return merged;
-  // }
-  catchall(index) {
-    return new _ZodObject({
-      ...this._def,
-      catchall: index
-    });
-  }
-  pick(mask) {
-    const shape = {};
-    for (const key of util.objectKeys(mask)) {
-      if (mask[key] && this.shape[key]) {
-        shape[key] = this.shape[key];
-      }
-    }
-    return new _ZodObject({
-      ...this._def,
-      shape: () => shape
-    });
-  }
-  omit(mask) {
-    const shape = {};
-    for (const key of util.objectKeys(this.shape)) {
-      if (!mask[key]) {
-        shape[key] = this.shape[key];
-      }
-    }
-    return new _ZodObject({
-      ...this._def,
-      shape: () => shape
-    });
-  }
-  /**
-   * @deprecated
-   */
-  deepPartial() {
-    return deepPartialify(this);
-  }
-  partial(mask) {
-    const newShape = {};
-    for (const key of util.objectKeys(this.shape)) {
-      const fieldSchema = this.shape[key];
-      if (mask && !mask[key]) {
-        newShape[key] = fieldSchema;
-      } else {
-        newShape[key] = fieldSchema.optional();
-      }
-    }
-    return new _ZodObject({
-      ...this._def,
-      shape: () => newShape
-    });
-  }
-  required(mask) {
-    const newShape = {};
-    for (const key of util.objectKeys(this.shape)) {
-      if (mask && !mask[key]) {
-        newShape[key] = this.shape[key];
-      } else {
-        const fieldSchema = this.shape[key];
-        let newField = fieldSchema;
-        while (newField instanceof ZodOptional) {
-          newField = newField._def.innerType;
-        }
-        newShape[key] = newField;
-      }
-    }
-    return new _ZodObject({
-      ...this._def,
-      shape: () => newShape
-    });
-  }
-  keyof() {
-    return createZodEnum(util.objectKeys(this.shape));
-  }
-};
-ZodObject.create = (shape, params) => {
-  return new ZodObject({
-    shape: () => shape,
-    unknownKeys: "strip",
-    catchall: ZodNever.create(),
-    typeName: ZodFirstPartyTypeKind.ZodObject,
-    ...processCreateParams(params)
-  });
-};
-ZodObject.strictCreate = (shape, params) => {
-  return new ZodObject({
-    shape: () => shape,
-    unknownKeys: "strict",
-    catchall: ZodNever.create(),
-    typeName: ZodFirstPartyTypeKind.ZodObject,
-    ...processCreateParams(params)
-  });
-};
-ZodObject.lazycreate = (shape, params) => {
-  return new ZodObject({
-    shape,
-    unknownKeys: "strip",
-    catchall: ZodNever.create(),
-    typeName: ZodFirstPartyTypeKind.ZodObject,
-    ...processCreateParams(params)
-  });
-};
-var ZodUnion = class extends ZodType {
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
-    const options = this._def.options;
-    function handleResults(results) {
-      for (const result of results) {
-        if (result.result.status === "valid") {
-          return result.result;
-        }
-      }
-      for (const result of results) {
-        if (result.result.status === "dirty") {
-          ctx.common.issues.push(...result.ctx.common.issues);
-          return result.result;
-        }
-      }
-      const unionErrors = results.map((result) => new ZodError(result.ctx.common.issues));
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_union,
-        unionErrors
-      });
-      return INVALID;
-    }
-    if (ctx.common.async) {
-      return Promise.all(options.map(async (option) => {
-        const childCtx = {
-          ...ctx,
-          common: {
-            ...ctx.common,
-            issues: []
-          },
-          parent: null
-        };
-        return {
-          result: await option._parseAsync({
-            data: ctx.data,
-            path: ctx.path,
-            parent: childCtx
-          }),
-          ctx: childCtx
-        };
-      })).then(handleResults);
-    } else {
-      let dirty = void 0;
-      const issues = [];
-      for (const option of options) {
-        const childCtx = {
-          ...ctx,
-          common: {
-            ...ctx.common,
-            issues: []
-          },
-          parent: null
-        };
-        const result = option._parseSync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: childCtx
-        });
-        if (result.status === "valid") {
-          return result;
-        } else if (result.status === "dirty" && !dirty) {
-          dirty = { result, ctx: childCtx };
-        }
-        if (childCtx.common.issues.length) {
-          issues.push(childCtx.common.issues);
-        }
-      }
-      if (dirty) {
-        ctx.common.issues.push(...dirty.ctx.common.issues);
-        return dirty.result;
-      }
-      const unionErrors = issues.map((issues2) => new ZodError(issues2));
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_union,
-        unionErrors
-      });
-      return INVALID;
-    }
-  }
-  get options() {
-    return this._def.options;
-  }
-};
-ZodUnion.create = (types, params) => {
-  return new ZodUnion({
-    options: types,
-    typeName: ZodFirstPartyTypeKind.ZodUnion,
-    ...processCreateParams(params)
-  });
-};
-var getDiscriminator = (type) => {
-  if (type instanceof ZodLazy) {
-    return getDiscriminator(type.schema);
-  } else if (type instanceof ZodEffects) {
-    return getDiscriminator(type.innerType());
-  } else if (type instanceof ZodLiteral) {
-    return [type.value];
-  } else if (type instanceof ZodEnum) {
-    return type.options;
-  } else if (type instanceof ZodNativeEnum) {
-    return util.objectValues(type.enum);
-  } else if (type instanceof ZodDefault) {
-    return getDiscriminator(type._def.innerType);
-  } else if (type instanceof ZodUndefined) {
-    return [void 0];
-  } else if (type instanceof ZodNull) {
-    return [null];
-  } else if (type instanceof ZodOptional) {
-    return [void 0, ...getDiscriminator(type.unwrap())];
-  } else if (type instanceof ZodNullable) {
-    return [null, ...getDiscriminator(type.unwrap())];
-  } else if (type instanceof ZodBranded) {
-    return getDiscriminator(type.unwrap());
-  } else if (type instanceof ZodReadonly) {
-    return getDiscriminator(type.unwrap());
-  } else if (type instanceof ZodCatch) {
-    return getDiscriminator(type._def.innerType);
-  } else {
-    return [];
-  }
-};
-var ZodDiscriminatedUnion = class _ZodDiscriminatedUnion extends ZodType {
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
-    if (ctx.parsedType !== ZodParsedType.object) {
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.object,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    const discriminator = this.discriminator;
-    const discriminatorValue = ctx.data[discriminator];
-    const option = this.optionsMap.get(discriminatorValue);
-    if (!option) {
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_union_discriminator,
-        options: Array.from(this.optionsMap.keys()),
-        path: [discriminator]
-      });
-      return INVALID;
-    }
-    if (ctx.common.async) {
-      return option._parseAsync({
-        data: ctx.data,
-        path: ctx.path,
-        parent: ctx
-      });
-    } else {
-      return option._parseSync({
-        data: ctx.data,
-        path: ctx.path,
-        parent: ctx
-      });
-    }
-  }
-  get discriminator() {
-    return this._def.discriminator;
-  }
-  get options() {
-    return this._def.options;
-  }
-  get optionsMap() {
-    return this._def.optionsMap;
-  }
-  /**
-   * The constructor of the discriminated union schema. Its behaviour is very similar to that of the normal z.union() constructor.
-   * However, it only allows a union of objects, all of which need to share a discriminator property. This property must
-   * have a different value for each object in the union.
-   * @param discriminator the name of the discriminator property
-   * @param types an array of object schemas
-   * @param params
-   */
-  static create(discriminator, options, params) {
-    const optionsMap = /* @__PURE__ */ new Map();
-    for (const type of options) {
-      const discriminatorValues = getDiscriminator(type.shape[discriminator]);
-      if (!discriminatorValues.length) {
-        throw new Error(`A discriminator value for key \`${discriminator}\` could not be extracted from all schema options`);
-      }
-      for (const value of discriminatorValues) {
-        if (optionsMap.has(value)) {
-          throw new Error(`Discriminator property ${String(discriminator)} has duplicate value ${String(value)}`);
-        }
-        optionsMap.set(value, type);
-      }
-    }
-    return new _ZodDiscriminatedUnion({
-      typeName: ZodFirstPartyTypeKind.ZodDiscriminatedUnion,
-      discriminator,
-      options,
-      optionsMap,
-      ...processCreateParams(params)
-    });
-  }
-};
-function mergeValues(a, b) {
-  const aType = getParsedType(a);
-  const bType = getParsedType(b);
-  if (a === b) {
-    return { valid: true, data: a };
-  } else if (aType === ZodParsedType.object && bType === ZodParsedType.object) {
-    const bKeys = util.objectKeys(b);
-    const sharedKeys = util.objectKeys(a).filter((key) => bKeys.indexOf(key) !== -1);
-    const newObj = { ...a, ...b };
-    if (Object.prototype.hasOwnProperty.call(newObj, "__proto__"))
-      delete newObj.__proto__;
-    for (const key of sharedKeys) {
-      if (key === "__proto__")
-        continue;
-      const sharedValue = mergeValues(a[key], b[key]);
-      if (!sharedValue.valid) {
-        return { valid: false };
-      }
-      newObj[key] = sharedValue.data;
-    }
-    return { valid: true, data: newObj };
-  } else if (aType === ZodParsedType.array && bType === ZodParsedType.array) {
-    if (a.length !== b.length) {
-      return { valid: false };
-    }
-    const newArray = [];
-    for (let index = 0; index < a.length; index++) {
-      const itemA = a[index];
-      const itemB = b[index];
-      const sharedValue = mergeValues(itemA, itemB);
-      if (!sharedValue.valid) {
-        return { valid: false };
-      }
-      newArray.push(sharedValue.data);
-    }
-    return { valid: true, data: newArray };
-  } else if (aType === ZodParsedType.date && bType === ZodParsedType.date && +a === +b) {
-    return { valid: true, data: a };
-  } else {
-    return { valid: false };
-  }
-}
-var ZodIntersection = class extends ZodType {
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
-    const handleParsed = (parsedLeft, parsedRight) => {
-      if (isAborted(parsedLeft) || isAborted(parsedRight)) {
-        return INVALID;
-      }
-      const merged = mergeValues(parsedLeft.value, parsedRight.value);
-      if (!merged.valid) {
-        addIssueToContext(ctx, {
-          code: ZodIssueCode.invalid_intersection_types
-        });
-        return INVALID;
-      }
-      if (isDirty(parsedLeft) || isDirty(parsedRight)) {
-        status.dirty();
-      }
-      return { status: status.value, value: merged.data };
-    };
-    if (ctx.common.async) {
-      return Promise.all([
-        this._def.left._parseAsync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: ctx
-        }),
-        this._def.right._parseAsync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: ctx
-        })
-      ]).then(([left, right]) => handleParsed(left, right));
-    } else {
-      return handleParsed(this._def.left._parseSync({
-        data: ctx.data,
-        path: ctx.path,
-        parent: ctx
-      }), this._def.right._parseSync({
-        data: ctx.data,
-        path: ctx.path,
-        parent: ctx
-      }));
-    }
-  }
-};
-ZodIntersection.create = (left, right, params) => {
-  return new ZodIntersection({
-    left,
-    right,
-    typeName: ZodFirstPartyTypeKind.ZodIntersection,
-    ...processCreateParams(params)
-  });
-};
-var ZodTuple = class _ZodTuple extends ZodType {
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
-    if (ctx.parsedType !== ZodParsedType.array) {
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.array,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    if (ctx.data.length < this._def.items.length) {
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.too_small,
-        minimum: this._def.items.length,
-        inclusive: true,
-        exact: false,
-        type: "array"
-      });
-      return INVALID;
-    }
-    const rest = this._def.rest;
-    if (!rest && ctx.data.length > this._def.items.length) {
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.too_big,
-        maximum: this._def.items.length,
-        inclusive: true,
-        exact: false,
-        type: "array"
-      });
-      status.dirty();
-    }
-    const items = [...ctx.data].map((item, itemIndex) => {
-      const schema = this._def.items[itemIndex] || this._def.rest;
-      if (!schema)
-        return null;
-      return schema._parse(new ParseInputLazyPath(ctx, item, ctx.path, itemIndex));
-    }).filter((x) => !!x);
-    if (ctx.common.async) {
-      return Promise.all(items).then((results) => {
-        return ParseStatus.mergeArray(status, results);
-      });
-    } else {
-      return ParseStatus.mergeArray(status, items);
-    }
-  }
-  get items() {
-    return this._def.items;
-  }
-  rest(rest) {
-    return new _ZodTuple({
-      ...this._def,
-      rest
-    });
-  }
-};
-ZodTuple.create = (schemas, params) => {
-  if (!Array.isArray(schemas)) {
-    throw new Error("You must pass an array of schemas to z.tuple([ ... ])");
-  }
-  return new ZodTuple({
-    items: schemas,
-    typeName: ZodFirstPartyTypeKind.ZodTuple,
-    rest: null,
-    ...processCreateParams(params)
-  });
-};
-var ZodRecord = class _ZodRecord extends ZodType {
-  get keySchema() {
-    return this._def.keyType;
-  }
-  get valueSchema() {
-    return this._def.valueType;
-  }
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
-    if (ctx.parsedType !== ZodParsedType.object) {
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.object,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    const pairs = [];
-    const keyType = this._def.keyType;
-    const valueType = this._def.valueType;
-    for (const key in ctx.data) {
-      pairs.push({
-        key: keyType._parse(new ParseInputLazyPath(ctx, key, ctx.path, key)),
-        value: valueType._parse(new ParseInputLazyPath(ctx, ctx.data[key], ctx.path, key)),
-        alwaysSet: key in ctx.data
-      });
-    }
-    if (ctx.common.async) {
-      return ParseStatus.mergeObjectAsync(status, pairs);
-    } else {
-      return ParseStatus.mergeObjectSync(status, pairs);
-    }
-  }
-  get element() {
-    return this._def.valueType;
-  }
-  static create(first, second, third) {
-    if (second instanceof ZodType) {
-      return new _ZodRecord({
-        keyType: first,
-        valueType: second,
-        typeName: ZodFirstPartyTypeKind.ZodRecord,
-        ...processCreateParams(third)
-      });
-    }
-    return new _ZodRecord({
-      keyType: ZodString.create(),
-      valueType: first,
-      typeName: ZodFirstPartyTypeKind.ZodRecord,
-      ...processCreateParams(second)
-    });
-  }
-};
-var ZodMap = class extends ZodType {
-  get keySchema() {
-    return this._def.keyType;
-  }
-  get valueSchema() {
-    return this._def.valueType;
-  }
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
-    if (ctx.parsedType !== ZodParsedType.map) {
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.map,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    const keyType = this._def.keyType;
-    const valueType = this._def.valueType;
-    const pairs = [...ctx.data.entries()].map(([key, value], index) => {
-      return {
-        key: keyType._parse(new ParseInputLazyPath(ctx, key, ctx.path, [index, "key"])),
-        value: valueType._parse(new ParseInputLazyPath(ctx, value, ctx.path, [index, "value"]))
-      };
-    });
-    if (ctx.common.async) {
-      const finalMap = /* @__PURE__ */ new Map();
-      return Promise.resolve().then(async () => {
-        for (const pair of pairs) {
-          const key = await pair.key;
-          const value = await pair.value;
-          if (key.status === "aborted" || value.status === "aborted") {
-            return INVALID;
-          }
-          if (key.status === "dirty" || value.status === "dirty") {
-            status.dirty();
-          }
-          finalMap.set(key.value, value.value);
-        }
-        return { status: status.value, value: finalMap };
-      });
-    } else {
-      const finalMap = /* @__PURE__ */ new Map();
-      for (const pair of pairs) {
-        const key = pair.key;
-        const value = pair.value;
-        if (key.status === "aborted" || value.status === "aborted") {
-          return INVALID;
-        }
-        if (key.status === "dirty" || value.status === "dirty") {
-          status.dirty();
-        }
-        finalMap.set(key.value, value.value);
-      }
-      return { status: status.value, value: finalMap };
-    }
-  }
-};
-ZodMap.create = (keyType, valueType, params) => {
-  return new ZodMap({
-    valueType,
-    keyType,
-    typeName: ZodFirstPartyTypeKind.ZodMap,
-    ...processCreateParams(params)
-  });
-};
-var ZodSet = class _ZodSet extends ZodType {
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
-    if (ctx.parsedType !== ZodParsedType.set) {
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.set,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    const def = this._def;
-    if (def.minSize !== null) {
-      if (ctx.data.size < def.minSize.value) {
-        addIssueToContext(ctx, {
-          code: ZodIssueCode.too_small,
-          minimum: def.minSize.value,
-          type: "set",
-          inclusive: true,
-          exact: false,
-          message: def.minSize.message
-        });
-        status.dirty();
-      }
-    }
-    if (def.maxSize !== null) {
-      if (ctx.data.size > def.maxSize.value) {
-        addIssueToContext(ctx, {
-          code: ZodIssueCode.too_big,
-          maximum: def.maxSize.value,
-          type: "set",
-          inclusive: true,
-          exact: false,
-          message: def.maxSize.message
-        });
-        status.dirty();
-      }
-    }
-    const valueType = this._def.valueType;
-    function finalizeSet(elements2) {
-      const parsedSet = /* @__PURE__ */ new Set();
-      for (const element of elements2) {
-        if (element.status === "aborted")
-          return INVALID;
-        if (element.status === "dirty")
-          status.dirty();
-        parsedSet.add(element.value);
-      }
-      return { status: status.value, value: parsedSet };
-    }
-    const elements = [...ctx.data.values()].map((item, i) => valueType._parse(new ParseInputLazyPath(ctx, item, ctx.path, i)));
-    if (ctx.common.async) {
-      return Promise.all(elements).then((elements2) => finalizeSet(elements2));
-    } else {
-      return finalizeSet(elements);
-    }
-  }
-  min(minSize, message) {
-    return new _ZodSet({
-      ...this._def,
-      minSize: { value: minSize, message: errorUtil.toString(message) }
-    });
-  }
-  max(maxSize, message) {
-    return new _ZodSet({
-      ...this._def,
-      maxSize: { value: maxSize, message: errorUtil.toString(message) }
-    });
-  }
-  size(size, message) {
-    return this.min(size, message).max(size, message);
-  }
-  nonempty(message) {
-    return this.min(1, message);
-  }
-};
-ZodSet.create = (valueType, params) => {
-  return new ZodSet({
-    valueType,
-    minSize: null,
-    maxSize: null,
-    typeName: ZodFirstPartyTypeKind.ZodSet,
-    ...processCreateParams(params)
-  });
-};
-var ZodFunction = class _ZodFunction extends ZodType {
-  constructor() {
-    super(...arguments);
-    this.validate = this.implement;
-  }
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
-    if (ctx.parsedType !== ZodParsedType.function) {
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.function,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    function makeArgsIssue(args, error62) {
-      return makeIssue({
-        data: args,
-        path: ctx.path,
-        errorMaps: [ctx.common.contextualErrorMap, ctx.schemaErrorMap, getErrorMap(), en_default].filter((x) => !!x),
-        issueData: {
-          code: ZodIssueCode.invalid_arguments,
-          argumentsError: error62
-        }
-      });
-    }
-    function makeReturnsIssue(returns, error62) {
-      return makeIssue({
-        data: returns,
-        path: ctx.path,
-        errorMaps: [ctx.common.contextualErrorMap, ctx.schemaErrorMap, getErrorMap(), en_default].filter((x) => !!x),
-        issueData: {
-          code: ZodIssueCode.invalid_return_type,
-          returnTypeError: error62
-        }
-      });
-    }
-    const params = { errorMap: ctx.common.contextualErrorMap };
-    const fn = ctx.data;
-    if (this._def.returns instanceof ZodPromise) {
-      const me = this;
-      return OK(async function(...args) {
-        const error62 = new ZodError([]);
-        const parsedArgs = await me._def.args.parseAsync(args, params).catch((e) => {
-          error62.addIssue(makeArgsIssue(args, e));
-          throw error62;
-        });
-        const result = await Reflect.apply(fn, this, parsedArgs);
-        const parsedReturns = await me._def.returns._def.type.parseAsync(result, params).catch((e) => {
-          error62.addIssue(makeReturnsIssue(result, e));
-          throw error62;
-        });
-        return parsedReturns;
-      });
-    } else {
-      const me = this;
-      return OK(function(...args) {
-        const parsedArgs = me._def.args.safeParse(args, params);
-        if (!parsedArgs.success) {
-          throw new ZodError([makeArgsIssue(args, parsedArgs.error)]);
-        }
-        const result = Reflect.apply(fn, this, parsedArgs.data);
-        const parsedReturns = me._def.returns.safeParse(result, params);
-        if (!parsedReturns.success) {
-          throw new ZodError([makeReturnsIssue(result, parsedReturns.error)]);
-        }
-        return parsedReturns.data;
-      });
-    }
-  }
-  parameters() {
-    return this._def.args;
-  }
-  returnType() {
-    return this._def.returns;
-  }
-  args(...items) {
-    return new _ZodFunction({
-      ...this._def,
-      args: ZodTuple.create(items).rest(ZodUnknown.create())
-    });
-  }
-  returns(returnType) {
-    return new _ZodFunction({
-      ...this._def,
-      returns: returnType
-    });
-  }
-  implement(func) {
-    const validatedFunc = this.parse(func);
-    return validatedFunc;
-  }
-  strictImplement(func) {
-    const validatedFunc = this.parse(func);
-    return validatedFunc;
-  }
-  static create(args, returns, params) {
-    return new _ZodFunction({
-      args: args ? args : ZodTuple.create([]).rest(ZodUnknown.create()),
-      returns: returns || ZodUnknown.create(),
-      typeName: ZodFirstPartyTypeKind.ZodFunction,
-      ...processCreateParams(params)
-    });
-  }
-};
-var ZodLazy = class extends ZodType {
-  get schema() {
-    return this._def.getter();
-  }
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
-    const lazySchema = this._def.getter();
-    return lazySchema._parse({ data: ctx.data, path: ctx.path, parent: ctx });
-  }
-};
-ZodLazy.create = (getter, params) => {
-  return new ZodLazy({
-    getter,
-    typeName: ZodFirstPartyTypeKind.ZodLazy,
-    ...processCreateParams(params)
-  });
-};
-var ZodLiteral = class extends ZodType {
-  _parse(input2) {
-    if (input2.data !== this._def.value) {
-      const ctx = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx, {
-        received: ctx.data,
-        code: ZodIssueCode.invalid_literal,
-        expected: this._def.value
-      });
-      return INVALID;
-    }
-    return { status: "valid", value: input2.data };
-  }
-  get value() {
-    return this._def.value;
-  }
-};
-ZodLiteral.create = (value, params) => {
-  return new ZodLiteral({
-    value,
-    typeName: ZodFirstPartyTypeKind.ZodLiteral,
-    ...processCreateParams(params)
-  });
-};
-function createZodEnum(values, params) {
-  return new ZodEnum({
-    values,
-    typeName: ZodFirstPartyTypeKind.ZodEnum,
-    ...processCreateParams(params)
-  });
-}
-var ZodEnum = class _ZodEnum extends ZodType {
-  _parse(input2) {
-    if (typeof input2.data !== "string") {
-      const ctx = this._getOrReturnCtx(input2);
-      const expectedValues = this._def.values;
-      addIssueToContext(ctx, {
-        expected: util.joinValues(expectedValues),
-        received: ctx.parsedType,
-        code: ZodIssueCode.invalid_type
-      });
-      return INVALID;
-    }
-    if (!this._cache) {
-      this._cache = new Set(this._def.values);
-    }
-    if (!this._cache.has(input2.data)) {
-      const ctx = this._getOrReturnCtx(input2);
-      const expectedValues = this._def.values;
-      addIssueToContext(ctx, {
-        received: ctx.data,
-        code: ZodIssueCode.invalid_enum_value,
-        options: expectedValues
-      });
-      return INVALID;
-    }
-    return OK(input2.data);
-  }
-  get options() {
-    return this._def.values;
-  }
-  get enum() {
-    const enumValues = {};
-    for (const val of this._def.values) {
-      enumValues[val] = val;
-    }
-    return enumValues;
-  }
-  get Values() {
-    const enumValues = {};
-    for (const val of this._def.values) {
-      enumValues[val] = val;
-    }
-    return enumValues;
-  }
-  get Enum() {
-    const enumValues = {};
-    for (const val of this._def.values) {
-      enumValues[val] = val;
-    }
-    return enumValues;
-  }
-  extract(values, newDef = this._def) {
-    return _ZodEnum.create(values, {
-      ...this._def,
-      ...newDef
-    });
-  }
-  exclude(values, newDef = this._def) {
-    return _ZodEnum.create(this.options.filter((opt) => !values.includes(opt)), {
-      ...this._def,
-      ...newDef
-    });
-  }
-};
-ZodEnum.create = createZodEnum;
-var ZodNativeEnum = class extends ZodType {
-  _parse(input2) {
-    const nativeEnumValues = util.getValidEnumValues(this._def.values);
-    const ctx = this._getOrReturnCtx(input2);
-    if (ctx.parsedType !== ZodParsedType.string && ctx.parsedType !== ZodParsedType.number) {
-      const expectedValues = util.objectValues(nativeEnumValues);
-      addIssueToContext(ctx, {
-        expected: util.joinValues(expectedValues),
-        received: ctx.parsedType,
-        code: ZodIssueCode.invalid_type
-      });
-      return INVALID;
-    }
-    if (!this._cache) {
-      this._cache = new Set(util.getValidEnumValues(this._def.values));
-    }
-    if (!this._cache.has(input2.data)) {
-      const expectedValues = util.objectValues(nativeEnumValues);
-      addIssueToContext(ctx, {
-        received: ctx.data,
-        code: ZodIssueCode.invalid_enum_value,
-        options: expectedValues
-      });
-      return INVALID;
-    }
-    return OK(input2.data);
-  }
-  get enum() {
-    return this._def.values;
-  }
-};
-ZodNativeEnum.create = (values, params) => {
-  return new ZodNativeEnum({
-    values,
-    typeName: ZodFirstPartyTypeKind.ZodNativeEnum,
-    ...processCreateParams(params)
-  });
-};
-var ZodPromise = class extends ZodType {
-  unwrap() {
-    return this._def.type;
-  }
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
-    if (ctx.parsedType !== ZodParsedType.promise && ctx.common.async === false) {
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.promise,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    const promisified = ctx.parsedType === ZodParsedType.promise ? ctx.data : Promise.resolve(ctx.data);
-    return OK(promisified.then((data) => {
-      return this._def.type.parseAsync(data, {
-        path: ctx.path,
-        errorMap: ctx.common.contextualErrorMap
-      });
-    }));
-  }
-};
-ZodPromise.create = (schema, params) => {
-  return new ZodPromise({
-    type: schema,
-    typeName: ZodFirstPartyTypeKind.ZodPromise,
-    ...processCreateParams(params)
-  });
-};
-var ZodEffects = class extends ZodType {
-  innerType() {
-    return this._def.schema;
-  }
-  sourceType() {
-    return this._def.schema._def.typeName === ZodFirstPartyTypeKind.ZodEffects ? this._def.schema.sourceType() : this._def.schema;
-  }
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
-    const effect = this._def.effect || null;
-    const checkCtx = {
-      addIssue: (arg) => {
-        addIssueToContext(ctx, arg);
-        if (arg.fatal) {
-          status.abort();
-        } else {
-          status.dirty();
-        }
-      },
-      get path() {
-        return ctx.path;
-      }
-    };
-    checkCtx.addIssue = checkCtx.addIssue.bind(checkCtx);
-    if (effect.type === "preprocess") {
-      const processed = effect.transform(ctx.data, checkCtx);
-      if (ctx.common.async) {
-        return Promise.resolve(processed).then(async (processed2) => {
-          if (status.value === "aborted")
-            return INVALID;
-          const result = await this._def.schema._parseAsync({
-            data: processed2,
-            path: ctx.path,
-            parent: ctx
-          });
-          if (result.status === "aborted")
-            return INVALID;
-          if (result.status === "dirty")
-            return DIRTY(result.value);
-          if (status.value === "dirty")
-            return DIRTY(result.value);
-          return result;
-        });
-      } else {
-        if (status.value === "aborted")
-          return INVALID;
-        const result = this._def.schema._parseSync({
-          data: processed,
-          path: ctx.path,
-          parent: ctx
-        });
-        if (result.status === "aborted")
-          return INVALID;
-        if (result.status === "dirty")
-          return DIRTY(result.value);
-        if (status.value === "dirty")
-          return DIRTY(result.value);
-        return result;
-      }
-    }
-    if (effect.type === "refinement") {
-      const executeRefinement = (acc) => {
-        const result = effect.refinement(acc, checkCtx);
-        if (ctx.common.async) {
-          return Promise.resolve(result);
-        }
-        if (result instanceof Promise) {
-          throw new Error("Async refinement encountered during synchronous parse operation. Use .parseAsync instead.");
-        }
-        return acc;
-      };
-      if (ctx.common.async === false) {
-        const inner = this._def.schema._parseSync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: ctx
-        });
-        if (inner.status === "aborted")
-          return INVALID;
-        if (inner.status === "dirty")
-          status.dirty();
-        executeRefinement(inner.value);
-        return { status: status.value, value: inner.value };
-      } else {
-        return this._def.schema._parseAsync({ data: ctx.data, path: ctx.path, parent: ctx }).then((inner) => {
-          if (inner.status === "aborted")
-            return INVALID;
-          if (inner.status === "dirty")
-            status.dirty();
-          return executeRefinement(inner.value).then(() => {
-            return { status: status.value, value: inner.value };
-          });
-        });
-      }
-    }
-    if (effect.type === "transform") {
-      if (ctx.common.async === false) {
-        const base = this._def.schema._parseSync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: ctx
-        });
-        if (!isValid(base))
-          return INVALID;
-        const result = effect.transform(base.value, checkCtx);
-        if (result instanceof Promise) {
-          throw new Error(`Asynchronous transform encountered during synchronous parse operation. Use .parseAsync instead.`);
-        }
-        return { status: status.value, value: result };
-      } else {
-        return this._def.schema._parseAsync({ data: ctx.data, path: ctx.path, parent: ctx }).then((base) => {
-          if (!isValid(base))
-            return INVALID;
-          return Promise.resolve(effect.transform(base.value, checkCtx)).then((result) => ({
-            status: status.value,
-            value: result
-          }));
-        });
-      }
-    }
-    util.assertNever(effect);
-  }
-};
-ZodEffects.create = (schema, effect, params) => {
-  return new ZodEffects({
-    schema,
-    typeName: ZodFirstPartyTypeKind.ZodEffects,
-    effect,
-    ...processCreateParams(params)
-  });
-};
-ZodEffects.createWithPreprocess = (preprocess2, schema, params) => {
-  return new ZodEffects({
-    schema,
-    effect: { type: "preprocess", transform: preprocess2 },
-    typeName: ZodFirstPartyTypeKind.ZodEffects,
-    ...processCreateParams(params)
-  });
-};
-var ZodOptional = class extends ZodType {
-  _parse(input2) {
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 === ZodParsedType.undefined) {
-      return OK(void 0);
-    }
-    return this._def.innerType._parse(input2);
-  }
-  unwrap() {
-    return this._def.innerType;
-  }
-};
-ZodOptional.create = (type, params) => {
-  return new ZodOptional({
-    innerType: type,
-    typeName: ZodFirstPartyTypeKind.ZodOptional,
-    ...processCreateParams(params)
-  });
-};
-var ZodNullable = class extends ZodType {
-  _parse(input2) {
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 === ZodParsedType.null) {
-      return OK(null);
-    }
-    return this._def.innerType._parse(input2);
-  }
-  unwrap() {
-    return this._def.innerType;
-  }
-};
-ZodNullable.create = (type, params) => {
-  return new ZodNullable({
-    innerType: type,
-    typeName: ZodFirstPartyTypeKind.ZodNullable,
-    ...processCreateParams(params)
-  });
-};
-var ZodDefault = class extends ZodType {
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
-    let data = ctx.data;
-    if (ctx.parsedType === ZodParsedType.undefined) {
-      data = this._def.defaultValue();
-    }
-    return this._def.innerType._parse({
-      data,
-      path: ctx.path,
-      parent: ctx
-    });
-  }
-  removeDefault() {
-    return this._def.innerType;
-  }
-};
-ZodDefault.create = (type, params) => {
-  return new ZodDefault({
-    innerType: type,
-    typeName: ZodFirstPartyTypeKind.ZodDefault,
-    defaultValue: typeof params.default === "function" ? params.default : () => params.default,
-    ...processCreateParams(params)
-  });
-};
-var ZodCatch = class extends ZodType {
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
-    const newCtx = {
-      ...ctx,
-      common: {
-        ...ctx.common,
-        issues: []
-      }
-    };
-    const result = this._def.innerType._parse({
-      data: newCtx.data,
-      path: newCtx.path,
-      parent: {
-        ...newCtx
-      }
-    });
-    if (isAsync(result)) {
-      return result.then((result2) => {
-        return {
-          status: "valid",
-          value: result2.status === "valid" ? result2.value : this._def.catchValue({
-            get error() {
-              return new ZodError(newCtx.common.issues);
-            },
-            input: newCtx.data
-          })
-        };
-      });
-    } else {
-      return {
-        status: "valid",
-        value: result.status === "valid" ? result.value : this._def.catchValue({
-          get error() {
-            return new ZodError(newCtx.common.issues);
-          },
-          input: newCtx.data
-        })
-      };
-    }
-  }
-  removeCatch() {
-    return this._def.innerType;
-  }
-};
-ZodCatch.create = (type, params) => {
-  return new ZodCatch({
-    innerType: type,
-    typeName: ZodFirstPartyTypeKind.ZodCatch,
-    catchValue: typeof params.catch === "function" ? params.catch : () => params.catch,
-    ...processCreateParams(params)
-  });
-};
-var ZodNaN = class extends ZodType {
-  _parse(input2) {
-    const parsedType2 = this._getType(input2);
-    if (parsedType2 !== ZodParsedType.nan) {
-      const ctx = this._getOrReturnCtx(input2);
-      addIssueToContext(ctx, {
-        code: ZodIssueCode.invalid_type,
-        expected: ZodParsedType.nan,
-        received: ctx.parsedType
-      });
-      return INVALID;
-    }
-    return { status: "valid", value: input2.data };
-  }
-};
-ZodNaN.create = (params) => {
-  return new ZodNaN({
-    typeName: ZodFirstPartyTypeKind.ZodNaN,
-    ...processCreateParams(params)
-  });
-};
-var ZodBranded = class extends ZodType {
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
-    const data = ctx.data;
-    return this._def.type._parse({
-      data,
-      path: ctx.path,
-      parent: ctx
-    });
-  }
-  unwrap() {
-    return this._def.type;
-  }
-};
-var ZodPipeline = class _ZodPipeline extends ZodType {
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
-    if (ctx.common.async) {
-      const handleAsync = async () => {
-        const inResult = await this._def.in._parseAsync({
-          data: ctx.data,
-          path: ctx.path,
-          parent: ctx
-        });
-        if (inResult.status === "aborted")
-          return INVALID;
-        if (inResult.status === "dirty") {
-          status.dirty();
-          return DIRTY(inResult.value);
-        } else {
-          return this._def.out._parseAsync({
-            data: inResult.value,
-            path: ctx.path,
-            parent: ctx
-          });
-        }
-      };
-      return handleAsync();
-    } else {
-      const inResult = this._def.in._parseSync({
-        data: ctx.data,
-        path: ctx.path,
-        parent: ctx
-      });
-      if (inResult.status === "aborted")
-        return INVALID;
-      if (inResult.status === "dirty") {
-        status.dirty();
-        return {
-          status: "dirty",
-          value: inResult.value
-        };
-      } else {
-        return this._def.out._parseSync({
-          data: inResult.value,
-          path: ctx.path,
-          parent: ctx
-        });
-      }
-    }
-  }
-  static create(a, b) {
-    return new _ZodPipeline({
-      in: a,
-      out: b,
-      typeName: ZodFirstPartyTypeKind.ZodPipeline
-    });
-  }
-};
-var ZodReadonly = class extends ZodType {
-  _parse(input2) {
-    const result = this._def.innerType._parse(input2);
-    const freeze = (data) => {
-      if (isValid(data)) {
-        data.value = Object.freeze(data.value);
-      }
-      return data;
-    };
-    return isAsync(result) ? result.then((data) => freeze(data)) : freeze(result);
-  }
-  unwrap() {
-    return this._def.innerType;
-  }
-};
-ZodReadonly.create = (type, params) => {
-  return new ZodReadonly({
-    innerType: type,
-    typeName: ZodFirstPartyTypeKind.ZodReadonly,
-    ...processCreateParams(params)
-  });
-};
-var late = {
-  object: ZodObject.lazycreate
-};
-var ZodFirstPartyTypeKind;
-(function(ZodFirstPartyTypeKind3) {
-  ZodFirstPartyTypeKind3["ZodString"] = "ZodString";
-  ZodFirstPartyTypeKind3["ZodNumber"] = "ZodNumber";
-  ZodFirstPartyTypeKind3["ZodNaN"] = "ZodNaN";
-  ZodFirstPartyTypeKind3["ZodBigInt"] = "ZodBigInt";
-  ZodFirstPartyTypeKind3["ZodBoolean"] = "ZodBoolean";
-  ZodFirstPartyTypeKind3["ZodDate"] = "ZodDate";
-  ZodFirstPartyTypeKind3["ZodSymbol"] = "ZodSymbol";
-  ZodFirstPartyTypeKind3["ZodUndefined"] = "ZodUndefined";
-  ZodFirstPartyTypeKind3["ZodNull"] = "ZodNull";
-  ZodFirstPartyTypeKind3["ZodAny"] = "ZodAny";
-  ZodFirstPartyTypeKind3["ZodUnknown"] = "ZodUnknown";
-  ZodFirstPartyTypeKind3["ZodNever"] = "ZodNever";
-  ZodFirstPartyTypeKind3["ZodVoid"] = "ZodVoid";
-  ZodFirstPartyTypeKind3["ZodArray"] = "ZodArray";
-  ZodFirstPartyTypeKind3["ZodObject"] = "ZodObject";
-  ZodFirstPartyTypeKind3["ZodUnion"] = "ZodUnion";
-  ZodFirstPartyTypeKind3["ZodDiscriminatedUnion"] = "ZodDiscriminatedUnion";
-  ZodFirstPartyTypeKind3["ZodIntersection"] = "ZodIntersection";
-  ZodFirstPartyTypeKind3["ZodTuple"] = "ZodTuple";
-  ZodFirstPartyTypeKind3["ZodRecord"] = "ZodRecord";
-  ZodFirstPartyTypeKind3["ZodMap"] = "ZodMap";
-  ZodFirstPartyTypeKind3["ZodSet"] = "ZodSet";
-  ZodFirstPartyTypeKind3["ZodFunction"] = "ZodFunction";
-  ZodFirstPartyTypeKind3["ZodLazy"] = "ZodLazy";
-  ZodFirstPartyTypeKind3["ZodLiteral"] = "ZodLiteral";
-  ZodFirstPartyTypeKind3["ZodEnum"] = "ZodEnum";
-  ZodFirstPartyTypeKind3["ZodEffects"] = "ZodEffects";
-  ZodFirstPartyTypeKind3["ZodNativeEnum"] = "ZodNativeEnum";
-  ZodFirstPartyTypeKind3["ZodOptional"] = "ZodOptional";
-  ZodFirstPartyTypeKind3["ZodNullable"] = "ZodNullable";
-  ZodFirstPartyTypeKind3["ZodDefault"] = "ZodDefault";
-  ZodFirstPartyTypeKind3["ZodCatch"] = "ZodCatch";
-  ZodFirstPartyTypeKind3["ZodPromise"] = "ZodPromise";
-  ZodFirstPartyTypeKind3["ZodBranded"] = "ZodBranded";
-  ZodFirstPartyTypeKind3["ZodPipeline"] = "ZodPipeline";
-  ZodFirstPartyTypeKind3["ZodReadonly"] = "ZodReadonly";
-})(ZodFirstPartyTypeKind || (ZodFirstPartyTypeKind = {}));
-var stringType = ZodString.create;
-var numberType = ZodNumber.create;
-var nanType = ZodNaN.create;
-var bigIntType = ZodBigInt.create;
-var booleanType = ZodBoolean.create;
-var dateType = ZodDate.create;
-var symbolType = ZodSymbol.create;
-var undefinedType = ZodUndefined.create;
-var nullType = ZodNull.create;
-var anyType = ZodAny.create;
-var unknownType = ZodUnknown.create;
-var neverType = ZodNever.create;
-var voidType = ZodVoid.create;
-var arrayType = ZodArray.create;
-var objectType = ZodObject.create;
-var strictObjectType = ZodObject.strictCreate;
-var unionType = ZodUnion.create;
-var discriminatedUnionType = ZodDiscriminatedUnion.create;
-var intersectionType = ZodIntersection.create;
-var tupleType = ZodTuple.create;
-var recordType = ZodRecord.create;
-var mapType = ZodMap.create;
-var setType = ZodSet.create;
-var functionType = ZodFunction.create;
-var lazyType = ZodLazy.create;
-var literalType = ZodLiteral.create;
-var enumType = ZodEnum.create;
-var nativeEnumType = ZodNativeEnum.create;
-var promiseType = ZodPromise.create;
-var effectsType = ZodEffects.create;
-var optionalType = ZodOptional.create;
-var nullableType = ZodNullable.create;
-var preprocessType = ZodEffects.createWithPreprocess;
-var pipelineType = ZodPipeline.create;
 
 // node_modules/zod/v4/core/index.js
 var core_exports2 = {};
@@ -15715,7 +7637,7 @@ __export(core_exports2, {
   $input: () => $input,
   $output: () => $output,
   Doc: () => Doc,
-  INVALID: () => INVALID2,
+  INVALID: () => INVALID,
   JSONSchema: () => json_schema_exports,
   JSONSchemaGenerator: () => JSONSchemaGenerator,
   NEVER: () => NEVER,
@@ -15884,10 +7806,10 @@ __export(core_exports2, {
   isValidCreditCard: () => isValidCreditCard,
   isValidIBAN: () => isValidIBAN,
   isValidIPv6: () => isValidIPv6,
-  isValidJWT: () => isValidJWT2,
+  isValidJWT: () => isValidJWT,
   locales: () => locales_exports,
   memoizer: () => memoizer,
-  mergeValues: () => mergeValues2,
+  mergeValues: () => mergeValues,
   meta: () => meta,
   parse: () => parse,
   parseAsync: () => parseAsync,
@@ -15954,11 +7876,11 @@ __export(util_exports, {
   explicitlyAborted: () => explicitlyAborted,
   extend: () => extend,
   finalizeIssue: () => finalizeIssue,
-  floatSafeRemainder: () => floatSafeRemainder2,
+  floatSafeRemainder: () => floatSafeRemainder,
   getElementAtPath: () => getElementAtPath,
   getEnumValues: () => getEnumValues,
   getLengthableOrigin: () => getLengthableOrigin,
-  getParsedType: () => getParsedType2,
+  getParsedType: () => getParsedType,
   getSizableOrigin: () => getSizableOrigin,
   hexToUint8Array: () => hexToUint8Array,
   hide: () => hide,
@@ -16053,7 +7975,7 @@ function cleanRegex(source) {
   const end = source.endsWith("$") ? source.length - 1 : source.length;
   return source.slice(start, end);
 }
-function floatSafeRemainder2(val, step) {
+function floatSafeRemainder(val, step) {
   const ratio = val / step;
   const roundedRatio = Math.round(ratio);
   const tolerance = 4 * Number.EPSILON * Math.max(Math.abs(ratio), 1);
@@ -16242,7 +8164,7 @@ function numKeys(data) {
   }
   return keyCount;
 }
-var getParsedType2 = (data) => {
+var getParsedType = (data) => {
   const t = typeof data;
   switch (t) {
     case "undefined":
@@ -17274,7 +9196,7 @@ __export(regexes_exports, {
   extendedDuration: () => extendedDuration,
   guid: () => guid,
   hex: () => hex,
-  hostname: () => hostname2,
+  hostname: () => hostname,
   html5Email: () => html5Email,
   httpProtocol: () => httpProtocol,
   iban: () => iban,
@@ -17357,7 +9279,7 @@ var cidrv4 = /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]
 var cidrv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/;
 var base64 = /^$|^(?:[0-9a-zA-Z+/]{4})*(?:(?:[0-9a-zA-Z+/]{2}==)|(?:[0-9a-zA-Z+/]{3}=))?$/;
 var base64url = /^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-]{2,3})?$/;
-var hostname2 = /^(?=.{1,253}\.?$)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[-0-9a-zA-Z]{0,61}[0-9a-zA-Z])?)*\.?$/;
+var hostname = /^(?=.{1,253}\.?$)[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[-0-9a-zA-Z]{0,61}[0-9a-zA-Z])?)*\.?$/;
 var domain = /^(?=.{1,253}$)([a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,63}$/;
 var httpProtocol = /^https?$/;
 var e164 = /^\+[1-9]\d{6,14}$/;
@@ -17485,7 +9407,7 @@ var $ZodCheckMultipleOf = /* @__PURE__ */ $constructor("$ZodCheckMultipleOf", (i
     const isMultiple = typeof payload.value === "bigint" ? (
       // `value % 0n` throws, and nothing is a multiple of zero — the number branch already fails this way via NaN
       def.value !== BigInt(0) && payload.value % def.value === BigInt(0)
-    ) : floatSafeRemainder2(payload.value, def.value) === 0;
+    ) : floatSafeRemainder(payload.value, def.value) === 0;
     if (isMultiple)
       return;
     payload.issues.push({
@@ -18469,7 +10391,7 @@ var $ZodIBAN = /* @__PURE__ */ $constructor("$ZodIBAN", (inst, def) => {
     });
   };
 });
-function isValidJWT2(token, algorithm = null) {
+function isValidJWT(token, algorithm = null) {
   try {
     const tokensParts = token.split(".");
     if (tokensParts.length !== 3)
@@ -18492,7 +10414,7 @@ function isValidJWT2(token, algorithm = null) {
 var $ZodJWT = /* @__PURE__ */ $constructor("$ZodJWT", (inst, def) => {
   $ZodStringFormat.init(inst, def);
   inst._zod.check = (payload) => {
-    if (isValidJWT2(payload.value, def.alg))
+    if (isValidJWT(payload.value, def.alg))
       return;
     payload.issues.push({
       code: "invalid_format",
@@ -19307,7 +11229,7 @@ var $ZodIntersection = /* @__PURE__ */ $constructor("$ZodIntersection", (inst, d
     return handleIntersectionResults(payload, left, right);
   };
 });
-function mergeValues2(a, b) {
+function mergeValues(a, b) {
   if (a === b) {
     return { valid: true, data: a };
   }
@@ -19323,7 +11245,7 @@ function mergeValues2(a, b) {
     for (const key of sharedKeys) {
       if (key === "__proto__")
         continue;
-      const sharedValue = mergeValues2(a[key], b[key]);
+      const sharedValue = mergeValues(a[key], b[key]);
       if (!sharedValue.valid) {
         return {
           valid: false,
@@ -19342,7 +11264,7 @@ function mergeValues2(a, b) {
     for (let index = 0; index < a.length; index++) {
       const itemA = a[index];
       const itemB = b[index];
-      const sharedValue = mergeValues2(itemA, itemB);
+      const sharedValue = mergeValues(itemA, itemB);
       if (!sharedValue.valid) {
         return {
           valid: false,
@@ -19397,7 +11319,7 @@ function handleIntersectionResults(result, left, right) {
         result.issues.push(keyIssues.get(k));
     }
   }
-  const merged = mergeValues2(left.value, right.value);
+  const merged = mergeValues(left.value, right.value);
   if (!merged.valid) {
     if (aborted(result))
       return result;
@@ -20678,7 +12600,7 @@ __export(locales_exports, {
   da: () => da_default,
   de: () => de_default,
   el: () => el_default,
-  en: () => en_default2,
+  en: () => en_default,
   eo: () => eo_default,
   es: () => es_default,
   fa: () => fa_default,
@@ -22195,7 +14117,7 @@ var error12 = () => {
     }
   };
 };
-function en_default2() {
+function en_default() {
   return {
     localeError: error12()
   };
@@ -28282,7 +20204,7 @@ function registry() {
 var globalRegistry = globalThis.__zod_globalRegistry;
 
 // node_modules/zod/v4/core/compile.js
-var INVALID2 = /* @__PURE__ */ Symbol.for("zod.compile.invalid");
+var INVALID = /* @__PURE__ */ Symbol.for("zod.compile.invalid");
 var FALLBACK_FLAG = /* @__PURE__ */ Symbol.for("zod.compile.fallback");
 var ZodCompileAsyncError = class extends Error {
   constructor(message = "z.compile does not support async refinements, transforms, or checks") {
@@ -28331,7 +20253,7 @@ function withParser(schema, parser) {
       return originalRun(payload, ctx);
     }
     const out = parser(payload.value);
-    if (out !== INVALID2) {
+    if (out !== INVALID) {
       payload.value = out;
       return payload;
     }
@@ -28354,7 +20276,7 @@ function installCompiledUserMethods(target, source, parser) {
     const originalSafeParse = sourceAny.safeParse;
     targetAny.safeParse = (data, params) => {
       const out = parser(data);
-      if (out !== INVALID2) {
+      if (out !== INVALID) {
         return { success: true, data: out };
       }
       return originalSafeParse(data, params);
@@ -28364,7 +20286,7 @@ function installCompiledUserMethods(target, source, parser) {
     const originalParse = sourceAny.parse;
     targetAny.parse = (data, params) => {
       const out = parser(data);
-      if (out !== INVALID2) {
+      if (out !== INVALID) {
         return out;
       }
       return originalParse(data, params);
@@ -28390,7 +20312,7 @@ function compileFn(schema, options) {
   const outputAccessor = generateCheck(doc, ctx, schema, "input", !options?.assertOnly);
   doc.write(outputAccessor === null ? `return true;` : `return ${outputAccessor};`);
   const constantNames = ["INVALID", ...ctx.constants.keys()];
-  const constantValues = [INVALID2, ...ctx.constants.values()];
+  const constantValues = [INVALID, ...ctx.constants.values()];
   const code = doc.content.join("\n");
   const fullCode = options?.debug ? constantNames.length > 0 ? `// Constants: ${constantNames.join(", ")}
 ${code}` : code : "";
@@ -28430,9 +20352,9 @@ function newVar(ctx) {
 function runtimeRun(schema, value) {
   const result = schema._zod.run({ value, issues: [] }, {});
   if (result && typeof result.then === "function")
-    return INVALID2;
+    return INVALID;
   const r = result;
-  return r.issues.length === 0 ? r.value : INVALID2;
+  return r.issues.length === 0 ? r.value : INVALID;
 }
 function compileChild(doc, ctx, schema, accessor, needsValue = true) {
   const contentLen = doc.content.length;
@@ -28596,7 +20518,7 @@ function generateMultipleOfCheck(doc, ctx, def, accessor) {
       throw new ZodCompileUnsupportedError("multiple_of check with a zero divisor");
     doc.write(`if (${accessor} % ${def.value}n !== 0n) return INVALID;`);
   } else {
-    const remainder = addConstant(ctx, floatSafeRemainder2);
+    const remainder = addConstant(ctx, floatSafeRemainder);
     doc.write(`if (${remainder}(${accessor}, ${numericOperand(def.value, "multiple_of")}) !== 0) return INVALID;`);
   }
 }
@@ -28706,7 +20628,7 @@ function generateCustomRefineCheck(doc, ctx, check2, accessor) {
       const result = checkFn(fakePayload);
       if (result instanceof Promise)
         throwAsync();
-      return fakePayload.issues.length === 0 ? fakePayload.value : INVALID2;
+      return fakePayload.issues.length === 0 ? fakePayload.value : INVALID;
     };
     const helperConst = addUserConstant(ctx, helperFn);
     const outVar = newVar(ctx);
@@ -28755,7 +20677,7 @@ function generateStringFormatCheck(doc, ctx, def, accessor, needsValue = true) {
     return accessor;
   }
   if (fmt === "jwt") {
-    const validator = addConstant(ctx, isValidJWT2);
+    const validator = addConstant(ctx, isValidJWT);
     const alg = addConstant(ctx, def.alg ?? null);
     doc.write(`if (!${validator}(${accessor}, ${alg})) return INVALID;`);
     return accessor;
@@ -29616,7 +21538,7 @@ function generateIntersectionCheck(doc, ctx, schema, accessor) {
   ctx.definite = false;
   const leftOutput = compileChild(doc, ctx, def.left, accessor);
   const rightOutput = compileChild(doc, ctx, def.right, accessor);
-  const mergeConst = addConstant(ctx, mergeValues2);
+  const mergeConst = addConstant(ctx, mergeValues);
   const mergedVar = newVar(ctx);
   doc.write(`const ${mergedVar} = ${mergeConst}(${leftOutput}, ${rightOutput});`);
   doc.write(`if (!${mergedVar}.valid) return INVALID;`);
@@ -29804,8 +21726,8 @@ function generatePipeCheck(doc, ctx, schema, accessor) {
       const fakePayload = { value, issues: [], addIssue: pushIssue };
       const result = transformFn(value, fakePayload);
       if (result instanceof Promise)
-        return INVALID2;
-      return fakePayload.issues.length === 0 ? result : INVALID2;
+        return INVALID;
+      return fakePayload.issues.length === 0 ? result : INVALID;
     };
     const helperConst = addUserConstant(ctx, helperFn);
     const transformedVar = newVar(ctx);
@@ -29839,7 +21761,7 @@ function generateCustomCheck(doc, ctx, schema, accessor) {
 function runtimeCatch(innerSchema, catchValue, value) {
   const result = innerSchema._zod.run({ value, issues: [] }, {});
   if (result && typeof result.then === "function")
-    return INVALID2;
+    return INVALID;
   const r = result;
   if (r.issues.length === 0)
     return r.value;
@@ -29879,8 +21801,8 @@ function generateTransformCheck(doc, ctx, schema, accessor) {
       const fakePayload = { value, issues: [], addIssue: pushIssue };
       const result = transformFn(value, fakePayload);
       if (result instanceof Promise)
-        return INVALID2;
-      return fakePayload.issues.length === 0 ? result : INVALID2;
+        return INVALID;
+      return fakePayload.issues.length === 0 ? result : INVALID;
     };
     const helperConst = addUserConstant(ctx, helperFn);
     const outputVar = newVar(ctx);
@@ -32309,679 +24231,35 @@ var JSONSchemaGenerator = class {
 // node_modules/zod/v4/core/json-schema.js
 var json_schema_exports = {};
 
-// node_modules/zod/v4/mini/schemas.js
-var ZodMiniType = /* @__PURE__ */ $constructor("ZodMiniType", (inst, def) => {
-  if (!inst._zod)
-    throw new Error("Uninitialized schema in ZodMiniType.");
-  $ZodType.init(inst, def);
-  inst.def = def;
-  inst.type = def.type;
-}, {
-  // `with` is an alias for `check`: the same function object, not a wrapper.
-  get with() {
-    return this.check;
-  },
-  set with(value) {
-    own(this, "with", value);
-  },
-  parse(data, params) {
-    return parse(this, data, params, { callee: this.parse });
-  },
-  parseAsync(data, params) {
-    return parseAsync(this, data, params, { callee: this.parseAsync });
-  },
-  safeParse(data, params) {
-    return safeParse(this, data, params);
-  },
-  safeParseAsync(data, params) {
-    return safeParseAsync(this, data, params);
-  },
-  check(...checks) {
-    const def = this.def;
-    return this.clone({
-      ...def,
-      checks: [
-        ...def.checks ?? [],
-        ...checks.map((ch) => typeof ch === "function" ? { _zod: { check: ch, def: { check: "custom" }, onattach: [] } } : ch)
-      ]
-    }, { parent: true });
-  },
-  clone(_def, params) {
-    return clone(this, _def, params);
-  },
-  brand() {
-    return this;
-  },
-  register(reg, meta3) {
-    reg.add(this, meta3);
-    return this;
-  },
-  apply(fn, ...args) {
-    return args.length === 0 ? fn(this) : fn(this, ...args);
-  }
-});
-var ZodMiniObject = /* @__PURE__ */ $constructor("ZodMiniObject", (inst, def) => {
-  $ZodObject.init(inst, def);
-  ZodMiniType.init(inst, def);
-  installLazyProp(inst, "shape", (self) => self._zod.def.shape, false);
-});
-// @__NO_SIDE_EFFECTS__
-function object(shape, params) {
-  const def = {
-    type: "object",
-    shape: shape ?? {},
-    ...normalizeParams(params)
-  };
-  return new ZodMiniObject(def);
-}
-
-// node_modules/zod/v4/core/visit.js
-var RESOLVING = /* @__PURE__ */ Symbol("z.visit/resolving");
-function visit(schema, fnOrHandlers) {
-  const fn = typeof fnOrHandlers === "function" ? fnOrHandlers : (node2, rewritten) => {
-    const h = fnOrHandlers[node2._zod.def.type];
-    return h ? h(node2, rewritten) : node2;
-  };
-  const cache = /* @__PURE__ */ new Map();
-  function run(s) {
-    const cached2 = cache.get(s);
-    if (cached2 === RESOLVING) {
-      return new $ZodLazy({
-        type: "lazy",
-        getter: () => cache.get(s)
-      });
-    }
-    if (cached2 !== void 0)
-      return cached2;
-    cache.set(s, RESOLVING);
-    const inner = mapInner(s);
-    const mapped = fn(inner, inner !== s);
-    cache.set(s, mapped);
-    return mapped;
-  }
-  function mapInner(s) {
-    const def = s._zod.def;
-    const kind = def.type;
-    switch (kind) {
-      case "object": {
-        const oldShape = def.shape;
-        const keys = Object.keys(oldShape);
-        let changed = false;
-        const newShape = {};
-        for (const k of keys) {
-          const mapped = run(oldShape[k]);
-          if (mapped !== oldShape[k])
-            changed = true;
-          newShape[k] = mapped;
-        }
-        let newCatchall = def.catchall;
-        if (def.catchall) {
-          newCatchall = run(def.catchall);
-          if (newCatchall !== def.catchall)
-            changed = true;
-        }
-        return changed ? clone(s, { ...def, shape: newShape, catchall: newCatchall }) : s;
-      }
-      case "array": {
-        const mapped = run(def.element);
-        return mapped === def.element ? s : clone(s, { ...def, element: mapped });
-      }
-      case "tuple": {
-        const oldItems = def.items;
-        let changed = false;
-        const newItems = [];
-        for (const item of oldItems) {
-          const mapped = run(item);
-          if (mapped !== item)
-            changed = true;
-          newItems.push(mapped);
-        }
-        let newRest = def.rest;
-        if (def.rest) {
-          newRest = run(def.rest);
-          if (newRest !== def.rest)
-            changed = true;
-        }
-        return changed ? clone(s, { ...def, items: newItems, rest: newRest }) : s;
-      }
-      case "record":
-      case "map": {
-        const newKey = run(def.keyType);
-        const newVal = run(def.valueType);
-        return newKey === def.keyType && newVal === def.valueType ? s : clone(s, { ...def, keyType: newKey, valueType: newVal });
-      }
-      case "set": {
-        const newVal = run(def.valueType);
-        return newVal === def.valueType ? s : clone(s, { ...def, valueType: newVal });
-      }
-      case "union": {
-        const oldOptions = def.options;
-        let changed = false;
-        const newOptions = [];
-        for (const opt of oldOptions) {
-          const mapped = run(opt);
-          if (mapped !== opt)
-            changed = true;
-          newOptions.push(mapped);
-        }
-        return changed ? clone(s, { ...def, options: newOptions }) : s;
-      }
-      case "intersection": {
-        const newLeft = run(def.left);
-        const newRight = run(def.right);
-        return newLeft === def.left && newRight === def.right ? s : clone(s, { ...def, left: newLeft, right: newRight });
-      }
-      case "optional":
-      case "nullable":
-      case "default":
-      case "prefault":
-      case "catch":
-      case "readonly":
-      case "nonoptional":
-      case "promise":
-      case "success": {
-        const newInner = run(def.innerType);
-        return newInner === def.innerType ? s : clone(s, { ...def, innerType: newInner });
-      }
-      case "pipe": {
-        const newIn = run(def.in);
-        const newOut = run(def.out);
-        return newIn === def.in && newOut === def.out ? s : clone(s, { ...def, in: newIn, out: newOut });
-      }
-      case "function": {
-        const newInput = run(def.input);
-        const newOutput = run(def.output);
-        return newInput === def.input && newOutput === def.output ? s : clone(s, { ...def, input: newInput, output: newOutput });
-      }
-      case "lazy": {
-        const original = def.getter;
-        const { _cachedInner, ...rest } = def;
-        return clone(s, { ...rest, getter: () => run(original()) });
-      }
-      // A leaf by choice: `parts` are regex fragments, not data positions.
-      case "template_literal":
-      // Leaves.
-      case "string":
-      case "number":
-      case "int":
-      case "boolean":
-      case "bigint":
-      case "symbol":
-      case "undefined":
-      case "null":
-      case "void":
-      case "never":
-      case "any":
-      case "unknown":
-      case "date":
-      case "nan":
-      case "enum":
-      case "literal":
-      case "file":
-      case "transform":
-      case "custom":
-        return s;
-      default: {
-        kind;
-        return s;
-      }
-    }
-  }
-  return run(schema);
-}
-
-// node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js
-function isZ4Schema(s) {
-  const schema = s;
-  return !!schema._zod;
-}
-function objectFromShape(shape) {
-  const values = Object.values(shape);
-  if (values.length === 0)
-    return object({});
-  const allV4 = values.every(isZ4Schema);
-  const allV3 = values.every((s) => !isZ4Schema(s));
-  if (allV4)
-    return object(shape);
-  if (allV3)
-    return objectType(shape);
-  throw new Error("Mixed Zod versions detected in object shape.");
-}
-function safeParse2(schema, data) {
-  if (isZ4Schema(schema)) {
-    const result2 = safeParse(schema, data);
-    return result2;
-  }
-  const v3Schema = schema;
-  const result = v3Schema.safeParse(data);
-  return result;
-}
-async function safeParseAsync2(schema, data) {
-  if (isZ4Schema(schema)) {
-    const result2 = await safeParseAsync(schema, data);
-    return result2;
-  }
-  const v3Schema = schema;
-  const result = await v3Schema.safeParseAsync(data);
-  return result;
-}
-function getObjectShape(schema) {
-  if (!schema)
-    return void 0;
-  let rawShape2;
-  if (isZ4Schema(schema)) {
-    const v4Schema = schema;
-    rawShape2 = v4Schema._zod?.def?.shape;
-  } else {
-    const v3Schema = schema;
-    rawShape2 = v3Schema.shape;
-  }
-  if (!rawShape2)
-    return void 0;
-  if (typeof rawShape2 === "function") {
-    try {
-      return rawShape2();
-    } catch {
-      return void 0;
-    }
-  }
-  return rawShape2;
-}
-function normalizeObjectSchema(schema) {
-  if (!schema)
-    return void 0;
-  if (typeof schema === "object") {
-    const asV3 = schema;
-    const asV4 = schema;
-    if (!asV3._def && !asV4._zod) {
-      const values = Object.values(schema);
-      if (values.length > 0 && values.every((v) => typeof v === "object" && v !== null && (v._def !== void 0 || v._zod !== void 0 || typeof v.parse === "function"))) {
-        return objectFromShape(schema);
-      }
-    }
-  }
-  if (isZ4Schema(schema)) {
-    const v4Schema = schema;
-    const def = v4Schema._zod?.def;
-    if (def && (def.type === "object" || def.shape !== void 0)) {
-      return schema;
-    }
-  } else {
-    const v3Schema = schema;
-    if (v3Schema.shape !== void 0) {
-      return schema;
-    }
-  }
-  return void 0;
-}
-function getDotPath(path) {
-  if (path.length === 0) {
-    return "object root";
-  }
-  return path.reduce((acc, seg, index) => {
-    if (index === 0) {
-      return String(seg);
-    }
-    if (typeof seg === "number") {
-      return `${acc}[${seg}]`;
-    }
-    return `${acc}.${seg}`;
-  }, "");
-}
-function getParseErrorMessage(error62) {
-  if (error62 && typeof error62 === "object") {
-    if ("issues" in error62 && Array.isArray(error62.issues) && error62.issues.length > 0) {
-      return error62.issues.map((i) => {
-        if (!i.path?.length) {
-          return i.message;
-        }
-        return `${i.message} at ${getDotPath(i.path)}`;
-      }).join("\n");
-    }
-    if ("message" in error62 && typeof error62.message === "string") {
-      return error62.message;
-    }
-    try {
-      return JSON.stringify(error62);
-    } catch {
-      return String(error62);
-    }
-  }
-  return String(error62);
-}
-function getSchemaDescription(schema) {
-  return schema.description;
-}
-function isSchemaOptional(schema) {
-  if (isZ4Schema(schema)) {
-    const v4Schema = schema;
-    return v4Schema._zod?.def?.type === "optional";
-  }
-  const v3Schema = schema;
-  if (typeof schema.isOptional === "function") {
-    return schema.isOptional();
-  }
-  return v3Schema._def?.typeName === "ZodOptional";
-}
-function getLiteralValue(schema) {
-  if (isZ4Schema(schema)) {
-    const v4Schema = schema;
-    const def2 = v4Schema._zod?.def;
-    if (def2) {
-      if (def2.value !== void 0)
-        return def2.value;
-      if (Array.isArray(def2.values) && def2.values.length > 0) {
-        return def2.values[0];
-      }
-    }
-  }
-  const v3Schema = schema;
-  const def = v3Schema._def;
-  if (def) {
-    if (def.value !== void 0)
-      return def.value;
-    if (Array.isArray(def.values) && def.values.length > 0) {
-      return def.values[0];
-    }
-  }
-  const directValue = schema.value;
-  if (directValue !== void 0)
-    return directValue;
-  return void 0;
-}
-
-// node_modules/zod/v4/classic/external.js
-var external_exports = {};
-__export(external_exports, {
-  $brand: () => $brand,
-  $input: () => $input,
-  $output: () => $output,
-  INVALID: () => INVALID2,
-  NEVER: () => NEVER,
-  TimePrecision: () => TimePrecision,
-  ZodAny: () => ZodAny2,
-  ZodArray: () => ZodArray2,
-  ZodBase64: () => ZodBase64,
-  ZodBase64URL: () => ZodBase64URL,
-  ZodBigInt: () => ZodBigInt2,
-  ZodBigIntFormat: () => ZodBigIntFormat,
-  ZodBoolean: () => ZodBoolean2,
-  ZodCIDRv4: () => ZodCIDRv4,
-  ZodCIDRv6: () => ZodCIDRv6,
-  ZodCUID: () => ZodCUID,
-  ZodCUID2: () => ZodCUID2,
-  ZodCatch: () => ZodCatch2,
-  ZodCodec: () => ZodCodec,
-  ZodCompileAsyncError: () => ZodCompileAsyncError,
-  ZodCompileUnsupportedError: () => ZodCompileUnsupportedError,
-  ZodCreditCard: () => ZodCreditCard,
-  ZodCustom: () => ZodCustom,
-  ZodCustomStringFormat: () => ZodCustomStringFormat,
-  ZodDate: () => ZodDate2,
-  ZodDefault: () => ZodDefault2,
-  ZodDiscriminatedUnion: () => ZodDiscriminatedUnion2,
-  ZodE164: () => ZodE164,
-  ZodEmail: () => ZodEmail,
-  ZodEmoji: () => ZodEmoji,
-  ZodEnum: () => ZodEnum2,
-  ZodError: () => ZodError2,
-  ZodExactOptional: () => ZodExactOptional,
-  ZodFile: () => ZodFile,
-  ZodFirstPartyTypeKind: () => ZodFirstPartyTypeKind2,
-  ZodFunction: () => ZodFunction2,
-  ZodGUID: () => ZodGUID,
-  ZodIBAN: () => ZodIBAN,
-  ZodIPv4: () => ZodIPv4,
-  ZodIPv6: () => ZodIPv6,
-  ZodISODate: () => ZodISODate,
-  ZodISODateTime: () => ZodISODateTime,
-  ZodISODuration: () => ZodISODuration,
-  ZodISOTime: () => ZodISOTime,
-  ZodInstanceOf: () => ZodInstanceOf,
-  ZodIntersection: () => ZodIntersection2,
-  ZodIssueCode: () => ZodIssueCode2,
-  ZodJWT: () => ZodJWT,
-  ZodKSUID: () => ZodKSUID,
-  ZodLazy: () => ZodLazy2,
-  ZodLiteral: () => ZodLiteral2,
-  ZodMAC: () => ZodMAC,
-  ZodMap: () => ZodMap2,
-  ZodNaN: () => ZodNaN2,
-  ZodNanoID: () => ZodNanoID,
-  ZodNever: () => ZodNever2,
-  ZodNonOptional: () => ZodNonOptional,
-  ZodNull: () => ZodNull2,
-  ZodNullable: () => ZodNullable2,
-  ZodNumber: () => ZodNumber2,
-  ZodNumberFormat: () => ZodNumberFormat,
-  ZodObject: () => ZodObject2,
-  ZodOptional: () => ZodOptional2,
-  ZodPipe: () => ZodPipe,
-  ZodPrefault: () => ZodPrefault,
-  ZodPreprocess: () => ZodPreprocess,
-  ZodPromise: () => ZodPromise2,
-  ZodReadonly: () => ZodReadonly2,
-  ZodRealError: () => ZodRealError,
-  ZodRecord: () => ZodRecord2,
-  ZodSet: () => ZodSet2,
-  ZodString: () => ZodString2,
-  ZodStringFormat: () => ZodStringFormat,
-  ZodSuccess: () => ZodSuccess,
-  ZodSymbol: () => ZodSymbol2,
-  ZodTemplateLiteral: () => ZodTemplateLiteral,
-  ZodTransform: () => ZodTransform,
-  ZodTuple: () => ZodTuple2,
-  ZodType: () => ZodType2,
-  ZodULID: () => ZodULID,
-  ZodURL: () => ZodURL,
-  ZodUUID: () => ZodUUID,
-  ZodUndefined: () => ZodUndefined2,
-  ZodUnion: () => ZodUnion2,
-  ZodUnknown: () => ZodUnknown2,
-  ZodVoid: () => ZodVoid2,
-  ZodXID: () => ZodXID,
-  ZodXor: () => ZodXor,
-  _ZodString: () => _ZodString,
-  _default: () => _default2,
-  _function: () => _function,
-  any: () => any,
-  array: () => array,
-  base64: () => base642,
-  base64url: () => base64url2,
-  bigint: () => bigint2,
-  boolean: () => boolean2,
-  catch: () => _catch2,
-  check: () => check,
-  cidrv4: () => cidrv42,
-  cidrv6: () => cidrv62,
-  clone: () => clone,
-  codec: () => codec,
-  coerce: () => coerce_exports2,
-  compile: () => compile,
-  config: () => config,
-  core: () => core_exports2,
-  creditCard: () => creditCard2,
-  cuid: () => cuid3,
-  cuid2: () => cuid22,
-  currencyCode: () => currencyCode2,
-  custom: () => custom,
-  date: () => date2,
-  decode: () => decode2,
-  decodeAsync: () => decodeAsync2,
-  deepPartial: () => deepPartial,
-  describe: () => describe2,
-  discriminatedUnion: () => discriminatedUnion,
-  e164: () => e1642,
-  email: () => email2,
-  emoji: () => emoji2,
-  encode: () => encode2,
-  encodeAsync: () => encodeAsync2,
-  endsWith: () => _endsWith,
-  enum: () => _enum2,
-  exactOptional: () => exactOptional,
-  file: () => file,
-  flattenError: () => flattenError,
-  float32: () => float32,
-  float64: () => float64,
-  formatError: () => formatError,
-  fromJSONSchema: () => fromJSONSchema,
-  function: () => _function,
-  getDiscriminatedOption: () => getDiscriminatedOption,
-  getErrorMap: () => getErrorMap2,
-  globalRegistry: () => globalRegistry,
-  gt: () => _gt,
-  gte: () => _gte,
-  guid: () => guid2,
-  hash: () => hash,
-  hex: () => hex2,
-  hostname: () => hostname3,
-  httpUrl: () => httpUrl,
-  iban: () => iban2,
-  includes: () => _includes,
-  input: () => input,
-  instanceof: () => _instanceof,
-  int: () => int,
-  int32: () => int32,
-  int64: () => int64,
-  intersection: () => intersection,
-  invertCodec: () => invertCodec,
-  ipv4: () => ipv42,
-  ipv6: () => ipv62,
-  iso: () => iso_exports2,
-  json: () => json,
-  jwt: () => jwt,
-  keyof: () => keyof,
-  ksuid: () => ksuid2,
-  lazy: () => lazy,
-  length: () => _length,
-  literal: () => literal,
-  locales: () => locales_exports,
-  looseObject: () => looseObject,
-  looseRecord: () => looseRecord,
-  lowercase: () => _lowercase,
-  lt: () => _lt,
-  lte: () => _lte,
-  mac: () => mac2,
-  map: () => map,
-  maxLength: () => _maxLength,
-  maxSize: () => _maxSize,
-  memoizer: () => memoizer,
-  meta: () => meta2,
-  mime: () => _mime,
-  minLength: () => _minLength,
-  minSize: () => _minSize,
-  multipleOf: () => _multipleOf,
-  nan: () => nan,
-  nanoid: () => nanoid2,
-  nativeEnum: () => nativeEnum,
-  negative: () => _negative,
-  never: () => never,
-  nonnegative: () => _nonnegative,
-  nonoptional: () => nonoptional,
-  nonpositive: () => _nonpositive,
-  normalize: () => _normalize,
-  null: () => _null3,
-  nullable: () => nullable,
-  nullish: () => nullish2,
-  number: () => number2,
-  object: () => object2,
-  optional: () => optional,
-  output: () => output,
-  overwrite: () => _overwrite,
-  parse: () => parse2,
-  parseAsync: () => parseAsync2,
-  partialRecord: () => partialRecord,
-  pipe: () => pipe,
-  positive: () => _positive,
-  prefault: () => prefault,
-  preprocess: () => preprocess,
-  prettifyError: () => prettifyError,
-  promise: () => promise,
-  properties: () => _properties,
-  property: () => _property,
-  readonly: () => readonly,
-  record: () => record,
-  refine: () => refine,
-  regex: () => _regex,
-  regexes: () => regexes_exports,
-  registry: () => registry,
-  safeDecode: () => safeDecode2,
-  safeDecodeAsync: () => safeDecodeAsync2,
-  safeEncode: () => safeEncode2,
-  safeEncodeAsync: () => safeEncodeAsync2,
-  safeParse: () => safeParse3,
-  safeParseAsync: () => safeParseAsync3,
-  set: () => set,
-  setErrorMap: () => setErrorMap,
-  size: () => _size,
-  slugify: () => _slugify,
-  startsWith: () => _startsWith,
-  strictObject: () => strictObject,
-  string: () => string2,
-  stringFormat: () => stringFormat,
-  stringbool: () => stringbool,
-  success: () => success,
-  superRefine: () => superRefine,
-  symbol: () => symbol,
-  templateLiteral: () => templateLiteral,
-  toJSONSchema: () => toJSONSchema,
-  toLowerCase: () => _toLowerCase,
-  toUpperCase: () => _toUpperCase,
-  toZod: () => toZod,
-  transform: () => transform,
-  treeifyError: () => treeifyError,
-  trim: () => _trim,
-  tuple: () => tuple,
-  uint32: () => uint32,
-  uint64: () => uint64,
-  ulid: () => ulid2,
-  undefined: () => _undefined3,
-  union: () => union,
-  unknown: () => unknown,
-  uppercase: () => _uppercase,
-  url: () => url,
-  util: () => util_exports,
-  uuid: () => uuid2,
-  uuidv4: () => uuidv4,
-  uuidv6: () => uuidv6,
-  uuidv7: () => uuidv7,
-  validate: () => validate,
-  validateAsync: () => validateAsync,
-  void: () => _void2,
-  withParser: () => withParser,
-  xid: () => xid2,
-  xor: () => xor
-});
-
 // node_modules/zod/v4/classic/schemas.js
 var schemas_exports2 = {};
 __export(schemas_exports2, {
-  ZodAny: () => ZodAny2,
-  ZodArray: () => ZodArray2,
+  ZodAny: () => ZodAny,
+  ZodArray: () => ZodArray,
   ZodBase64: () => ZodBase64,
   ZodBase64URL: () => ZodBase64URL,
-  ZodBigInt: () => ZodBigInt2,
+  ZodBigInt: () => ZodBigInt,
   ZodBigIntFormat: () => ZodBigIntFormat,
-  ZodBoolean: () => ZodBoolean2,
+  ZodBoolean: () => ZodBoolean,
   ZodCIDRv4: () => ZodCIDRv4,
   ZodCIDRv6: () => ZodCIDRv6,
   ZodCUID: () => ZodCUID,
   ZodCUID2: () => ZodCUID2,
-  ZodCatch: () => ZodCatch2,
+  ZodCatch: () => ZodCatch,
   ZodCodec: () => ZodCodec,
   ZodCreditCard: () => ZodCreditCard,
   ZodCustom: () => ZodCustom,
   ZodCustomStringFormat: () => ZodCustomStringFormat,
-  ZodDate: () => ZodDate2,
-  ZodDefault: () => ZodDefault2,
-  ZodDiscriminatedUnion: () => ZodDiscriminatedUnion2,
+  ZodDate: () => ZodDate,
+  ZodDefault: () => ZodDefault,
+  ZodDiscriminatedUnion: () => ZodDiscriminatedUnion,
   ZodE164: () => ZodE164,
   ZodEmail: () => ZodEmail,
   ZodEmoji: () => ZodEmoji,
-  ZodEnum: () => ZodEnum2,
+  ZodEnum: () => ZodEnum,
   ZodExactOptional: () => ZodExactOptional,
   ZodFile: () => ZodFile,
-  ZodFunction: () => ZodFunction2,
+  ZodFunction: () => ZodFunction,
   ZodGUID: () => ZodGUID,
   ZodIBAN: () => ZodIBAN,
   ZodIPv4: () => ZodIPv4,
@@ -32991,45 +24269,45 @@ __export(schemas_exports2, {
   ZodISODuration: () => ZodISODuration,
   ZodISOTime: () => ZodISOTime,
   ZodInstanceOf: () => ZodInstanceOf,
-  ZodIntersection: () => ZodIntersection2,
+  ZodIntersection: () => ZodIntersection,
   ZodJWT: () => ZodJWT,
   ZodKSUID: () => ZodKSUID,
-  ZodLazy: () => ZodLazy2,
-  ZodLiteral: () => ZodLiteral2,
+  ZodLazy: () => ZodLazy,
+  ZodLiteral: () => ZodLiteral,
   ZodMAC: () => ZodMAC,
-  ZodMap: () => ZodMap2,
-  ZodNaN: () => ZodNaN2,
+  ZodMap: () => ZodMap,
+  ZodNaN: () => ZodNaN,
   ZodNanoID: () => ZodNanoID,
-  ZodNever: () => ZodNever2,
+  ZodNever: () => ZodNever,
   ZodNonOptional: () => ZodNonOptional,
-  ZodNull: () => ZodNull2,
-  ZodNullable: () => ZodNullable2,
-  ZodNumber: () => ZodNumber2,
+  ZodNull: () => ZodNull,
+  ZodNullable: () => ZodNullable,
+  ZodNumber: () => ZodNumber,
   ZodNumberFormat: () => ZodNumberFormat,
-  ZodObject: () => ZodObject2,
-  ZodOptional: () => ZodOptional2,
+  ZodObject: () => ZodObject,
+  ZodOptional: () => ZodOptional,
   ZodPipe: () => ZodPipe,
   ZodPrefault: () => ZodPrefault,
   ZodPreprocess: () => ZodPreprocess,
-  ZodPromise: () => ZodPromise2,
-  ZodReadonly: () => ZodReadonly2,
-  ZodRecord: () => ZodRecord2,
-  ZodSet: () => ZodSet2,
-  ZodString: () => ZodString2,
+  ZodPromise: () => ZodPromise,
+  ZodReadonly: () => ZodReadonly,
+  ZodRecord: () => ZodRecord,
+  ZodSet: () => ZodSet,
+  ZodString: () => ZodString,
   ZodStringFormat: () => ZodStringFormat,
   ZodSuccess: () => ZodSuccess,
-  ZodSymbol: () => ZodSymbol2,
+  ZodSymbol: () => ZodSymbol,
   ZodTemplateLiteral: () => ZodTemplateLiteral,
   ZodTransform: () => ZodTransform,
-  ZodTuple: () => ZodTuple2,
-  ZodType: () => ZodType2,
+  ZodTuple: () => ZodTuple,
+  ZodType: () => ZodType,
   ZodULID: () => ZodULID,
   ZodURL: () => ZodURL,
   ZodUUID: () => ZodUUID,
-  ZodUndefined: () => ZodUndefined2,
-  ZodUnion: () => ZodUnion2,
-  ZodUnknown: () => ZodUnknown2,
-  ZodVoid: () => ZodVoid2,
+  ZodUndefined: () => ZodUndefined,
+  ZodUnion: () => ZodUnion,
+  ZodUnknown: () => ZodUnknown,
+  ZodVoid: () => ZodVoid,
   ZodXID: () => ZodXID,
   ZodXor: () => ZodXor,
   _ZodString: () => _ZodString,
@@ -33066,7 +24344,7 @@ __export(schemas_exports2, {
   guid: () => guid2,
   hash: () => hash,
   hex: () => hex2,
-  hostname: () => hostname3,
+  hostname: () => hostname2,
   httpUrl: () => httpUrl,
   iban: () => iban2,
   instanceof: () => _instanceof,
@@ -33097,7 +24375,7 @@ __export(schemas_exports2, {
   nullable: () => nullable,
   nullish: () => nullish2,
   number: () => number2,
-  object: () => object2,
+  object: () => object,
   optional: () => optional,
   partialRecord: () => partialRecord,
   pipe: () => pipe,
@@ -33210,7 +24488,7 @@ var initializer2 = (inst, issues) => {
     }
   });
 };
-var ZodError2 = /* @__PURE__ */ $constructor("ZodError", initializer2);
+var ZodError = /* @__PURE__ */ $constructor("ZodError", initializer2);
 var ZodRealError = /* @__PURE__ */ $constructor("ZodError", initializer2, void 0, {
   Parent: Error
 });
@@ -33218,8 +24496,8 @@ var ZodRealError = /* @__PURE__ */ $constructor("ZodError", initializer2, void 0
 // node_modules/zod/v4/classic/parse.js
 var parse2 = /* @__PURE__ */ _parse(ZodRealError);
 var parseAsync2 = /* @__PURE__ */ _parseAsync(ZodRealError);
-var safeParse3 = /* @__PURE__ */ _safeParse(ZodRealError);
-var safeParseAsync3 = /* @__PURE__ */ _safeParseAsync(ZodRealError);
+var safeParse2 = /* @__PURE__ */ _safeParse(ZodRealError);
+var safeParseAsync2 = /* @__PURE__ */ _safeParseAsync(ZodRealError);
 var encode2 = /* @__PURE__ */ _encode(ZodRealError);
 var decode2 = /* @__PURE__ */ _decode(ZodRealError);
 var encodeAsync2 = /* @__PURE__ */ _encodeAsync(ZodRealError);
@@ -33232,13 +24510,13 @@ var safeDecodeAsync2 = /* @__PURE__ */ _safeDecodeAsync(ZodRealError);
 // node_modules/zod/v4/classic/schemas.js
 function _ensureDefaultLocale() {
   if (!globalConfig.localeError)
-    config(en_default2());
+    config(en_default());
 }
 function _ensureDefaultMemoizer() {
   if (!globalConfig.memoizer)
     config({ memoizer: memoizer() });
 }
-var ZodType2 = /* @__PURE__ */ $constructor("ZodType", (inst, def) => {
+var ZodType = /* @__PURE__ */ $constructor("ZodType", (inst, def) => {
   _ensureDefaultLocale();
   $ZodType.init(inst, def);
   inst.def = def;
@@ -33359,10 +24637,10 @@ var ZodType2 = /* @__PURE__ */ $constructor("ZodType", (inst, def) => {
     return await parseAsync2(this, data, params, { callee: _parseAsync2 });
   },
   safeParse(data, params) {
-    return safeParse3(this, data, params);
+    return safeParse2(this, data, params);
   },
   async safeParseAsync(data, params) {
-    return safeParseAsync3(this, data, params);
+    return safeParseAsync2(this, data, params);
   },
   // `spa` is an alias: same function object as `safeParseAsync`, as before.
   get spa() {
@@ -33417,7 +24695,7 @@ var _ZodString = /* @__PURE__ */ $constructor(
   "_ZodString",
   (inst, def) => {
     $ZodString.init(inst, def);
-    ZodType2.init(inst, def);
+    ZodType.init(inst, def);
     inst._zod.processJSONSchema = (ctx, json2, params) => stringProcessor(inst, ctx, json2, params);
   },
   /* @__PURE__ */ util_exports.derived({
@@ -33472,7 +24750,7 @@ var _ZodString = /* @__PURE__ */ $constructor(
     }
   })
 );
-var ZodString2 = /* @__PURE__ */ $constructor("ZodString", (inst, def) => {
+var ZodString = /* @__PURE__ */ $constructor("ZodString", (inst, def) => {
   $ZodString.init(inst, def);
   _ZodString.init(inst, def);
 }, {
@@ -33556,7 +24834,7 @@ var ZodString2 = /* @__PURE__ */ $constructor("ZodString", (inst, def) => {
   }
 });
 function string2(params) {
-  return _string(ZodString2, params);
+  return _string(ZodString, params);
 }
 var ZodStringFormat = /* @__PURE__ */ $constructor("ZodStringFormat", (inst, def) => {
   $ZodStringFormat.init(inst, def);
@@ -33755,8 +25033,8 @@ var ZodCustomStringFormat = /* @__PURE__ */ $constructor("ZodCustomStringFormat"
 function stringFormat(format, fnOrRegex, _params = {}) {
   return _stringFormat(ZodCustomStringFormat, format, fnOrRegex, _params);
 }
-function hostname3(_params) {
-  return _stringFormat(ZodCustomStringFormat, "hostname", hostname2, _params);
+function hostname2(_params) {
+  return _stringFormat(ZodCustomStringFormat, "hostname", hostname, _params);
 }
 function hex2(_params) {
   return _stringFormat(ZodCustomStringFormat, "hex", hex, _params);
@@ -33772,11 +25050,11 @@ function hash(alg, params) {
     throw new Error(`Unrecognized hash format: ${format}`);
   return _stringFormat(ZodCustomStringFormat, format, regex, params);
 }
-var ZodNumber2 = /* @__PURE__ */ $constructor(
+var ZodNumber = /* @__PURE__ */ $constructor(
   "ZodNumber",
   (inst, def) => {
     $ZodNumber.init(inst, def);
-    ZodType2.init(inst, def);
+    ZodType.init(inst, def);
     inst._zod.processJSONSchema = (ctx, json2, params) => numberProcessor(inst, ctx, json2, params);
     inst.isFinite = true;
   },
@@ -33843,11 +25121,11 @@ var ZodNumber2 = /* @__PURE__ */ $constructor(
   })
 );
 function number2(params) {
-  return _number(ZodNumber2, params);
+  return _number(ZodNumber, params);
 }
 var ZodNumberFormat = /* @__PURE__ */ $constructor("ZodNumberFormat", (inst, def) => {
   $ZodNumberFormat.init(inst, def);
-  ZodNumber2.init(inst, def);
+  ZodNumber.init(inst, def);
 });
 function int(params) {
   return _int(ZodNumberFormat, params);
@@ -33864,19 +25142,19 @@ function int32(params) {
 function uint32(params) {
   return _uint32(ZodNumberFormat, params);
 }
-var ZodBoolean2 = /* @__PURE__ */ $constructor("ZodBoolean", (inst, def) => {
+var ZodBoolean = /* @__PURE__ */ $constructor("ZodBoolean", (inst, def) => {
   $ZodBoolean.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => booleanProcessor(inst, ctx, json2, params);
 });
 function boolean2(params) {
-  return _boolean(ZodBoolean2, params);
+  return _boolean(ZodBoolean, params);
 }
-var ZodBigInt2 = /* @__PURE__ */ $constructor(
+var ZodBigInt = /* @__PURE__ */ $constructor(
   "ZodBigInt",
   (inst, def) => {
     $ZodBigInt.init(inst, def);
-    ZodType2.init(inst, def);
+    ZodType.init(inst, def);
     inst._zod.processJSONSchema = (ctx, json2, params) => bigintProcessor(inst, ctx, json2, params);
   },
   /* @__PURE__ */ util_exports.derived({
@@ -33920,11 +25198,11 @@ var ZodBigInt2 = /* @__PURE__ */ $constructor(
   })
 );
 function bigint2(params) {
-  return _bigint(ZodBigInt2, params);
+  return _bigint(ZodBigInt, params);
 }
 var ZodBigIntFormat = /* @__PURE__ */ $constructor("ZodBigIntFormat", (inst, def) => {
   $ZodBigIntFormat.init(inst, def);
-  ZodBigInt2.init(inst, def);
+  ZodBigInt.init(inst, def);
 });
 function int64(params) {
   return _int64(ZodBigIntFormat, params);
@@ -33932,67 +25210,67 @@ function int64(params) {
 function uint64(params) {
   return _uint64(ZodBigIntFormat, params);
 }
-var ZodSymbol2 = /* @__PURE__ */ $constructor("ZodSymbol", (inst, def) => {
+var ZodSymbol = /* @__PURE__ */ $constructor("ZodSymbol", (inst, def) => {
   $ZodSymbol.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => symbolProcessor(inst, ctx, json2, params);
 });
 function symbol(params) {
-  return _symbol(ZodSymbol2, params);
+  return _symbol(ZodSymbol, params);
 }
-var ZodUndefined2 = /* @__PURE__ */ $constructor("ZodUndefined", (inst, def) => {
+var ZodUndefined = /* @__PURE__ */ $constructor("ZodUndefined", (inst, def) => {
   $ZodUndefined.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => undefinedProcessor(inst, ctx, json2, params);
 });
 function _undefined3(params) {
-  return _undefined2(ZodUndefined2, params);
+  return _undefined2(ZodUndefined, params);
 }
-var ZodNull2 = /* @__PURE__ */ $constructor("ZodNull", (inst, def) => {
+var ZodNull = /* @__PURE__ */ $constructor("ZodNull", (inst, def) => {
   $ZodNull.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => nullProcessor(inst, ctx, json2, params);
 });
 function _null3(params) {
-  return _null2(ZodNull2, params);
+  return _null2(ZodNull, params);
 }
-var ZodAny2 = /* @__PURE__ */ $constructor("ZodAny", (inst, def) => {
+var ZodAny = /* @__PURE__ */ $constructor("ZodAny", (inst, def) => {
   $ZodAny.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => anyProcessor(inst, ctx, json2, params);
 });
 function any() {
-  return _any(ZodAny2);
+  return _any(ZodAny);
 }
-var ZodUnknown2 = /* @__PURE__ */ $constructor("ZodUnknown", (inst, def) => {
+var ZodUnknown = /* @__PURE__ */ $constructor("ZodUnknown", (inst, def) => {
   $ZodUnknown.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => unknownProcessor(inst, ctx, json2, params);
 });
 function unknown() {
-  return _unknown(ZodUnknown2);
+  return _unknown(ZodUnknown);
 }
-var ZodNever2 = /* @__PURE__ */ $constructor("ZodNever", (inst, def) => {
+var ZodNever = /* @__PURE__ */ $constructor("ZodNever", (inst, def) => {
   $ZodNever.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => neverProcessor(inst, ctx, json2, params);
 });
 function never(params) {
-  return _never(ZodNever2, params);
+  return _never(ZodNever, params);
 }
-var ZodVoid2 = /* @__PURE__ */ $constructor("ZodVoid", (inst, def) => {
+var ZodVoid = /* @__PURE__ */ $constructor("ZodVoid", (inst, def) => {
   $ZodVoid.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => voidProcessor(inst, ctx, json2, params);
 });
 function _void2(params) {
-  return _void(ZodVoid2, params);
+  return _void(ZodVoid, params);
 }
-var ZodDate2 = /* @__PURE__ */ $constructor(
+var ZodDate = /* @__PURE__ */ $constructor(
   "ZodDate",
   (inst, def) => {
     $ZodDate.init(inst, def);
-    ZodType2.init(inst, def);
+    ZodType.init(inst, def);
     inst._zod.processJSONSchema = (ctx, json2, params) => dateProcessor(inst, ctx, json2, params);
     inst.min = (value, params) => inst.check(_gte(value, params));
     inst.max = (value, params) => inst.check(_lte(value, params));
@@ -34009,12 +25287,12 @@ var ZodDate2 = /* @__PURE__ */ $constructor(
   }, {})
 );
 function date2(params) {
-  return _date(ZodDate2, params);
+  return _date(ZodDate, params);
 }
-var ZodArray2 = /* @__PURE__ */ $constructor("ZodArray", (inst, def) => {
+var ZodArray = /* @__PURE__ */ $constructor("ZodArray", (inst, def) => {
   _ensureDefaultMemoizer();
   $ZodArray.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => arrayProcessor(inst, ctx, json2, params);
   inst.element = def.element;
 }, {
@@ -34035,16 +25313,16 @@ var ZodArray2 = /* @__PURE__ */ $constructor("ZodArray", (inst, def) => {
   }
 });
 function array(element, params) {
-  return _array(ZodArray2, element, params);
+  return _array(ZodArray, element, params);
 }
 function keyof(schema) {
   const shape = schema._zod.def.shape;
   return _enum2(Object.keys(shape));
 }
-var ZodObject2 = /* @__PURE__ */ $constructor("ZodObject", (inst, def) => {
+var ZodObject = /* @__PURE__ */ $constructor("ZodObject", (inst, def) => {
   _ensureDefaultMemoizer();
   $ZodObjectJIT.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => objectProcessor(inst, ctx, json2, params);
   util_exports.installLazyProp(inst, "shape", (self) => self._zod.def.shape, false);
 }, {
@@ -34082,7 +25360,7 @@ var ZodObject2 = /* @__PURE__ */ $constructor("ZodObject", (inst, def) => {
     return util_exports.omit(this, mask);
   },
   partial(...args) {
-    return util_exports.partial(ZodOptional2, this, args[0]);
+    return util_exports.partial(ZodOptional, this, args[0]);
   },
   exactPartial(...args) {
     return util_exports.partial(ZodExactOptional, this, args[0], "exactPartial");
@@ -34091,16 +25369,16 @@ var ZodObject2 = /* @__PURE__ */ $constructor("ZodObject", (inst, def) => {
     return util_exports.required(ZodNonOptional, this, args[0]);
   }
 });
-function object2(shape, params) {
+function object(shape, params) {
   const def = {
     type: "object",
     shape: shape ?? {},
     ...util_exports.normalizeParams(params)
   };
-  return new ZodObject2(def);
+  return new ZodObject(def);
 }
 function strictObject(shape, params) {
-  return new ZodObject2({
+  return new ZodObject({
     type: "object",
     shape,
     catchall: never(),
@@ -34108,28 +25386,28 @@ function strictObject(shape, params) {
   });
 }
 function looseObject(shape, params) {
-  return new ZodObject2({
+  return new ZodObject({
     type: "object",
     shape,
     catchall: unknown(),
     ...util_exports.normalizeParams(params)
   });
 }
-var ZodUnion2 = /* @__PURE__ */ $constructor("ZodUnion", (inst, def) => {
+var ZodUnion = /* @__PURE__ */ $constructor("ZodUnion", (inst, def) => {
   $ZodUnion.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => unionProcessor(inst, ctx, json2, params);
   inst.options = def.options;
 });
 function union(options, params) {
-  return new ZodUnion2({
+  return new ZodUnion({
     type: "union",
     options,
     ...util_exports.normalizeParams(params)
   });
 }
 var ZodXor = /* @__PURE__ */ $constructor("ZodXor", (inst, def) => {
-  ZodUnion2.init(inst, def);
+  ZodUnion.init(inst, def);
   $ZodXor.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => unionProcessor(inst, ctx, json2, params);
   inst.options = def.options;
@@ -34142,34 +25420,34 @@ function xor(options, params) {
     ...util_exports.normalizeParams(params)
   });
 }
-var ZodDiscriminatedUnion2 = /* @__PURE__ */ $constructor("ZodDiscriminatedUnion", (inst, def) => {
-  ZodUnion2.init(inst, def);
+var ZodDiscriminatedUnion = /* @__PURE__ */ $constructor("ZodDiscriminatedUnion", (inst, def) => {
+  ZodUnion.init(inst, def);
   $ZodDiscriminatedUnion.init(inst, def);
 });
 function discriminatedUnion(discriminator, options, params) {
-  return new ZodDiscriminatedUnion2({
+  return new ZodDiscriminatedUnion({
     type: "union",
     options,
     discriminator,
     ...util_exports.normalizeParams(params)
   });
 }
-var ZodIntersection2 = /* @__PURE__ */ $constructor("ZodIntersection", (inst, def) => {
+var ZodIntersection = /* @__PURE__ */ $constructor("ZodIntersection", (inst, def) => {
   $ZodIntersection.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => intersectionProcessor(inst, ctx, json2, params);
 });
 function intersection(left, right) {
-  return new ZodIntersection2({
+  return new ZodIntersection({
     type: "intersection",
     left,
     right
   });
 }
-var ZodTuple2 = /* @__PURE__ */ $constructor("ZodTuple", (inst, def) => {
+var ZodTuple = /* @__PURE__ */ $constructor("ZodTuple", (inst, def) => {
   _ensureDefaultMemoizer();
   $ZodTuple.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => tupleProcessor(inst, ctx, json2, params);
 }, {
   rest(rest) {
@@ -34184,7 +25462,7 @@ var ZodTuple2 = /* @__PURE__ */ $constructor("ZodTuple", (inst, def) => {
       throw new Error(".partial() cannot be used on tuple schemas containing refinements");
     return this.clone({
       ...def,
-      items: def.items.map((item) => new ZodOptional2({ type: "optional", innerType: item }))
+      items: def.items.map((item) => new ZodOptional({ type: "optional", innerType: item }))
     });
   }
 });
@@ -34192,31 +25470,31 @@ function tuple(items, _paramsOrRest, _params) {
   const hasRest = _paramsOrRest instanceof $ZodType;
   const params = hasRest ? _params : _paramsOrRest;
   const rest = hasRest ? _paramsOrRest : null;
-  return new ZodTuple2({
+  return new ZodTuple({
     type: "tuple",
     items,
     rest,
     ...util_exports.normalizeParams(params)
   });
 }
-var ZodRecord2 = /* @__PURE__ */ $constructor("ZodRecord", (inst, def) => {
+var ZodRecord = /* @__PURE__ */ $constructor("ZodRecord", (inst, def) => {
   _ensureDefaultMemoizer();
   $ZodRecord.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => recordProcessor(inst, ctx, json2, params);
   inst.keyType = def.keyType;
   inst.valueType = def.valueType;
 });
 function record(keyType, valueType, params) {
   if (!valueType || !valueType._zod) {
-    return new ZodRecord2({
+    return new ZodRecord({
       type: "record",
       keyType: string2(),
       valueType: keyType,
       ...util_exports.normalizeParams(valueType)
     });
   }
-  return new ZodRecord2({
+  return new ZodRecord({
     type: "record",
     keyType,
     valueType,
@@ -34224,7 +25502,7 @@ function record(keyType, valueType, params) {
   });
 }
 function partialRecord(keyType, valueType, params) {
-  return new ZodRecord2({
+  return new ZodRecord({
     type: "record",
     keyType,
     valueType,
@@ -34233,7 +25511,7 @@ function partialRecord(keyType, valueType, params) {
   });
 }
 function looseRecord(keyType, valueType, params) {
-  return new ZodRecord2({
+  return new ZodRecord({
     type: "record",
     keyType,
     valueType,
@@ -34241,10 +25519,10 @@ function looseRecord(keyType, valueType, params) {
     ...util_exports.normalizeParams(params)
   });
 }
-var ZodMap2 = /* @__PURE__ */ $constructor("ZodMap", (inst, def) => {
+var ZodMap = /* @__PURE__ */ $constructor("ZodMap", (inst, def) => {
   _ensureDefaultMemoizer();
   $ZodMap.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => mapProcessor(inst, ctx, json2, params);
   inst.keyType = def.keyType;
   inst.valueType = def.valueType;
@@ -34254,17 +25532,17 @@ var ZodMap2 = /* @__PURE__ */ $constructor("ZodMap", (inst, def) => {
   inst.size = (...args) => inst.check(_size(...args));
 });
 function map(keyType, valueType, params) {
-  return new ZodMap2({
+  return new ZodMap({
     type: "map",
     keyType,
     valueType,
     ...util_exports.normalizeParams(params)
   });
 }
-var ZodSet2 = /* @__PURE__ */ $constructor("ZodSet", (inst, def) => {
+var ZodSet = /* @__PURE__ */ $constructor("ZodSet", (inst, def) => {
   _ensureDefaultMemoizer();
   $ZodSet.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => setProcessor(inst, ctx, json2, params);
   inst.min = (...args) => inst.check(_minSize(...args));
   inst.nonempty = (params) => inst.check(_minSize(1, params));
@@ -34272,15 +25550,15 @@ var ZodSet2 = /* @__PURE__ */ $constructor("ZodSet", (inst, def) => {
   inst.size = (...args) => inst.check(_size(...args));
 });
 function set(valueType, params) {
-  return new ZodSet2({
+  return new ZodSet({
     type: "set",
     valueType,
     ...util_exports.normalizeParams(params)
   });
 }
-var ZodEnum2 = /* @__PURE__ */ $constructor("ZodEnum", (inst, def) => {
+var ZodEnum = /* @__PURE__ */ $constructor("ZodEnum", (inst, def) => {
   $ZodEnum.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => enumProcessor(inst, ctx, json2, params);
   inst.enum = def.entries;
   inst.options = [...inst._zod.values];
@@ -34293,7 +25571,7 @@ var ZodEnum2 = /* @__PURE__ */ $constructor("ZodEnum", (inst, def) => {
       } else
         throw new Error(`Key ${value} not found in enum`);
     }
-    return new ZodEnum2({
+    return new ZodEnum({
       ...def,
       checks: [],
       ...util_exports.normalizeParams(params),
@@ -34308,7 +25586,7 @@ var ZodEnum2 = /* @__PURE__ */ $constructor("ZodEnum", (inst, def) => {
       } else
         throw new Error(`Key ${value} not found in enum`);
     }
-    return new ZodEnum2({
+    return new ZodEnum({
       ...def,
       checks: [],
       ...util_exports.normalizeParams(params),
@@ -34318,22 +25596,22 @@ var ZodEnum2 = /* @__PURE__ */ $constructor("ZodEnum", (inst, def) => {
 });
 function _enum2(values, params) {
   const entries = Array.isArray(values) ? Object.fromEntries(values.map((v) => [v, v])) : values;
-  return new ZodEnum2({
+  return new ZodEnum({
     type: "enum",
     entries,
     ...util_exports.normalizeParams(params)
   });
 }
 function nativeEnum(entries, params) {
-  return new ZodEnum2({
+  return new ZodEnum({
     type: "enum",
     entries,
     ...util_exports.normalizeParams(params)
   });
 }
-var ZodLiteral2 = /* @__PURE__ */ $constructor("ZodLiteral", (inst, def) => {
+var ZodLiteral = /* @__PURE__ */ $constructor("ZodLiteral", (inst, def) => {
   $ZodLiteral.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => literalProcessor(inst, ctx, json2, params);
   inst.values = new Set(def.values);
   Object.defineProperty(inst, "value", {
@@ -34346,7 +25624,7 @@ var ZodLiteral2 = /* @__PURE__ */ $constructor("ZodLiteral", (inst, def) => {
   });
 });
 function literal(value, params) {
-  return new ZodLiteral2({
+  return new ZodLiteral({
     type: "literal",
     values: Array.isArray(value) ? value : [value],
     ...util_exports.normalizeParams(params)
@@ -34354,7 +25632,7 @@ function literal(value, params) {
 }
 var ZodFile = /* @__PURE__ */ $constructor("ZodFile", (inst, def) => {
   $ZodFile.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => fileProcessor(inst, ctx, json2, params);
   inst.min = (size, params) => inst.check(_minSize(size, params));
   inst.max = (size, params) => inst.check(_maxSize(size, params));
@@ -34366,7 +25644,7 @@ function file(params) {
 var ZodTransform = /* @__PURE__ */ $constructor("ZodTransform", (inst, def) => {
   _ensureDefaultMemoizer();
   $ZodTransform.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => transformProcessor(inst, ctx, json2, params);
   inst._zod.parse = (payload, _ctx) => {
     if (_ctx.direction === "backward") {
@@ -34403,21 +25681,21 @@ function transform(fn) {
     transform: fn
   });
 }
-var ZodOptional2 = /* @__PURE__ */ $constructor("ZodOptional", (inst, def) => {
+var ZodOptional = /* @__PURE__ */ $constructor("ZodOptional", (inst, def) => {
   $ZodOptional.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => optionalProcessor(inst, ctx, json2, params);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function optional(innerType) {
-  return new ZodOptional2({
+  return new ZodOptional({
     type: "optional",
     innerType
   });
 }
 var ZodExactOptional = /* @__PURE__ */ $constructor("ZodExactOptional", (inst, def) => {
   $ZodExactOptional.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => optionalProcessor(inst, ctx, json2, params);
   inst.unwrap = () => inst._zod.def.innerType;
 });
@@ -34427,14 +25705,14 @@ function exactOptional(innerType) {
     innerType
   });
 }
-var ZodNullable2 = /* @__PURE__ */ $constructor("ZodNullable", (inst, def) => {
+var ZodNullable = /* @__PURE__ */ $constructor("ZodNullable", (inst, def) => {
   $ZodNullable.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => nullableProcessor(inst, ctx, json2, params);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function nullable(innerType) {
-  return new ZodNullable2({
+  return new ZodNullable({
     type: "nullable",
     innerType
   });
@@ -34442,15 +25720,15 @@ function nullable(innerType) {
 function nullish2(innerType) {
   return optional(nullable(innerType));
 }
-var ZodDefault2 = /* @__PURE__ */ $constructor("ZodDefault", (inst, def) => {
+var ZodDefault = /* @__PURE__ */ $constructor("ZodDefault", (inst, def) => {
   $ZodDefault.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => defaultProcessor(inst, ctx, json2, params);
   inst.unwrap = () => inst._zod.def.innerType;
   inst.removeDefault = inst.unwrap;
 });
 function _default2(innerType, defaultValue) {
-  return new ZodDefault2({
+  return new ZodDefault({
     type: "default",
     innerType,
     get defaultValue() {
@@ -34460,7 +25738,7 @@ function _default2(innerType, defaultValue) {
 }
 var ZodPrefault = /* @__PURE__ */ $constructor("ZodPrefault", (inst, def) => {
   $ZodPrefault.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => prefaultProcessor(inst, ctx, json2, params);
   inst.unwrap = () => inst._zod.def.innerType;
 });
@@ -34475,7 +25753,7 @@ function prefault(innerType, defaultValue) {
 }
 var ZodNonOptional = /* @__PURE__ */ $constructor("ZodNonOptional", (inst, def) => {
   $ZodNonOptional.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => nonoptionalProcessor(inst, ctx, json2, params);
   inst.unwrap = () => inst._zod.def.innerType;
 });
@@ -34488,7 +25766,7 @@ function nonoptional(innerType, params) {
 }
 var ZodSuccess = /* @__PURE__ */ $constructor("ZodSuccess", (inst, def) => {
   $ZodSuccess.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => successProcessor(inst, ctx, json2, params);
   inst.unwrap = () => inst._zod.def.innerType;
 });
@@ -34498,31 +25776,31 @@ function success(innerType) {
     innerType
   });
 }
-var ZodCatch2 = /* @__PURE__ */ $constructor("ZodCatch", (inst, def) => {
+var ZodCatch = /* @__PURE__ */ $constructor("ZodCatch", (inst, def) => {
   $ZodCatch.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => catchProcessor(inst, ctx, json2, params);
   inst.unwrap = () => inst._zod.def.innerType;
   inst.removeCatch = inst.unwrap;
 });
 function _catch2(innerType, catchValue) {
-  return new ZodCatch2({
+  return new ZodCatch({
     type: "catch",
     innerType,
     catchValue: typeof catchValue === "function" ? catchValue : util_exports.constantCatch(catchValue)
   });
 }
-var ZodNaN2 = /* @__PURE__ */ $constructor("ZodNaN", (inst, def) => {
+var ZodNaN = /* @__PURE__ */ $constructor("ZodNaN", (inst, def) => {
   $ZodNaN.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => nanProcessor(inst, ctx, json2, params);
 });
 function nan(params) {
-  return _nan(ZodNaN2, params);
+  return _nan(ZodNaN, params);
 }
 var ZodPipe = /* @__PURE__ */ $constructor("ZodPipe", (inst, def) => {
   $ZodPipe.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => pipeProcessor(inst, ctx, json2, params);
   inst.in = def.in;
   inst.out = def.out;
@@ -34562,21 +25840,21 @@ var ZodPreprocess = /* @__PURE__ */ $constructor("ZodPreprocess", (inst, def) =>
   ZodPipe.init(inst, def);
   $ZodPreprocess.init(inst, def);
 });
-var ZodReadonly2 = /* @__PURE__ */ $constructor("ZodReadonly", (inst, def) => {
+var ZodReadonly = /* @__PURE__ */ $constructor("ZodReadonly", (inst, def) => {
   $ZodReadonly.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => readonlyProcessor(inst, ctx, json2, params);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function readonly(innerType) {
-  return new ZodReadonly2({
+  return new ZodReadonly({
     type: "readonly",
     innerType
   });
 }
 var ZodTemplateLiteral = /* @__PURE__ */ $constructor("ZodTemplateLiteral", (inst, def) => {
   $ZodTemplateLiteral.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => templateLiteralProcessor(inst, ctx, json2, params);
 });
 function templateLiteral(parts, params) {
@@ -34586,37 +25864,37 @@ function templateLiteral(parts, params) {
     ...util_exports.normalizeParams(params)
   });
 }
-var ZodLazy2 = /* @__PURE__ */ $constructor("ZodLazy", (inst, def) => {
+var ZodLazy = /* @__PURE__ */ $constructor("ZodLazy", (inst, def) => {
   $ZodLazy.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => lazyProcessor(inst, ctx, json2, params);
   inst.unwrap = () => inst._zod.def.getter();
 });
 function lazy(getter) {
-  return new ZodLazy2({
+  return new ZodLazy({
     type: "lazy",
     getter
   });
 }
-var ZodPromise2 = /* @__PURE__ */ $constructor("ZodPromise", (inst, def) => {
+var ZodPromise = /* @__PURE__ */ $constructor("ZodPromise", (inst, def) => {
   $ZodPromise.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => promiseProcessor(inst, ctx, json2, params);
   inst.unwrap = () => inst._zod.def.innerType;
 });
 function promise(innerType) {
-  return new ZodPromise2({
+  return new ZodPromise({
     type: "promise",
     innerType
   });
 }
-var ZodFunction2 = /* @__PURE__ */ $constructor("ZodFunction", (inst, def) => {
+var ZodFunction = /* @__PURE__ */ $constructor("ZodFunction", (inst, def) => {
   $ZodFunction.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => functionProcessor(inst, ctx, json2, params);
 });
 function _function(params) {
-  return new ZodFunction2({
+  return new ZodFunction({
     type: "function",
     input: Array.isArray(params?.input) ? tuple(params?.input) : params?.input ?? array(unknown()),
     output: params?.output ?? unknown()
@@ -34624,7 +25902,7 @@ function _function(params) {
 }
 var ZodCustom = /* @__PURE__ */ $constructor("ZodCustom", (inst, def) => {
   $ZodCustom.init(inst, def);
-  ZodType2.init(inst, def);
+  ZodType.init(inst, def);
   inst._zod.processJSONSchema = (ctx, json2, params) => customProcessor(inst, ctx, json2, params);
 });
 function check(fn) {
@@ -34677,8 +25955,8 @@ function _instanceof(cls, params = {}) {
 }
 var stringbool = (...args) => _stringbool({
   Codec: ZodCodec,
-  Boolean: ZodBoolean2,
-  String: ZodString2
+  Boolean: ZodBoolean,
+  String: ZodString
 }, ...args);
 function json(params) {
   const jsonSchema = lazy(() => {
@@ -34695,7 +25973,7 @@ function preprocess(fn, schema) {
 }
 
 // node_modules/zod/v4/classic/compat.js
-var ZodIssueCode2 = {
+var ZodIssueCode = {
   invalid_type: "invalid_type",
   too_big: "too_big",
   too_small: "too_small",
@@ -34713,16 +25991,16 @@ function setErrorMap(map2) {
     customError: map2
   });
 }
-function getErrorMap2() {
+function getErrorMap() {
   return config().customError;
 }
-var ZodFirstPartyTypeKind2;
+var ZodFirstPartyTypeKind;
 /* @__PURE__ */ (function(ZodFirstPartyTypeKind3) {
-})(ZodFirstPartyTypeKind2 || (ZodFirstPartyTypeKind2 = {}));
+})(ZodFirstPartyTypeKind || (ZodFirstPartyTypeKind = {}));
 
 // node_modules/zod/v4/classic/iso.js
-var iso_exports2 = {};
-__export(iso_exports2, {
+var iso_exports = {};
+__export(iso_exports, {
   ZodISODate: () => ZodISODate,
   ZodISODateTime: () => ZodISODateTime,
   ZodISODuration: () => ZodISODuration,
@@ -34749,7 +26027,7 @@ function duration2(params) {
 var z = {
   ...schemas_exports2,
   ...checks_exports2,
-  iso: iso_exports2
+  iso: iso_exports
 };
 var RECOGNIZED_KEYS = /* @__PURE__ */ new Set([
   // Schema identification
@@ -35478,6 +26756,161 @@ function fromJSONSchema(schema, params) {
   return convertSchema(normalized, ctx);
 }
 
+// node_modules/zod/v4/core/visit.js
+var RESOLVING = /* @__PURE__ */ Symbol("z.visit/resolving");
+function visit(schema, fnOrHandlers) {
+  const fn = typeof fnOrHandlers === "function" ? fnOrHandlers : (node2, rewritten) => {
+    const h = fnOrHandlers[node2._zod.def.type];
+    return h ? h(node2, rewritten) : node2;
+  };
+  const cache = /* @__PURE__ */ new Map();
+  function run(s) {
+    const cached2 = cache.get(s);
+    if (cached2 === RESOLVING) {
+      return new $ZodLazy({
+        type: "lazy",
+        getter: () => cache.get(s)
+      });
+    }
+    if (cached2 !== void 0)
+      return cached2;
+    cache.set(s, RESOLVING);
+    const inner = mapInner(s);
+    const mapped = fn(inner, inner !== s);
+    cache.set(s, mapped);
+    return mapped;
+  }
+  function mapInner(s) {
+    const def = s._zod.def;
+    const kind = def.type;
+    switch (kind) {
+      case "object": {
+        const oldShape = def.shape;
+        const keys = Object.keys(oldShape);
+        let changed = false;
+        const newShape = {};
+        for (const k of keys) {
+          const mapped = run(oldShape[k]);
+          if (mapped !== oldShape[k])
+            changed = true;
+          newShape[k] = mapped;
+        }
+        let newCatchall = def.catchall;
+        if (def.catchall) {
+          newCatchall = run(def.catchall);
+          if (newCatchall !== def.catchall)
+            changed = true;
+        }
+        return changed ? clone(s, { ...def, shape: newShape, catchall: newCatchall }) : s;
+      }
+      case "array": {
+        const mapped = run(def.element);
+        return mapped === def.element ? s : clone(s, { ...def, element: mapped });
+      }
+      case "tuple": {
+        const oldItems = def.items;
+        let changed = false;
+        const newItems = [];
+        for (const item of oldItems) {
+          const mapped = run(item);
+          if (mapped !== item)
+            changed = true;
+          newItems.push(mapped);
+        }
+        let newRest = def.rest;
+        if (def.rest) {
+          newRest = run(def.rest);
+          if (newRest !== def.rest)
+            changed = true;
+        }
+        return changed ? clone(s, { ...def, items: newItems, rest: newRest }) : s;
+      }
+      case "record":
+      case "map": {
+        const newKey = run(def.keyType);
+        const newVal = run(def.valueType);
+        return newKey === def.keyType && newVal === def.valueType ? s : clone(s, { ...def, keyType: newKey, valueType: newVal });
+      }
+      case "set": {
+        const newVal = run(def.valueType);
+        return newVal === def.valueType ? s : clone(s, { ...def, valueType: newVal });
+      }
+      case "union": {
+        const oldOptions = def.options;
+        let changed = false;
+        const newOptions = [];
+        for (const opt of oldOptions) {
+          const mapped = run(opt);
+          if (mapped !== opt)
+            changed = true;
+          newOptions.push(mapped);
+        }
+        return changed ? clone(s, { ...def, options: newOptions }) : s;
+      }
+      case "intersection": {
+        const newLeft = run(def.left);
+        const newRight = run(def.right);
+        return newLeft === def.left && newRight === def.right ? s : clone(s, { ...def, left: newLeft, right: newRight });
+      }
+      case "optional":
+      case "nullable":
+      case "default":
+      case "prefault":
+      case "catch":
+      case "readonly":
+      case "nonoptional":
+      case "promise":
+      case "success": {
+        const newInner = run(def.innerType);
+        return newInner === def.innerType ? s : clone(s, { ...def, innerType: newInner });
+      }
+      case "pipe": {
+        const newIn = run(def.in);
+        const newOut = run(def.out);
+        return newIn === def.in && newOut === def.out ? s : clone(s, { ...def, in: newIn, out: newOut });
+      }
+      case "function": {
+        const newInput = run(def.input);
+        const newOutput = run(def.output);
+        return newInput === def.input && newOutput === def.output ? s : clone(s, { ...def, input: newInput, output: newOutput });
+      }
+      case "lazy": {
+        const original = def.getter;
+        const { _cachedInner, ...rest } = def;
+        return clone(s, { ...rest, getter: () => run(original()) });
+      }
+      // A leaf by choice: `parts` are regex fragments, not data positions.
+      case "template_literal":
+      // Leaves.
+      case "string":
+      case "number":
+      case "int":
+      case "boolean":
+      case "bigint":
+      case "symbol":
+      case "undefined":
+      case "null":
+      case "void":
+      case "never":
+      case "any":
+      case "unknown":
+      case "date":
+      case "nan":
+      case "enum":
+      case "literal":
+      case "file":
+      case "transform":
+      case "custom":
+        return s;
+      default: {
+        kind;
+        return s;
+      }
+    }
+  }
+  return run(schema);
+}
+
 // node_modules/zod/v4/classic/deep-partial.js
 function deepPartial(schema) {
   return visit(schema, {
@@ -35521,8 +26954,8 @@ function output(schema) {
 }
 
 // node_modules/zod/v4/classic/coerce.js
-var coerce_exports2 = {};
-__export(coerce_exports2, {
+var coerce_exports = {};
+__export(coerce_exports, {
   bigint: () => bigint3,
   boolean: () => boolean3,
   date: () => date4,
@@ -35530,19 +26963,10085 @@ __export(coerce_exports2, {
   string: () => string3
 });
 function string3(params) {
-  return _coercedString(ZodString2, params);
+  return _coercedString(ZodString, params);
 }
 function number3(params) {
-  return _coercedNumber(ZodNumber2, params);
+  return _coercedNumber(ZodNumber, params);
 }
 function boolean3(params) {
-  return _coercedBoolean(ZodBoolean2, params);
+  return _coercedBoolean(ZodBoolean, params);
 }
 function bigint3(params) {
-  return _coercedBigint(ZodBigInt2, params);
+  return _coercedBigint(ZodBigInt, params);
 }
 function date4(params) {
-  return _coercedDate(ZodDate2, params);
+  return _coercedDate(ZodDate, params);
+}
+
+// src/backends/darwin.ts
+import { execFile } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+
+// src/keys.ts
+var MODIFIER_ALIASES = {
+  ctrl: "ctrl",
+  control: "ctrl",
+  ctl: "ctrl",
+  alt: "alt",
+  opt: "alt",
+  option: "alt",
+  shift: "shift",
+  shft: "shift",
+  meta: "meta",
+  cmd: "meta",
+  command: "meta",
+  super: "meta",
+  win: "meta",
+  windows: "meta",
+  gui: "meta",
+  mod: "mod",
+  cmdorctrl: "mod"
+};
+var KEY_ALIASES = {
+  enter: "enter",
+  return: "enter",
+  kp_enter: "enter",
+  "\n": "enter",
+  "\r": "enter",
+  tab: "tab",
+  "	": "tab",
+  space: "space",
+  spacebar: "space",
+  " ": "space",
+  backspace: "backspace",
+  bksp: "backspace",
+  bs: "backspace",
+  delete: "delete",
+  del: "delete",
+  forwarddelete: "delete",
+  esc: "escape",
+  escape: "escape",
+  up: "up",
+  arrowup: "up",
+  down: "down",
+  arrowdown: "down",
+  left: "left",
+  arrowleft: "left",
+  right: "right",
+  arrowright: "right",
+  home: "home",
+  end: "end",
+  pageup: "pageup",
+  pgup: "pageup",
+  prior: "pageup",
+  pagedown: "pagedown",
+  pgdn: "pagedown",
+  next: "pagedown",
+  insert: "insert",
+  ins: "insert",
+  capslock: "capslock",
+  caps: "capslock",
+  f1: "f1",
+  f2: "f2",
+  f3: "f3",
+  f4: "f4",
+  f5: "f5",
+  f6: "f6",
+  f7: "f7",
+  f8: "f8",
+  f9: "f9",
+  f10: "f10",
+  f11: "f11",
+  f12: "f12",
+  plus: "+",
+  minus: "-",
+  equal: "=",
+  equals: "=",
+  slash: "/",
+  backslash: "\\",
+  comma: ",",
+  period: ".",
+  dot: ".",
+  semicolon: ";",
+  apostrophe: "'",
+  quote: "'",
+  grave: "`",
+  backtick: "`",
+  bracketleft: "[",
+  bracketright: "]"
+};
+function resolveModifier(mod, platform = process.platform) {
+  if (mod === "mod") {
+    return platform === "darwin" ? "meta" : "ctrl";
+  }
+  return mod;
+}
+function normalizeSingleKey(raw, platform = process.platform) {
+  if (raw === " ") return "space";
+  if (raw === "\n" || raw === "\r") return "enter";
+  if (raw === "	") return "tab";
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    throw new Error("Key cannot be empty.");
+  }
+  const lower = trimmed.toLowerCase();
+  const modAlias = MODIFIER_ALIASES[lower];
+  if (modAlias) {
+    return resolveModifier(modAlias, platform);
+  }
+  const keyAlias = KEY_ALIASES[lower];
+  if (keyAlias) {
+    return keyAlias;
+  }
+  const codePoints = Array.from(trimmed);
+  if (codePoints.length === 1) {
+    return trimmed.length === 1 && trimmed >= "A" && trimmed <= "Z" ? trimmed.toLowerCase() : trimmed;
+  }
+  throw new Error(
+    `Unsupported key "${raw}". Use a named key (Enter, Tab, Escape, Backspace, Delete, Space, ArrowUp..ArrowRight, Home, End, PageUp, PageDown, F1..F12), modifier (ctrl, alt, shift, meta, mod), or chord like "ctrl+c" / "mod+a".`
+  );
+}
+function parseKeyChord(rawKey, extraModifiers = [], platform = process.platform) {
+  const modSet = /* @__PURE__ */ new Set();
+  for (const m of extraModifiers) {
+    modSet.add(resolveModifier(m, platform));
+  }
+  if (rawKey === " " || rawKey === "+" || rawKey === "\n" || rawKey === "	") {
+    return {
+      key: normalizeSingleKey(rawKey, platform),
+      modifiers: Array.from(modSet)
+    };
+  }
+  const tokens = [];
+  let rest = rawKey.trim();
+  while (rest.length > 0) {
+    const plusIdx = rest.indexOf("+");
+    if (plusIdx === -1) {
+      tokens.push(rest);
+      break;
+    }
+    if (plusIdx === 0) {
+      tokens.push("+");
+      rest = rest.slice(1);
+      if (rest.startsWith("+")) rest = rest.slice(1);
+    } else {
+      tokens.push(rest.slice(0, plusIdx));
+      rest = rest.slice(plusIdx + 1);
+      if (rest === "") {
+        tokens.push("+");
+        break;
+      }
+    }
+  }
+  if (tokens.length === 0) {
+    throw new Error(`Invalid key "${rawKey}".`);
+  }
+  for (let i = 0; i < tokens.length - 1; i++) {
+    const tok = tokens[i].trim().toLowerCase();
+    const mod = MODIFIER_ALIASES[tok];
+    if (!mod) {
+      throw new Error(`Unknown modifier "${tokens[i]}" in key chord "${rawKey}".`);
+    }
+    modSet.add(resolveModifier(mod, platform));
+  }
+  const lastRaw = tokens[tokens.length - 1];
+  const isSingleUpperAlpha = tokens.length === 1 && extraModifiers.length === 0 && /^[A-Z]$/.test(lastRaw);
+  if (isSingleUpperAlpha) {
+    modSet.add("shift");
+  }
+  const key = normalizeSingleKey(lastRaw, platform);
+  if (key === "ctrl" || key === "alt" || key === "shift" || key === "meta") {
+    modSet.delete(key);
+  }
+  return {
+    key,
+    modifiers: Array.from(modSet)
+  };
+}
+var X11_KEYSYMS = {
+  backspace: 65288,
+  tab: 65289,
+  enter: 65293,
+  escape: 65307,
+  delete: 65535,
+  home: 65360,
+  left: 65361,
+  up: 65362,
+  right: 65363,
+  down: 65364,
+  pageup: 65365,
+  pagedown: 65366,
+  end: 65367,
+  insert: 65379,
+  capslock: 65509,
+  f1: 65470,
+  f2: 65471,
+  f3: 65472,
+  f4: 65473,
+  f5: 65474,
+  f6: 65475,
+  f7: 65476,
+  f8: 65477,
+  f9: 65478,
+  f10: 65479,
+  f11: 65480,
+  f12: 65481,
+  shift: 65505,
+  ctrl: 65507,
+  meta: 65515,
+  // XK_Super_L
+  alt: 65513,
+  // XK_Alt_L
+  space: 32
+};
+function toX11Keysym(key) {
+  const named = X11_KEYSYMS[key];
+  if (named !== void 0) return named;
+  const cp = key.codePointAt(0);
+  if (cp === void 0) throw new Error(`Cannot map empty key to X11 keysym`);
+  if (cp >= 32 && cp <= 255) return cp;
+  return 16777216 | cp;
+}
+var DARWIN_KEYCODES = {
+  a: { code: 0 },
+  s: { code: 1 },
+  d: { code: 2 },
+  f: { code: 3 },
+  h: { code: 4 },
+  g: { code: 5 },
+  z: { code: 6 },
+  x: { code: 7 },
+  c: { code: 8 },
+  v: { code: 9 },
+  b: { code: 11 },
+  q: { code: 12 },
+  w: { code: 13 },
+  e: { code: 14 },
+  r: { code: 15 },
+  y: { code: 16 },
+  t: { code: 17 },
+  "1": { code: 18 },
+  "!": { code: 18, shift: true },
+  "2": { code: 19 },
+  "@": { code: 19, shift: true },
+  "3": { code: 20 },
+  "#": { code: 20, shift: true },
+  "4": { code: 21 },
+  "$": { code: 21, shift: true },
+  "6": { code: 22 },
+  "^": { code: 22, shift: true },
+  "5": { code: 23 },
+  "%": { code: 23, shift: true },
+  "=": { code: 24 },
+  "+": { code: 24, shift: true },
+  "9": { code: 25 },
+  "(": { code: 25, shift: true },
+  "7": { code: 26 },
+  "&": { code: 26, shift: true },
+  "-": { code: 27 },
+  "_": { code: 27, shift: true },
+  "8": { code: 28 },
+  "*": { code: 28, shift: true },
+  "0": { code: 29 },
+  ")": { code: 29, shift: true },
+  "]": { code: 30 },
+  "}": { code: 30, shift: true },
+  o: { code: 31 },
+  u: { code: 32 },
+  "[": { code: 33 },
+  "{": { code: 33, shift: true },
+  i: { code: 34 },
+  p: { code: 35 },
+  enter: { code: 36 },
+  l: { code: 37 },
+  j: { code: 38 },
+  "'": { code: 39 },
+  '"': { code: 39, shift: true },
+  k: { code: 40 },
+  ";": { code: 41 },
+  ":": { code: 41, shift: true },
+  "\\": { code: 42 },
+  "|": { code: 42, shift: true },
+  ",": { code: 43 },
+  "<": { code: 43, shift: true },
+  "/": { code: 44 },
+  "?": { code: 44, shift: true },
+  n: { code: 45 },
+  m: { code: 46 },
+  ".": { code: 47 },
+  ">": { code: 47, shift: true },
+  tab: { code: 48 },
+  space: { code: 49 },
+  "`": { code: 50 },
+  "~": { code: 50, shift: true },
+  backspace: { code: 51 },
+  escape: { code: 53 },
+  meta: { code: 55 },
+  shift: { code: 56 },
+  capslock: { code: 57 },
+  alt: { code: 58 },
+  ctrl: { code: 59 },
+  f5: { code: 96 },
+  f6: { code: 97 },
+  f7: { code: 98 },
+  f3: { code: 99 },
+  f8: { code: 100 },
+  f9: { code: 101 },
+  f11: { code: 103 },
+  f10: { code: 109 },
+  f12: { code: 111 },
+  insert: { code: 114 },
+  home: { code: 115 },
+  pageup: { code: 116 },
+  delete: { code: 117 },
+  f4: { code: 118 },
+  end: { code: 119 },
+  f2: { code: 120 },
+  pagedown: { code: 121 },
+  f1: { code: 122 },
+  left: { code: 123 },
+  right: { code: 124 },
+  down: { code: 125 },
+  up: { code: 126 }
+};
+var WIN32_VK_CODES = {
+  backspace: { vk: 8 },
+  tab: { vk: 9 },
+  enter: { vk: 13 },
+  shift: { vk: 16 },
+  ctrl: { vk: 17 },
+  alt: { vk: 18 },
+  capslock: { vk: 20 },
+  escape: { vk: 27 },
+  space: { vk: 32 },
+  pageup: { vk: 33 },
+  pagedown: { vk: 34 },
+  end: { vk: 35 },
+  home: { vk: 36 },
+  left: { vk: 37 },
+  up: { vk: 38 },
+  right: { vk: 39 },
+  down: { vk: 40 },
+  insert: { vk: 45 },
+  delete: { vk: 46 },
+  meta: { vk: 91 },
+  // VK_LWIN
+  f1: { vk: 112 },
+  f2: { vk: 113 },
+  f3: { vk: 114 },
+  f4: { vk: 115 },
+  f5: { vk: 116 },
+  f6: { vk: 117 },
+  f7: { vk: 118 },
+  f8: { vk: 119 },
+  f9: { vk: 120 },
+  f10: { vk: 121 },
+  f11: { vk: 122 },
+  f12: { vk: 123 },
+  ";": { vk: 186 },
+  ":": { vk: 186, shift: true },
+  "=": { vk: 187 },
+  "+": { vk: 187, shift: true },
+  ",": { vk: 188 },
+  "<": { vk: 188, shift: true },
+  "-": { vk: 189 },
+  "_": { vk: 189, shift: true },
+  ".": { vk: 190 },
+  ">": { vk: 190, shift: true },
+  "/": { vk: 191 },
+  "?": { vk: 191, shift: true },
+  "`": { vk: 192 },
+  "~": { vk: 192, shift: true },
+  "[": { vk: 219 },
+  "{": { vk: 219, shift: true },
+  "\\": { vk: 220 },
+  "|": { vk: 220, shift: true },
+  "]": { vk: 221 },
+  "}": { vk: 221, shift: true },
+  "'": { vk: 222 },
+  '"': { vk: 222, shift: true },
+  "!": { vk: 49, shift: true },
+  "@": { vk: 50, shift: true },
+  "#": { vk: 51, shift: true },
+  $: { vk: 52, shift: true },
+  "%": { vk: 53, shift: true },
+  "^": { vk: 54, shift: true },
+  "&": { vk: 55, shift: true },
+  "*": { vk: 56, shift: true },
+  "(": { vk: 57, shift: true },
+  ")": { vk: 48, shift: true }
+};
+function toWin32Vk(key) {
+  const mapped = WIN32_VK_CODES[key];
+  if (mapped) return mapped;
+  if (key.length === 1) {
+    const ch = key.charCodeAt(0);
+    if (ch >= 97 && ch <= 122) return { vk: ch - 32 };
+    if (ch >= 48 && ch <= 57) return { vk: ch };
+  }
+  return null;
+}
+function toXdotoolKey(key) {
+  const map2 = {
+    enter: "Return",
+    tab: "Tab",
+    space: "space",
+    backspace: "BackSpace",
+    delete: "Delete",
+    escape: "Escape",
+    up: "Up",
+    down: "Down",
+    left: "Left",
+    right: "Right",
+    home: "Home",
+    end: "End",
+    pageup: "Prior",
+    pagedown: "Next",
+    insert: "Insert",
+    capslock: "Caps_Lock",
+    ctrl: "ctrl",
+    alt: "alt",
+    shift: "shift",
+    meta: "super",
+    f1: "F1",
+    f2: "F2",
+    f3: "F3",
+    f4: "F4",
+    f5: "F5",
+    f6: "F6",
+    f7: "F7",
+    f8: "F8",
+    f9: "F9",
+    f10: "F10",
+    f11: "F11",
+    f12: "F12",
+    "+": "plus",
+    "-": "minus",
+    "=": "equal",
+    "/": "slash",
+    "\\": "backslash",
+    ",": "comma",
+    ".": "period",
+    ";": "semicolon",
+    "'": "apostrophe",
+    "`": "grave",
+    "[": "bracketleft",
+    "]": "bracketright"
+  };
+  return map2[key] ?? key;
+}
+
+// src/png.ts
+import { deflateSync, inflateSync } from "node:zlib";
+var PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+var CRC_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) {
+      c = (c & 1) !== 0 ? 3988292384 ^ c >>> 1 : c >>> 1;
+    }
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+function crc32(typeAndData) {
+  let c = 4294967295;
+  for (let i = 0; i < typeAndData.length; i++) {
+    c = (CRC_TABLE[(c ^ typeAndData[i]) & 255] ^ c >>> 8) >>> 0;
+  }
+  return (c ^ 4294967295) >>> 0;
+}
+function makeChunk(type, data) {
+  const chunk = Buffer.allocUnsafe(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  chunk.write(type, 4, 4, "ascii");
+  Buffer.from(data.buffer, data.byteOffset, data.byteLength).copy(chunk, 8);
+  const crc = crc32(chunk.subarray(4, 8 + data.length));
+  chunk.writeUInt32BE(crc, 8 + data.length);
+  return chunk;
+}
+function encodePng(width, height, rgba, options = {}) {
+  if (width <= 0 || height <= 0) {
+    throw new Error(`Invalid PNG dimensions: ${width}x${height}`);
+  }
+  const expectedLength = width * height * 4;
+  if (rgba.length < expectedLength) {
+    throw new Error(`RGBA buffer too small: got ${rgba.length}, expected ${expectedLength}`);
+  }
+  const stride = width * 4;
+  const raw = Buffer.allocUnsafe((stride + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const srcOffset = y * stride;
+    const dstOffset = y * (stride + 1);
+    raw[dstOffset] = 1;
+    raw[dstOffset + 1] = rgba[srcOffset];
+    raw[dstOffset + 2] = rgba[srcOffset + 1];
+    raw[dstOffset + 3] = rgba[srcOffset + 2];
+    raw[dstOffset + 4] = rgba[srcOffset + 3];
+    for (let i = 4; i < stride; i++) {
+      raw[dstOffset + 1 + i] = rgba[srcOffset + i] - rgba[srcOffset + i - 4] & 255;
+    }
+  }
+  const ihdr = Buffer.allocUnsafe(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+  const compressed = deflateSync(raw, { level: options.compressionLevel ?? 3 });
+  const ihdrChunk = makeChunk("IHDR", ihdr);
+  const idatChunk = makeChunk("IDAT", compressed);
+  const iendChunk = makeChunk("IEND", new Uint8Array(0));
+  return Buffer.concat([PNG_SIGNATURE, ihdrChunk, idatChunk, iendChunk]);
+}
+function paethPredictor(a, b, c) {
+  const p = a + b - c;
+  const pa = Math.abs(p - a);
+  const pb = Math.abs(p - b);
+  const pc = Math.abs(p - c);
+  if (pa <= pb && pa <= pc) return a;
+  if (pb <= pc) return b;
+  return c;
+}
+function decodePng(pngBytes) {
+  const buf = Buffer.from(pngBytes.buffer, pngBytes.byteOffset, pngBytes.byteLength);
+  if (buf.length < 8 || !buf.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    throw new Error("Invalid PNG signature.");
+  }
+  let offset = 8;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  let interlace = 0;
+  let palette = null;
+  let trns = null;
+  const idatChunks = [];
+  while (offset + 8 <= buf.length) {
+    const length = buf.readUInt32BE(offset);
+    const type = buf.toString("ascii", offset + 4, offset + 8);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    if (dataEnd + 4 > buf.length) {
+      throw new Error(`Truncated PNG chunk "${type}".`);
+    }
+    const chunkData = buf.subarray(dataStart, dataEnd);
+    if (type === "IHDR") {
+      width = chunkData.readUInt32BE(0);
+      height = chunkData.readUInt32BE(4);
+      bitDepth = chunkData[8];
+      colorType = chunkData[9];
+      interlace = chunkData[12];
+    } else if (type === "PLTE") {
+      palette = chunkData;
+    } else if (type === "tRNS") {
+      trns = chunkData;
+    } else if (type === "IDAT") {
+      idatChunks.push(chunkData);
+    } else if (type === "IEND") {
+      break;
+    }
+    offset = dataEnd + 4;
+  }
+  if (width <= 0 || height <= 0) {
+    throw new Error("PNG missing valid IHDR.");
+  }
+  if (interlace !== 0) {
+    throw new Error("Interlaced PNG is not supported.");
+  }
+  if (bitDepth !== 8 && bitDepth !== 16) {
+    throw new Error(`Unsupported PNG bit depth: ${bitDepth}`);
+  }
+  const channelsByColorType = {
+    0: 1,
+    // Grayscale
+    2: 3,
+    // RGB
+    3: 1,
+    // Indexed
+    4: 2,
+    // Grayscale + Alpha
+    6: 4
+    // RGBA
+  };
+  const channels = channelsByColorType[colorType];
+  if (!channels) {
+    throw new Error(`Unsupported PNG color type: ${colorType}`);
+  }
+  const bytesPerSample = bitDepth / 8;
+  const bpp = channels * bytesPerSample;
+  const stride = width * bpp;
+  const inflated = inflateSync(Buffer.concat(idatChunks));
+  if (inflated.length < (stride + 1) * height) {
+    throw new Error("Corrupt PNG IDAT stream: inflated data shorter than image dimensions.");
+  }
+  const unfiltered = new Uint8Array(stride * height);
+  for (let y = 0; y < height; y++) {
+    const filterType = inflated[y * (stride + 1)];
+    const srcRow = y * (stride + 1) + 1;
+    const dstRow = y * stride;
+    const prevRow = (y - 1) * stride;
+    for (let x = 0; x < stride; x++) {
+      const rawByte = inflated[srcRow + x];
+      const a = x >= bpp ? unfiltered[dstRow + x - bpp] : 0;
+      const b = y > 0 ? unfiltered[prevRow + x] : 0;
+      const c = y > 0 && x >= bpp ? unfiltered[prevRow + x - bpp] : 0;
+      let val;
+      switch (filterType) {
+        case 0:
+          val = rawByte;
+          break;
+        case 1:
+          val = rawByte + a & 255;
+          break;
+        case 2:
+          val = rawByte + b & 255;
+          break;
+        case 3:
+          val = rawByte + (a + b >>> 1) & 255;
+          break;
+        case 4:
+          val = rawByte + paethPredictor(a, b, c) & 255;
+          break;
+        default:
+          throw new Error(`Unknown PNG filter type ${filterType} at row ${y}.`);
+      }
+      unfiltered[dstRow + x] = val;
+    }
+  }
+  if (colorType === 6 && bitDepth === 8) {
+    return { width, height, data: unfiltered };
+  }
+  const rgba = new Uint8Array(width * height * 4);
+  const pixelCount = width * height;
+  if (colorType === 2 && bitDepth === 8) {
+    for (let i = 0; i < pixelCount; i++) {
+      const s = i * 3;
+      const d = i * 4;
+      rgba[d] = unfiltered[s];
+      rgba[d + 1] = unfiltered[s + 1];
+      rgba[d + 2] = unfiltered[s + 2];
+      rgba[d + 3] = 255;
+    }
+  } else if (colorType === 0 && bitDepth === 8) {
+    for (let i = 0; i < pixelCount; i++) {
+      const g = unfiltered[i];
+      const d = i * 4;
+      rgba[d] = g;
+      rgba[d + 1] = g;
+      rgba[d + 2] = g;
+      rgba[d + 3] = 255;
+    }
+  } else if (colorType === 4 && bitDepth === 8) {
+    for (let i = 0; i < pixelCount; i++) {
+      const g = unfiltered[i * 2];
+      const a = unfiltered[i * 2 + 1];
+      const d = i * 4;
+      rgba[d] = g;
+      rgba[d + 1] = g;
+      rgba[d + 2] = g;
+      rgba[d + 3] = a;
+    }
+  } else if (colorType === 3 && bitDepth === 8) {
+    if (!palette) throw new Error("Indexed PNG missing PLTE chunk.");
+    for (let i = 0; i < pixelCount; i++) {
+      const idx = unfiltered[i];
+      const p = idx * 3;
+      const d = i * 4;
+      rgba[d] = palette[p] ?? 0;
+      rgba[d + 1] = palette[p + 1] ?? 0;
+      rgba[d + 2] = palette[p + 2] ?? 0;
+      rgba[d + 3] = trns && idx < trns.length ? trns[idx] : 255;
+    }
+  } else {
+    for (let i = 0; i < pixelCount; i++) {
+      const s = i * bpp;
+      const d = i * 4;
+      if (colorType === 6) {
+        rgba[d] = unfiltered[s];
+        rgba[d + 1] = unfiltered[s + 2];
+        rgba[d + 2] = unfiltered[s + 4];
+        rgba[d + 3] = unfiltered[s + 6];
+      } else if (colorType === 2) {
+        rgba[d] = unfiltered[s];
+        rgba[d + 1] = unfiltered[s + 2];
+        rgba[d + 2] = unfiltered[s + 4];
+        rgba[d + 3] = 255;
+      } else if (colorType === 4) {
+        const g = unfiltered[s];
+        rgba[d] = g;
+        rgba[d + 1] = g;
+        rgba[d + 2] = g;
+        rgba[d + 3] = unfiltered[s + 2];
+      } else {
+        const g = unfiltered[s];
+        rgba[d] = g;
+        rgba[d + 1] = g;
+        rgba[d + 2] = g;
+        rgba[d + 3] = 255;
+      }
+    }
+  }
+  return { width, height, data: rgba };
+}
+function cropRgba(src, srcWidth, srcHeight, x, y, cropWidth, cropHeight) {
+  const cx = Math.max(0, Math.min(srcWidth - 1, Math.round(x)));
+  const cy = Math.max(0, Math.min(srcHeight - 1, Math.round(y)));
+  const cw = Math.max(1, Math.min(srcWidth - cx, Math.round(cropWidth)));
+  const ch = Math.max(1, Math.min(srcHeight - cy, Math.round(cropHeight)));
+  if (cx === 0 && cy === 0 && cw === srcWidth && ch === srcHeight) {
+    return { width: srcWidth, height: srcHeight, data: new Uint8Array(src), x: 0, y: 0 };
+  }
+  const out = new Uint8Array(cw * ch * 4);
+  const srcStride = srcWidth * 4;
+  const dstStride = cw * 4;
+  for (let row = 0; row < ch; row++) {
+    const srcStart = (cy + row) * srcStride + cx * 4;
+    out.set(src.subarray(srcStart, srcStart + dstStride), row * dstStride);
+  }
+  return { width: cw, height: ch, data: out, x: cx, y: cy };
+}
+function resizeRgba(src, srcWidth, srcHeight, dstWidth, dstHeight) {
+  if (srcWidth === dstWidth && srcHeight === dstHeight) {
+    return new Uint8Array(src);
+  }
+  const dst = new Uint8Array(dstWidth * dstHeight * 4);
+  const xRatio = srcWidth / dstWidth;
+  const yRatio = srcHeight / dstHeight;
+  for (let dy = 0; dy < dstHeight; dy++) {
+    const sy = (dy + 0.5) * yRatio - 0.5;
+    const y0 = Math.max(0, Math.floor(sy));
+    const y1 = Math.min(srcHeight - 1, y0 + 1);
+    const wy = Math.max(0, sy - y0);
+    const wyInv = 1 - wy;
+    const row0 = y0 * srcWidth * 4;
+    const row1 = y1 * srcWidth * 4;
+    const dstRow = dy * dstWidth * 4;
+    for (let dx = 0; dx < dstWidth; dx++) {
+      const sx = (dx + 0.5) * xRatio - 0.5;
+      const x0 = Math.max(0, Math.floor(sx));
+      const x1 = Math.min(srcWidth - 1, x0 + 1);
+      const wx = Math.max(0, sx - x0);
+      const wxInv = 1 - wx;
+      const p00 = row0 + x0 * 4;
+      const p10 = row0 + x1 * 4;
+      const p01 = row1 + x0 * 4;
+      const p11 = row1 + x1 * 4;
+      const d = dstRow + dx * 4;
+      const w00 = wxInv * wyInv;
+      const w10 = wx * wyInv;
+      const w01 = wxInv * wy;
+      const w11 = wx * wy;
+      dst[d] = Math.round(src[p00] * w00 + src[p10] * w10 + src[p01] * w01 + src[p11] * w11);
+      dst[d + 1] = Math.round(
+        src[p00 + 1] * w00 + src[p10 + 1] * w10 + src[p01 + 1] * w01 + src[p11 + 1] * w11
+      );
+      dst[d + 2] = Math.round(
+        src[p00 + 2] * w00 + src[p10 + 2] * w10 + src[p01 + 2] * w01 + src[p11 + 2] * w11
+      );
+      dst[d + 3] = 255;
+    }
+  }
+  return dst;
+}
+
+// src/backends/jsonl-worker.ts
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
+var JsonlWorker = class {
+  proc = null;
+  rl = null;
+  nextId = 1;
+  pending = /* @__PURE__ */ new Map();
+  stderrTail = "";
+  options;
+  constructor(options) {
+    this.options = options;
+  }
+  get isRunning() {
+    return this.proc !== null && this.proc.exitCode === null && !this.proc.killed;
+  }
+  async start() {
+    if (this.isRunning) return;
+    const child = spawn(this.options.command, this.options.args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ...this.options.env },
+      windowsHide: true
+    });
+    this.proc = child;
+    this.stderrTail = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      this.stderrTail = (this.stderrTail + chunk).slice(-2e3);
+    });
+    const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    this.rl = rl;
+    rl.on("line", (line) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("{")) return;
+      try {
+        const msg = JSON.parse(trimmed);
+        const id = typeof msg.id === "number" ? msg.id : -1;
+        const waiter = this.pending.get(id);
+        if (!waiter) return;
+        this.pending.delete(id);
+        clearTimeout(waiter.timer);
+        if (msg.ok === false || typeof msg.error === "string") {
+          waiter.reject(new Error(String(msg.error ?? "Native bridge request failed")));
+        } else {
+          waiter.resolve(msg);
+        }
+      } catch {
+      }
+    });
+    const failAll = (reason) => {
+      const detail = this.stderrTail.trim();
+      const err = new Error(detail ? `${reason}: ${detail}` : reason);
+      for (const p of this.pending.values()) {
+        clearTimeout(p.timer);
+        p.reject(err);
+      }
+      this.pending.clear();
+    };
+    child.on("error", (err) => {
+      failAll(`Native worker spawn error (${this.options.command}): ${err.message}`);
+    });
+    child.on("close", (code) => {
+      this.proc = null;
+      this.rl = null;
+      if (this.pending.size > 0) {
+        failAll(`Native worker exited unexpectedly (code=${code ?? "null"})`);
+      }
+    });
+  }
+  async request(payload, timeoutMs) {
+    if (!this.isRunning) {
+      await this.start();
+    }
+    if (!this.proc || !this.proc.stdin.writable) {
+      throw new Error(`Native worker "${this.options.command}" is not writable.`);
+    }
+    const id = this.nextId++;
+    const timeout = timeoutMs ?? this.options.requestTimeoutMs ?? 1e4;
+    const line = `${JSON.stringify({ id, ...payload })}
+`;
+    return new Promise((resolve2, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Native worker request "${String(payload.op ?? "unknown")}" timed out after ${timeout}ms.`));
+      }, timeout);
+      timer.unref?.();
+      this.pending.set(id, { resolve: resolve2, reject, timer });
+      this.proc.stdin.write(line, (err) => {
+        if (err) {
+          clearTimeout(timer);
+          this.pending.delete(id);
+          reject(err);
+        }
+      });
+    });
+  }
+  async stop() {
+    if (!this.proc) return;
+    const child = this.proc;
+    this.proc = null;
+    this.rl?.close();
+    this.rl = null;
+    for (const p of this.pending.values()) {
+      clearTimeout(p.timer);
+      p.reject(new Error("Native worker stopped."));
+    }
+    this.pending.clear();
+    try {
+      child.stdin.end();
+    } catch {
+    }
+    child.kill();
+  }
+};
+
+// src/backends/darwin.ts
+var execFileAsync = promisify(execFile);
+var DARWIN_JXA_SCRIPT = `
+ObjC.import("Foundation");
+ObjC.import("CoreGraphics");
+ObjC.import("AppKit");
+ObjC.import("ApplicationServices");
+
+const stdin = $.NSFileHandle.fileHandleWithStandardInput;
+const stdout = $.NSFileHandle.fileHandleWithStandardOutput;
+
+function writeJson(obj) {
+  const str = JSON.stringify(obj) + "\\n";
+  const ns = $(str);
+  const data = ns.dataUsingEncoding($.NSUTF8StringEncoding);
+  stdout.writeData(data);
+}
+
+function getMousePos() {
+  const ev = $.CGEventCreate($());
+  const loc = $.CGEventGetLocation(ev);
+  return { x: Math.round(loc.x), y: Math.round(loc.y) };
+}
+
+function flagsForMods(mods) {
+  let flags = 0;
+  if (!mods) return 0;
+  for (let i = 0; i < mods.length; i++) {
+    const m = mods[i];
+    if (m === "meta") flags |= (1 << 20);
+    else if (m === "shift") flags |= (1 << 17);
+    else if (m === "alt") flags |= (1 << 19);
+    else if (m === "ctrl") flags |= (1 << 18);
+  }
+  return flags;
+}
+
+function collectWindows() {
+  const ws = $.NSWorkspace.sharedWorkspace;
+  const frontApp = ws.frontmostApplication;
+  const frontPid = frontApp ? Number(frontApp.processIdentifier) : -1;
+  const opts = $.kCGWindowListOptionOnScreenOnly | $.kCGWindowListExcludeDesktopElements;
+  const raw = ObjC.deepUnwrap($.CGWindowListCopyWindowInfo(opts, 0)) || [];
+  const list = [];
+  let markedFocused = false;
+  for (let i = 0; i < raw.length; i++) {
+    const w = raw[i];
+    if (!w || Number(w.kCGWindowLayer) !== 0) continue;
+    const owner = String(w.kCGWindowOwnerName || "");
+    const name = String(w.kCGWindowName || "");
+    if (!owner && !name) continue;
+    const pid = Number(w.kCGWindowOwnerPID || 0);
+    const b = w.kCGWindowBounds;
+    const bounds = b && Number(b.Width) > 0 && Number(b.Height) > 0
+      ? {
+          x: Math.round(Number(b.X) || 0),
+          y: Math.round(Number(b.Y) || 0),
+          width: Math.round(Number(b.Width)),
+          height: Math.round(Number(b.Height))
+        }
+      : undefined;
+    const isFront = !markedFocused && pid === frontPid;
+    if (isFront) markedFocused = true;
+    list.push({
+      id: Number(w.kCGWindowNumber || i),
+      title: name || owner,
+      app: owner || undefined,
+      pid: pid || undefined,
+      bounds: bounds,
+      focused: isFront
+    });
+  }
+  return list;
+}
+
+let heldLeft = false;
+let lastClickCount = 1;
+
+function handleCmd(cmd) {
+  const op = cmd.op;
+  if (op === "doctor") {
+    let ax = true;
+    let screen = true;
+    try { ax = Boolean($.AXIsProcessTrusted()); } catch (_) {}
+    try { screen = Boolean($.CGPreflightScreenCaptureAccess()); } catch (_) {}
+    return { id: cmd.id, ok: true, accessibility: ax, screenRecording: screen };
+  }
+  if (op === "displays") {
+    const screens = $.NSScreen.screens;
+    const count = screens.count;
+    const primaryH = count > 0 ? screens.objectAtIndex(0).frame.size.height : 0;
+    const list = [];
+    for (let i = 0; i < count; i++) {
+      const s = screens.objectAtIndex(i);
+      const f = s.frame;
+      const scale = Number(s.backingScaleFactor) || 1;
+      const cgY = primaryH - (f.origin.y + f.size.height);
+      list.push({
+        id: i,
+        name: "macOS Display " + (i + 1),
+        x: Math.round(f.origin.x),
+        y: Math.round(cgY),
+        width: Math.round(f.size.width),
+        height: Math.round(f.size.height),
+        scaleFactor: scale,
+        primary: i === 0
+      });
+    }
+    return { id: cmd.id, ok: true, displays: list };
+  }
+  if (op === "capture") {
+    try {
+      const rect = {
+        origin: { x: Number(cmd.x) || 0, y: Number(cmd.y) || 0 },
+        size: { width: Math.max(1, Number(cmd.width) || 1), height: Math.max(1, Number(cmd.height) || 1) }
+      };
+      const cgImg = $.CGWindowListCreateImage(rect, $.kCGWindowListOptionOnScreenOnly, 0, $.kCGWindowImageDefault);
+      if (!cgImg) return { id: cmd.id, ok: false, error: "CGWindowListCreateImage returned null" };
+      const rep = $.NSBitmapImageRep.alloc.initWithCGImage(cgImg);
+      const pngData = rep.representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());
+      if (!pngData) return { id: cmd.id, ok: false, error: "PNG encoding failed" };
+      const b64 = ObjC.unwrap(pngData.base64EncodedStringWithOptions(0));
+      return { id: cmd.id, ok: true, pngBase64: b64 };
+    } catch (e) {
+      return { id: cmd.id, ok: false, error: String(e) };
+    }
+  }
+  if (op === "windows") {
+    return { id: cmd.id, ok: true, windows: collectWindows() };
+  }
+  if (op === "focus_window") {
+    const wins = collectWindows();
+    const tNeedle = cmd.title ? String(cmd.title).toLowerCase() : "";
+    const aNeedle = cmd.app ? String(cmd.app).toLowerCase() : "";
+    const targetId = cmd.windowId !== undefined ? String(cmd.windowId) : "";
+    let pid = 0;
+    for (let i = 0; i < wins.length; i++) {
+      const w = wins[i];
+      if (targetId && String(w.id) === targetId) { pid = w.pid || 0; break; }
+      if (tNeedle && String(w.title || "").toLowerCase().indexOf(tNeedle) !== -1) { pid = w.pid || 0; break; }
+      if (aNeedle && String(w.app || "").toLowerCase().indexOf(aNeedle) !== -1) { pid = w.pid || 0; break; }
+    }
+    if (pid > 0) {
+      const app = $.NSRunningApplication.runningApplicationWithProcessIdentifier(pid);
+      if (app) {
+        const ok = Boolean(app.activateWithOptions(1 << 1));
+        return { id: cmd.id, ok: true, focused: ok };
+      }
+    }
+    if (aNeedle || tNeedle) {
+      const needle = aNeedle || tNeedle;
+      const apps = $.NSWorkspace.sharedWorkspace.runningApplications;
+      for (let j = 0; j < apps.count; j++) {
+        const a = apps.objectAtIndex(j);
+        const lname = a.localizedName ? ObjC.unwrap(a.localizedName).toLowerCase() : "";
+        if (lname && lname.indexOf(needle) !== -1) {
+          const ok = Boolean(a.activateWithOptions(1 << 1));
+          return { id: cmd.id, ok: true, focused: ok };
+        }
+      }
+    }
+    return { id: cmd.id, ok: true, focused: false };
+  }
+  if (op === "clipboard_get") {
+    const pb = $.NSPasteboard.generalPasteboard;
+    const s = pb.stringForType($.NSPasteboardTypeString);
+    return { id: cmd.id, ok: true, text: s ? String(ObjC.unwrap(s)) : "" };
+  }
+  if (op === "clipboard_set") {
+    const pb = $.NSPasteboard.generalPasteboard;
+    pb.clearContents;
+    pb.setStringForType($(String(cmd.text !== undefined ? cmd.text : "")), $.NSPasteboardTypeString);
+    return { id: cmd.id, ok: true };
+  }
+  if (op === "mouse_pos") {
+    const p = getMousePos();
+    return { id: cmd.id, ok: true, x: p.x, y: p.y };
+  }
+  if (op === "move") {
+    const pt = { x: cmd.x, y: cmd.y };
+    const evType = heldLeft ? $.kCGEventLeftMouseDragged : $.kCGEventMouseMoved;
+    const ev = $.CGEventCreateMouseEvent($(), evType, pt, $.kCGMouseButtonLeft);
+    $.CGEventPost($.kCGHIDEventTap, ev);
+    return { id: cmd.id, ok: true };
+  }
+  if (op === "mouse_down" || op === "mouse_up") {
+    const p = getMousePos();
+    const isDown = op === "mouse_down";
+    const btn = cmd.button || "left";
+    let evType = isDown ? $.kCGEventLeftMouseDown : $.kCGEventLeftMouseUp;
+    let cgBtn = $.kCGMouseButtonLeft;
+    if (btn === "right") {
+      evType = isDown ? $.kCGEventRightMouseDown : $.kCGEventRightMouseUp;
+      cgBtn = $.kCGMouseButtonRight;
+    } else if (btn === "middle") {
+      evType = isDown ? $.kCGEventOtherMouseDown : $.kCGEventOtherMouseUp;
+      cgBtn = $.kCGMouseButtonCenter;
+    } else {
+      heldLeft = isDown;
+    }
+    const ev = $.CGEventCreateMouseEvent($(), evType, p, cgBtn);
+    const clickState = cmd.clickCount || lastClickCount || 1;
+    lastClickCount = isDown ? clickState : 1;
+    $.CGEventSetIntegerValueField(ev, $.kCGMouseEventClickState, clickState);
+    if (cmd.modifiers && cmd.modifiers.length) {
+      $.CGEventSetFlags(ev, flagsForMods(cmd.modifiers));
+    }
+    $.CGEventPost($.kCGHIDEventTap, ev);
+    return { id: cmd.id, ok: true };
+  }
+  if (op === "scroll") {
+    const ev = $.CGEventCreateScrollWheelEvent($(), $.kCGScrollEventUnitLine, 2, -Math.round(cmd.dy || 0), -Math.round(cmd.dx || 0));
+    $.CGEventPost($.kCGHIDEventTap, ev);
+    return { id: cmd.id, ok: true };
+  }
+  if (op === "key_event") {
+    const ev = $.CGEventCreateKeyboardEvent($(), cmd.code, Boolean(cmd.down));
+    if (cmd.modifiers && cmd.modifiers.length) {
+      $.CGEventSetFlags(ev, flagsForMods(cmd.modifiers));
+    }
+    $.CGEventPost($.kCGHIDEventTap, ev);
+    return { id: cmd.id, ok: true };
+  }
+  if (op === "type_text" || op === "type_char") {
+    const str = String(cmd.text !== undefined ? cmd.text : (cmd.char || ""));
+    let i = 0;
+    while (i < str.length) {
+      const end = Math.min(str.length, i + 16);
+      const codes = [];
+      for (let j = i; j < end; j++) codes.push(str.charCodeAt(j));
+      const down = $.CGEventCreateKeyboardEvent($(), 0, true);
+      const up = $.CGEventCreateKeyboardEvent($(), 0, false);
+      $.CGEventKeyboardSetUnicodeString(down, codes.length, codes);
+      $.CGEventKeyboardSetUnicodeString(up, codes.length, codes);
+      $.CGEventPost($.kCGHIDEventTap, down);
+      $.CGEventPost($.kCGHIDEventTap, up);
+      i = end;
+    }
+    return { id: cmd.id, ok: true };
+  }
+  return { id: cmd.id, ok: false, error: "Unknown op: " + op };
+}
+
+let buffer = "";
+while (true) {
+  const data = stdin.availableData;
+  if (!data || data.length === 0) break;
+  const chunk = ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data, $.NSUTF8StringEncoding)) || "";
+  buffer += chunk;
+  let nl;
+  while ((nl = buffer.indexOf("\\n")) !== -1) {
+    const line = buffer.slice(0, nl).trim();
+    buffer = buffer.slice(nl + 1);
+    if (!line) continue;
+    try {
+      const cmd = JSON.parse(line);
+      writeJson(handleCmd(cmd));
+    } catch (err) {
+      writeJson({ id: -1, ok: false, error: String(err) });
+    }
+  }
+}
+`;
+var DarwinBackend = class {
+  name = "darwin-coregraphics";
+  platform = "darwin";
+  worker;
+  customCapturePng;
+  constructor(options = {}) {
+    this.worker = new JsonlWorker(
+      options.workerOptions ?? {
+        command: "/usr/bin/osascript",
+        args: ["-l", "JavaScript", "-e", DARWIN_JXA_SCRIPT]
+      }
+    );
+    this.customCapturePng = options.capturePng;
+  }
+  async init() {
+    await this.worker.start();
+  }
+  async close() {
+    await this.worker.stop();
+  }
+  async getDisplays() {
+    const res = await this.worker.request({ op: "displays" });
+    const list = Array.isArray(res.displays) ? res.displays : [];
+    if (list.length > 0) return list;
+    return [
+      {
+        id: 0,
+        name: "macOS Primary Display",
+        x: 0,
+        y: 0,
+        width: 1440,
+        height: 900,
+        scaleFactor: 2,
+        primary: true
+      }
+    ];
+  }
+  async listWindows() {
+    const res = await this.worker.request({ op: "windows" });
+    return Array.isArray(res.windows) ? res.windows : [];
+  }
+  async getActiveWindow() {
+    const windows = await this.listWindows();
+    return windows.find((w) => w.focused) ?? windows[0] ?? null;
+  }
+  async focusWindow(query) {
+    const res = await this.worker.request({
+      op: "focus_window",
+      title: query.title,
+      app: query.app,
+      windowId: query.id
+    });
+    return Boolean(res.focused);
+  }
+  async getClipboardText() {
+    const res = await this.worker.request({ op: "clipboard_get" });
+    return typeof res.text === "string" ? res.text : "";
+  }
+  async setClipboardText(text) {
+    await this.worker.request({ op: "clipboard_set", text });
+  }
+  async getMousePosition() {
+    const res = await this.worker.request({ op: "mouse_pos" });
+    return { x: Number(res.x ?? 0), y: Number(res.y ?? 0) };
+  }
+  async moveMouse(x, y) {
+    await this.worker.request({ op: "move", x: Math.round(x), y: Math.round(y) });
+  }
+  async mouseDown(button, clickCount = 1, modifiers = []) {
+    await this.worker.request({ op: "mouse_down", button, clickCount, modifiers });
+  }
+  async mouseUp(button, clickCount = 1, modifiers = []) {
+    await this.worker.request({ op: "mouse_up", button, clickCount, modifiers });
+  }
+  async scroll(deltaX, deltaY) {
+    await this.worker.request({ op: "scroll", dx: deltaX, dy: deltaY });
+  }
+  async keyDown(key) {
+    const parsed = parseKeyChord(key, [], "darwin");
+    const entry = DARWIN_KEYCODES[parsed.key];
+    if (!entry) {
+      throw new Error(`Unsupported macOS keyDown key "${key}".`);
+    }
+    if (entry.shift) {
+      await this.worker.request({ op: "key_event", code: DARWIN_KEYCODES.shift.code, down: true });
+    }
+    await this.worker.request({ op: "key_event", code: entry.code, down: true });
+  }
+  async keyUp(key) {
+    const parsed = parseKeyChord(key, [], "darwin");
+    const entry = DARWIN_KEYCODES[parsed.key];
+    if (!entry) {
+      throw new Error(`Unsupported macOS keyUp key "${key}".`);
+    }
+    await this.worker.request({ op: "key_event", code: entry.code, down: false });
+    if (entry.shift) {
+      await this.worker.request({ op: "key_event", code: DARWIN_KEYCODES.shift.code, down: false });
+    }
+  }
+  async keyTap(key, modifiers = []) {
+    const entry = DARWIN_KEYCODES[key];
+    if (!entry) {
+      if (modifiers.length === 0 && Array.from(key).length === 1) {
+        await this.typeText(key);
+        return;
+      }
+      throw new Error(`Unsupported macOS key "${key}".`);
+    }
+    const activeMods = [...modifiers];
+    if (entry.shift && !activeMods.includes("shift")) {
+      activeMods.push("shift");
+    }
+    for (const m of activeMods) {
+      await this.worker.request({ op: "key_event", code: DARWIN_KEYCODES[m].code, down: true, modifiers: activeMods });
+    }
+    await this.worker.request({ op: "key_event", code: entry.code, down: true, modifiers: activeMods });
+    await this.worker.request({ op: "key_event", code: entry.code, down: false, modifiers: activeMods });
+    for (const m of [...activeMods].reverse()) {
+      await this.worker.request({ op: "key_event", code: DARWIN_KEYCODES[m].code, down: false, modifiers: [] });
+    }
+  }
+  async typeText(text) {
+    let chunk = "";
+    const flush = async () => {
+      if (chunk.length > 0) {
+        await this.worker.request({ op: "type_text", text: chunk });
+        chunk = "";
+      }
+    };
+    for (const ch of text) {
+      if (ch === "\r") continue;
+      if (ch === "\n") {
+        await flush();
+        await this.keyTap("enter");
+      } else if (ch === "	") {
+        await flush();
+        await this.keyTap("tab");
+      } else {
+        chunk += ch;
+      }
+    }
+    await flush();
+  }
+  async captureScreen(options = {}) {
+    const displays = await this.getDisplays();
+    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
+    const logicalWidth = options.region ? Math.round(options.region.width) : disp.width;
+    const logicalHeight = options.region ? Math.round(options.region.height) : disp.height;
+    const originX = options.region ? Math.round(options.region.x) : disp.x;
+    const originY = options.region ? Math.round(options.region.y) : disp.y;
+    let pngBytes = null;
+    if (this.customCapturePng) {
+      pngBytes = await this.customCapturePng({ display: disp, region: options.region });
+    } else {
+      try {
+        const res = await this.worker.request(
+          {
+            op: "capture",
+            x: originX,
+            y: originY,
+            width: logicalWidth,
+            height: logicalHeight
+          },
+          8e3
+        );
+        if (typeof res.pngBase64 === "string" && res.pngBase64.length > 0) {
+          pngBytes = Buffer.from(res.pngBase64, "base64");
+        }
+      } catch {
+      }
+      if (!pngBytes) {
+        const dir = mkdtempSync(join(tmpdir(), "handy-mac-"));
+        const outPath = join(dir, "screen.png");
+        try {
+          const args = ["-x", "-t", "png"];
+          if (options.region) {
+            args.push(
+              "-R",
+              `${originX},${originY},${logicalWidth},${logicalHeight}`
+            );
+          } else {
+            args.push("-D", String(disp.id + 1));
+          }
+          args.push(outPath);
+          await execFileAsync("/usr/sbin/screencapture", args, { timeout: 6e3 });
+          pngBytes = readFileSync(outPath);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    }
+    const decoded = decodePng(pngBytes);
+    return {
+      width: decoded.width,
+      height: decoded.height,
+      data: decoded.data,
+      originX,
+      originY,
+      logicalWidth,
+      logicalHeight,
+      scaleFactor: disp.scaleFactor || decoded.width / Math.max(1, logicalWidth),
+      displayId: disp.id
+    };
+  }
+  async doctor() {
+    try {
+      const res = await this.worker.request({ op: "doctor" });
+      const ax = Boolean(res.accessibility);
+      const sr = Boolean(res.screenRecording);
+      return [
+        {
+          name: "macOS Accessibility Permission",
+          ok: ax,
+          detail: ax ? "Granted (CoreGraphics HID events enabled)" : "Not granted \u2014 enable your terminal/MCP host in System Settings -> Privacy & Security -> Accessibility"
+        },
+        {
+          name: "macOS Screen Recording Permission",
+          ok: sr,
+          detail: sr ? "Granted (Screen capture enabled)" : "Not granted \u2014 enable your terminal/MCP host in System Settings -> Privacy & Security -> Screen Recording"
+        }
+      ];
+    } catch (err) {
+      return [
+        {
+          name: "macOS CoreGraphics Bridge",
+          ok: false,
+          detail: err instanceof Error ? err.message : String(err)
+        }
+      ];
+    }
+  }
+};
+
+// src/backends/linux-cli.ts
+import { execFile as execFile2, spawn as spawn2 } from "node:child_process";
+import { mkdtempSync as mkdtempSync2, readFileSync as readFileSync2, rmSync as rmSync2 } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import { join as join2 } from "node:path";
+import { promisify as promisify2 } from "node:util";
+var execFileAsync2 = promisify2(execFile2);
+async function commandExists(cmd) {
+  try {
+    await execFileAsync2("which", [cmd], { timeout: 2e3 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function pipeStdin(cmd, args, input2, timeoutMs = 4e3) {
+  return new Promise((resolve2, reject) => {
+    const child = spawn2(cmd, args, { stdio: ["pipe", "ignore", "pipe"] });
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve2();
+      else reject(new Error(stderr.trim() || `${cmd} exited with code ${code}`));
+    });
+    child.stdin.write(input2, "utf8");
+    child.stdin.end();
+  });
+}
+async function readLinuxClipboard() {
+  const isWayland = Boolean(process.env.WAYLAND_DISPLAY);
+  if (isWayland && await commandExists("wl-paste")) {
+    const { stdout } = await execFileAsync2("wl-paste", ["--no-newline"], { timeout: 3e3 });
+    return stdout;
+  }
+  if (await commandExists("xclip")) {
+    const { stdout } = await execFileAsync2("xclip", ["-selection", "clipboard", "-o"], { timeout: 3e3 });
+    return stdout;
+  }
+  if (await commandExists("xsel")) {
+    const { stdout } = await execFileAsync2("xsel", ["--clipboard", "--output"], { timeout: 3e3 });
+    return stdout;
+  }
+  if (await commandExists("wl-paste")) {
+    const { stdout } = await execFileAsync2("wl-paste", ["--no-newline"], { timeout: 3e3 });
+    return stdout;
+  }
+  throw new Error("No Linux clipboard utility found (install xclip, xsel, or wl-clipboard).");
+}
+async function writeLinuxClipboard(text) {
+  const isWayland = Boolean(process.env.WAYLAND_DISPLAY);
+  if (isWayland && await commandExists("wl-copy")) {
+    await pipeStdin("wl-copy", [], text);
+    return;
+  }
+  if (await commandExists("xclip")) {
+    await pipeStdin("xclip", ["-selection", "clipboard", "-i"], text);
+    return;
+  }
+  if (await commandExists("xsel")) {
+    await pipeStdin("xsel", ["--clipboard", "--input"], text);
+    return;
+  }
+  if (await commandExists("wl-copy")) {
+    await pipeStdin("wl-copy", [], text);
+    return;
+  }
+  throw new Error("No Linux clipboard utility found (install xclip, xsel, or wl-clipboard).");
+}
+var LinuxCliBackend = class {
+  name = "linux-cli";
+  platform = "linux";
+  screenshotTool = null;
+  inputTool = null;
+  wtypeAvailable = false;
+  wmctrlAvailable = false;
+  lastKnownMouse = { x: 0, y: 0 };
+  cachedScreenSize = null;
+  async init() {
+    const isWayland = Boolean(process.env.WAYLAND_DISPLAY);
+    const screenshotCandidates = isWayland ? ["grim", "gnome-screenshot", "maim", "scrot", "import"] : ["maim", "scrot", "import", "gnome-screenshot", "grim"];
+    for (const candidate of screenshotCandidates) {
+      if (await commandExists(candidate)) {
+        this.screenshotTool = candidate;
+        break;
+      }
+    }
+    const inputCandidates = isWayland ? ["ydotool", "xdotool"] : ["xdotool", "ydotool"];
+    for (const candidate of inputCandidates) {
+      if (await commandExists(candidate)) {
+        this.inputTool = candidate;
+        break;
+      }
+    }
+    this.wtypeAvailable = await commandExists("wtype");
+    this.wmctrlAvailable = await commandExists("wmctrl");
+  }
+  async close() {
+  }
+  async getDisplays() {
+    if (!this.cachedScreenSize) {
+      try {
+        const frame = await this.captureScreen();
+        this.cachedScreenSize = { width: frame.width, height: frame.height };
+      } catch {
+        this.cachedScreenSize = { width: 1920, height: 1080 };
+      }
+    }
+    return [
+      {
+        id: 0,
+        name: process.env.WAYLAND_DISPLAY ? `Wayland (${process.env.WAYLAND_DISPLAY})` : "Linux Display",
+        x: 0,
+        y: 0,
+        width: this.cachedScreenSize.width,
+        height: this.cachedScreenSize.height,
+        scaleFactor: 1,
+        primary: true
+      }
+    ];
+  }
+  async listWindows() {
+    if (this.wmctrlAvailable) {
+      try {
+        const { stdout } = await execFileAsync2("wmctrl", ["-lG"], { timeout: 3e3 });
+        let activeHex = "";
+        if (this.inputTool === "xdotool") {
+          try {
+            const { stdout: actOut } = await execFileAsync2("xdotool", ["getactivewindow"], { timeout: 2e3 });
+            const idNum = Number(actOut.trim());
+            if (Number.isFinite(idNum)) activeHex = idNum.toString(16);
+          } catch {
+          }
+        }
+        const results = [];
+        for (const line of stdout.split("\n")) {
+          const m = /^(0x[0-9a-fA-F]+)\s+\S+\s+(-?\d+)\s+(-?\d+)\s+(\d+)\s+(\d+)\s+\S+\s+(.*)$/.exec(line.trim());
+          if (!m) continue;
+          const idHex = m[1];
+          const focused = activeHex ? Number.parseInt(idHex, 16) === Number.parseInt(activeHex, 16) : false;
+          results.push({
+            id: idHex,
+            title: m[6].trim(),
+            bounds: {
+              x: Number(m[2]),
+              y: Number(m[3]),
+              width: Math.max(1, Number(m[4])),
+              height: Math.max(1, Number(m[5]))
+            },
+            focused
+          });
+        }
+        return results;
+      } catch {
+      }
+    }
+    const active = await this.getActiveWindow();
+    return active ? [active] : [];
+  }
+  async getActiveWindow() {
+    if (this.inputTool === "xdotool") {
+      try {
+        const { stdout: idOut } = await execFileAsync2("xdotool", ["getactivewindow"], { timeout: 2e3 });
+        const winId = idOut.trim();
+        if (!winId) return null;
+        const { stdout: nameOut } = await execFileAsync2("xdotool", ["getwindowname", winId], { timeout: 2e3 });
+        const { stdout: geomOut } = await execFileAsync2("xdotool", ["getwindowgeometry", "--shell", winId], {
+          timeout: 2e3
+        });
+        const xm = /^X=(-?\d+)/m.exec(geomOut);
+        const ym = /^Y=(-?\d+)/m.exec(geomOut);
+        const wm = /^WIDTH=(\d+)/m.exec(geomOut);
+        const hm = /^HEIGHT=(\d+)/m.exec(geomOut);
+        return {
+          id: Number(winId) || winId,
+          title: nameOut.trim(),
+          bounds: xm && ym && wm && hm ? {
+            x: Number(xm[1]),
+            y: Number(ym[1]),
+            width: Math.max(1, Number(wm[1])),
+            height: Math.max(1, Number(hm[1]))
+          } : void 0,
+          focused: true
+        };
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  async focusWindow(query) {
+    if (query.id !== void 0 && this.inputTool === "xdotool") {
+      try {
+        await execFileAsync2("xdotool", ["windowactivate", "--sync", String(query.id)], { timeout: 3e3 });
+        return true;
+      } catch {
+      }
+    }
+    const needle = query.title ?? query.app;
+    if (!needle) return false;
+    if (this.wmctrlAvailable) {
+      try {
+        await execFileAsync2("wmctrl", ["-a", needle], { timeout: 3e3 });
+        return true;
+      } catch {
+      }
+    }
+    if (this.inputTool === "xdotool") {
+      try {
+        await execFileAsync2("xdotool", ["search", "--name", needle, "windowactivate"], { timeout: 3e3 });
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+  async getClipboardText() {
+    return readLinuxClipboard();
+  }
+  async setClipboardText(text) {
+    await writeLinuxClipboard(text);
+  }
+  async getMousePosition() {
+    if (this.inputTool === "xdotool") {
+      const { stdout } = await execFileAsync2("xdotool", ["getmouselocation", "--shell"], { timeout: 3e3 });
+      const xm = /^X=(-?\d+)/m.exec(stdout);
+      const ym = /^Y=(-?\d+)/m.exec(stdout);
+      if (xm && ym) {
+        this.lastKnownMouse = { x: Number(xm[1]), y: Number(ym[1]) };
+      }
+    }
+    return { ...this.lastKnownMouse };
+  }
+  async moveMouse(x, y) {
+    const rx = Math.round(x);
+    const ry = Math.round(y);
+    if (this.inputTool === "xdotool") {
+      await execFileAsync2("xdotool", ["mousemove", "--", String(rx), String(ry)], { timeout: 3e3 });
+    } else if (this.inputTool === "ydotool") {
+      await execFileAsync2("ydotool", ["mousemove", "--absolute", "-x", String(rx), "-y", String(ry)], {
+        timeout: 3e3
+      });
+    } else {
+      throw new Error("No Linux input tool found (install xdotool for X11 or ydotool for Wayland).");
+    }
+    this.lastKnownMouse = { x: rx, y: ry };
+  }
+  buttonNum(button) {
+    if (this.inputTool === "ydotool") {
+      return button === "left" ? "0x00" : button === "right" ? "0x01" : "0x02";
+    }
+    return button === "left" ? "1" : button === "middle" ? "2" : "3";
+  }
+  async mouseDown(button) {
+    if (this.inputTool === "xdotool") {
+      await execFileAsync2("xdotool", ["mousedown", this.buttonNum(button)], { timeout: 3e3 });
+    } else if (this.inputTool === "ydotool") {
+      const code = button === "left" ? "0x40" : button === "right" ? "0x41" : "0x42";
+      await execFileAsync2("ydotool", ["click", code], { timeout: 3e3 });
+    } else {
+      throw new Error("No Linux input tool found.");
+    }
+  }
+  async mouseUp(button) {
+    if (this.inputTool === "xdotool") {
+      await execFileAsync2("xdotool", ["mouseup", this.buttonNum(button)], { timeout: 3e3 });
+    } else if (this.inputTool === "ydotool") {
+      const code = button === "left" ? "0x80" : button === "right" ? "0x81" : "0x82";
+      await execFileAsync2("ydotool", ["click", code], { timeout: 3e3 });
+    } else {
+      throw new Error("No Linux input tool found.");
+    }
+  }
+  async scroll(deltaX, deltaY) {
+    if (this.inputTool === "xdotool") {
+      const vSteps = Math.round(Math.abs(deltaY));
+      if (vSteps > 0) {
+        await execFileAsync2("xdotool", ["click", "--repeat", String(vSteps), deltaY < 0 ? "4" : "5"], {
+          timeout: 3e3
+        });
+      }
+      const hSteps = Math.round(Math.abs(deltaX));
+      if (hSteps > 0) {
+        await execFileAsync2("xdotool", ["click", "--repeat", String(hSteps), deltaX < 0 ? "6" : "7"], {
+          timeout: 3e3
+        });
+      }
+    } else if (this.inputTool === "ydotool") {
+      await execFileAsync2(
+        "ydotool",
+        ["mousemove", "--wheel", "-x", String(Math.round(deltaX)), "-y", String(Math.round(-deltaY))],
+        { timeout: 3e3 }
+      );
+    } else {
+      throw new Error("No Linux input tool found.");
+    }
+  }
+  async keyDown(key) {
+    const parsed = parseKeyChord(key, [], "linux");
+    if (this.inputTool === "xdotool") {
+      await execFileAsync2("xdotool", ["keydown", toXdotoolKey(parsed.key)], { timeout: 3e3 });
+      return;
+    }
+    throw new Error("keyDown requires xdotool or native X11 backend.");
+  }
+  async keyUp(key) {
+    const parsed = parseKeyChord(key, [], "linux");
+    if (this.inputTool === "xdotool") {
+      await execFileAsync2("xdotool", ["keyup", toXdotoolKey(parsed.key)], { timeout: 3e3 });
+      return;
+    }
+    throw new Error("keyUp requires xdotool or native X11 backend.");
+  }
+  async keyTap(key, modifiers = []) {
+    const xdoKey = [...modifiers.map((m) => toXdotoolKey(m)), toXdotoolKey(key)].join("+");
+    if (this.inputTool === "xdotool") {
+      await execFileAsync2("xdotool", ["key", "--clearmodifiers", xdoKey], { timeout: 3e3 });
+      return;
+    }
+    if (this.wtypeAvailable) {
+      const args = [];
+      for (const m of modifiers) {
+        args.push("-M", m === "meta" ? "logo" : m);
+      }
+      args.push("-k", toXdotoolKey(key));
+      for (const m of [...modifiers].reverse()) {
+        args.push("-m", m === "meta" ? "logo" : m);
+      }
+      await execFileAsync2("wtype", args, { timeout: 3e3 });
+      return;
+    }
+    throw new Error("No Linux keyboard tool found (install xdotool or wtype).");
+  }
+  async typeText(text) {
+    if (this.inputTool === "xdotool") {
+      await execFileAsync2("xdotool", ["type", "--clearmodifiers", "--delay", "8", "--", text], { timeout: 1e4 });
+      return;
+    }
+    if (this.wtypeAvailable) {
+      await execFileAsync2("wtype", ["--", text], { timeout: 1e4 });
+      return;
+    }
+    if (this.inputTool === "ydotool") {
+      await execFileAsync2("ydotool", ["type", "--", text], { timeout: 1e4 });
+      return;
+    }
+    throw new Error("No Linux typing tool found (install xdotool, wtype, or ydotool).");
+  }
+  async captureScreen(options = {}) {
+    if (!this.screenshotTool) {
+      throw new Error("No Linux screenshot utility found (grim, maim, scrot, import, or gnome-screenshot).");
+    }
+    let pngBytes = null;
+    let alreadyCropped = false;
+    if (this.screenshotTool === "grim") {
+      const args = options.region ? ["-g", `${options.region.x},${options.region.y} ${options.region.width}x${options.region.height}`, "-t", "png", "-"] : ["-t", "png", "-"];
+      const { stdout } = await execFileAsync2("grim", args, {
+        encoding: "buffer",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 5e3
+      });
+      pngBytes = stdout;
+      alreadyCropped = Boolean(options.region);
+    } else if (this.screenshotTool === "maim") {
+      const args = options.region ? ["-g", `${options.region.width}x${options.region.height}+${options.region.x}+${options.region.y}`, "--format=png"] : ["--format=png"];
+      const { stdout } = await execFileAsync2("maim", args, {
+        encoding: "buffer",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 5e3
+      });
+      pngBytes = stdout;
+      alreadyCropped = Boolean(options.region);
+    } else if (this.screenshotTool === "import") {
+      const { stdout } = await execFileAsync2("import", ["-window", "root", "png:-"], {
+        encoding: "buffer",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout: 5e3
+      });
+      pngBytes = stdout;
+    }
+    if (!pngBytes) {
+      const dir = mkdtempSync2(join2(tmpdir2(), "handy-shot-"));
+      const outPath = join2(dir, "screen.png");
+      try {
+        if (this.screenshotTool === "scrot") {
+          await execFileAsync2("scrot", ["--overwrite", outPath], { timeout: 5e3 });
+        } else {
+          await execFileAsync2("gnome-screenshot", ["-f", outPath], { timeout: 5e3 });
+        }
+        pngBytes = readFileSync2(outPath);
+      } finally {
+        rmSync2(dir, { recursive: true, force: true });
+      }
+    }
+    const decoded = decodePng(pngBytes);
+    if (!alreadyCropped) {
+      this.cachedScreenSize = { width: decoded.width, height: decoded.height };
+    }
+    if (options.region && !alreadyCropped) {
+      const cropped = cropRgba(
+        decoded.data,
+        decoded.width,
+        decoded.height,
+        options.region.x,
+        options.region.y,
+        options.region.width,
+        options.region.height
+      );
+      return {
+        width: cropped.width,
+        height: cropped.height,
+        data: cropped.data,
+        originX: cropped.x,
+        originY: cropped.y,
+        logicalWidth: cropped.width,
+        logicalHeight: cropped.height,
+        scaleFactor: 1,
+        displayId: 0
+      };
+    }
+    return {
+      width: decoded.width,
+      height: decoded.height,
+      data: decoded.data,
+      originX: options.region?.x ?? 0,
+      originY: options.region?.y ?? 0,
+      logicalWidth: decoded.width,
+      logicalHeight: decoded.height,
+      scaleFactor: 1,
+      displayId: 0
+    };
+  }
+  async doctor() {
+    await this.init();
+    return [
+      {
+        name: "Linux Screenshot Tool",
+        ok: this.screenshotTool !== null,
+        detail: this.screenshotTool ? `Using ${this.screenshotTool}` : "Missing (install grim, maim, or scrot)"
+      },
+      {
+        name: "Linux Input Tool",
+        ok: this.inputTool !== null || this.wtypeAvailable,
+        detail: this.inputTool || this.wtypeAvailable ? `Using ${[this.inputTool, this.wtypeAvailable ? "wtype" : null].filter(Boolean).join(", ")}` : "Missing (install xdotool or ydotool/wtype)"
+      }
+    ];
+  }
+};
+
+// src/backends/linux-x11.ts
+import { existsSync, readFileSync as readFileSync3 } from "node:fs";
+import { createConnection } from "node:net";
+import { homedir, hostname as hostname3 } from "node:os";
+import { join as join3 } from "node:path";
+function pad4(n) {
+  return n + 3 & ~3;
+}
+function parseX11Display(displayEnv) {
+  if (displayEnv.startsWith("unix:/") && !/^unix:\d/.test(displayEnv)) {
+    return {
+      socketPath: displayEnv.slice("unix:".length),
+      displayNum: 0,
+      screenNum: 0
+    };
+  }
+  const tcpMatch = /^tcp:([^:]+):(\d+)$/.exec(displayEnv.trim());
+  if (tcpMatch) {
+    return {
+      host: tcpMatch[1],
+      port: Number(tcpMatch[2]),
+      displayNum: 0,
+      screenNum: 0
+    };
+  }
+  const match = /^([a-zA-Z0-9._-]*):(\d+)(?:\.(\d+))?$/.exec(displayEnv.trim());
+  if (!match) {
+    throw new Error(`Invalid X11 DISPLAY "${displayEnv}". Expected format like ":0" or "127.0.0.1:0".`);
+  }
+  const hostPart = match[1] ?? "";
+  const displayNum = Number(match[2]);
+  const screenNum = match[3] ? Number(match[3]) : 0;
+  if (hostPart === "" || hostPart === "unix") {
+    return {
+      socketPath: `/tmp/.X11-unix/X${displayNum}`,
+      displayNum,
+      screenNum
+    };
+  }
+  return {
+    host: hostPart,
+    port: 6e3 + displayNum,
+    displayNum,
+    screenNum
+  };
+}
+function readXauthorityCookie(displayNum) {
+  const xauthPath = process.env.XAUTHORITY?.trim() || join3(homedir(), ".Xauthority");
+  if (!existsSync(xauthPath)) return null;
+  try {
+    const buf = readFileSync3(xauthPath);
+    let offset = 0;
+    const localHost = hostname3();
+    const dispStr = String(displayNum);
+    let fallback = null;
+    const readChunk = () => {
+      if (offset + 2 > buf.length) return null;
+      const len = buf.readUInt16BE(offset);
+      offset += 2;
+      if (offset + len > buf.length) return null;
+      const slice = buf.subarray(offset, offset + len);
+      offset += len;
+      return slice;
+    };
+    while (offset + 2 <= buf.length) {
+      const family = buf.readUInt16BE(offset);
+      offset += 2;
+      const addr = readChunk();
+      const num = readChunk();
+      const name = readChunk();
+      const data = readChunk();
+      if (!addr || !num || !name || !data) break;
+      const numText = num.toString("utf8");
+      const nameText = name.toString("ascii");
+      if (numText !== "" && numText !== dispStr) continue;
+      if (nameText !== "MIT-MAGIC-COOKIE-1") continue;
+      if (family === 65535 || family === 256 && addr.toString("utf8") === localHost) {
+        return { name: nameText, data: Buffer.from(data) };
+      }
+      if (!fallback) {
+        fallback = { name: nameText, data: Buffer.from(data) };
+      }
+    }
+    return fallback;
+  } catch {
+    return null;
+  }
+}
+function maskShift(mask) {
+  if (mask === 0) return 0;
+  let s = 0;
+  let m = mask >>> 0;
+  while ((m & 1) === 0 && s < 32) {
+    m >>>= 1;
+    s++;
+  }
+  return s;
+}
+var LinuxX11Backend = class {
+  name = "linux-x11";
+  platform = "linux";
+  displayStr;
+  socket = null;
+  rxBuf = Buffer.alloc(0);
+  seq = 0;
+  pending = /* @__PURE__ */ new Map();
+  screenInfo = null;
+  minKeycode = 8;
+  maxKeycode = 255;
+  xtestOpcode = null;
+  randrOpcode = null;
+  keysymMap = /* @__PURE__ */ new Map();
+  modifierKeycodes = {
+    shift: 50,
+    ctrl: 37,
+    alt: 64,
+    meta: 133
+  };
+  scratchKeycode = 254;
+  atomCache = /* @__PURE__ */ new Map();
+  initialized = false;
+  constructor(options = {}) {
+    this.displayStr = options.display ?? process.env.DISPLAY ?? ":0";
+  }
+  async init() {
+    if (this.initialized && this.socket && !this.socket.destroyed) return;
+    const target = parseX11Display(this.displayStr);
+    const socket = await new Promise((resolve2, reject) => {
+      const s = target.socketPath ? createConnection({ path: target.socketPath }) : createConnection({ host: target.host ?? "127.0.0.1", port: target.port ?? 6e3 });
+      const onErr = (err) => {
+        s.removeListener("connect", onConnect);
+        reject(err);
+      };
+      const onConnect = () => {
+        s.removeListener("error", onErr);
+        s.setNoDelay(true);
+        resolve2(s);
+      };
+      s.once("error", onErr);
+      s.once("connect", onConnect);
+    });
+    this.socket = socket;
+    this.seq = 0;
+    this.rxBuf = Buffer.alloc(0);
+    this.pending.clear();
+    const auth = readXauthorityCookie(target.displayNum);
+    const authName = auth ? Buffer.from(auth.name, "ascii") : Buffer.alloc(0);
+    const authData = auth ? auth.data : Buffer.alloc(0);
+    const setupReq = Buffer.alloc(12 + pad4(authName.length) + pad4(authData.length));
+    setupReq[0] = 108;
+    setupReq[1] = 0;
+    setupReq.writeUInt16LE(11, 2);
+    setupReq.writeUInt16LE(0, 4);
+    setupReq.writeUInt16LE(authName.length, 6);
+    setupReq.writeUInt16LE(authData.length, 8);
+    authName.copy(setupReq, 12);
+    authData.copy(setupReq, 12 + pad4(authName.length));
+    const setupReply = await new Promise((resolve2, reject) => {
+      let buf = Buffer.alloc(0);
+      const onData = (chunk) => {
+        buf = Buffer.concat([buf, chunk]);
+        if (buf.length < 8) return;
+        const additionalWords = buf.readUInt16LE(6);
+        const totalBytes = 8 + additionalWords * 4;
+        if (buf.length < totalBytes) return;
+        cleanup();
+        const packet = buf.subarray(0, totalBytes);
+        this.rxBuf = buf.subarray(totalBytes);
+        resolve2(packet);
+      };
+      const onErr = (err) => {
+        cleanup();
+        reject(err);
+      };
+      const onClose = () => {
+        cleanup();
+        reject(new Error("X11 socket closed during setup handshake."));
+      };
+      const cleanup = () => {
+        socket.off("data", onData);
+        socket.off("error", onErr);
+        socket.off("close", onClose);
+      };
+      socket.on("data", onData);
+      socket.on("error", onErr);
+      socket.on("close", onClose);
+      socket.write(setupReq);
+    });
+    const status = setupReply[0];
+    if (status !== 1) {
+      const reasonLen = setupReply[1] ?? 0;
+      const reason = setupReply.subarray(8, 8 + reasonLen).toString("utf8");
+      socket.destroy();
+      throw new Error(`X11 authentication/setup failed (status=${status}): ${reason || "access denied"}`);
+    }
+    this.parseSetupBody(setupReply.subarray(8), target.screenNum);
+    socket.on("data", (chunk) => {
+      this.rxBuf = this.rxBuf.length === 0 ? chunk : Buffer.concat([this.rxBuf, chunk]);
+      this.drainIncoming();
+    });
+    socket.on("error", (err) => {
+      for (const p of this.pending.values()) p.reject(err);
+      this.pending.clear();
+    });
+    socket.on("close", () => {
+      this.initialized = false;
+      const err = new Error("X11 connection closed.");
+      for (const p of this.pending.values()) p.reject(err);
+      this.pending.clear();
+    });
+    const bigReq = await this.queryExtension("BIG-REQUESTS");
+    if (bigReq.present) {
+      const enableReq = Buffer.from([bigReq.majorOpcode, 0, 1, 0]);
+      await this.sendRequestWithReply(enableReq);
+    }
+    const xtest = await this.queryExtension("XTEST");
+    this.xtestOpcode = xtest.present ? xtest.majorOpcode : null;
+    const randr = await this.queryExtension("RANDR");
+    this.randrOpcode = randr.present ? randr.majorOpcode : null;
+    await this.loadKeyboardMapping();
+    this.initialized = true;
+    if (this.rxBuf.length > 0) this.drainIncoming();
+  }
+  parseSetupBody(body, screenIndex) {
+    const vendorLen = body.readUInt16LE(16);
+    const numScreens = body[20];
+    const numFormats = body[21];
+    const imageByteOrder = body[22];
+    this.minKeycode = body[26];
+    this.maxKeycode = body[27];
+    let offset = 32 + pad4(vendorLen);
+    const formats = /* @__PURE__ */ new Map();
+    for (let i = 0; i < numFormats; i++) {
+      const depth = body[offset];
+      const bpp = body[offset + 1];
+      const scanlinePad = body[offset + 2];
+      formats.set(depth, { bpp, scanlinePad });
+      offset += 8;
+    }
+    let chosenScreen = null;
+    for (let s = 0; s < numScreens; s++) {
+      const root = body.readUInt32LE(offset);
+      const width = body.readUInt16LE(offset + 20);
+      const height = body.readUInt16LE(offset + 22);
+      const rootVisual = body.readUInt32LE(offset + 32);
+      const rootDepth = body[offset + 38];
+      const numDepths = body[offset + 39];
+      offset += 40;
+      let redMask = 16711680;
+      let greenMask = 65280;
+      let blueMask = 255;
+      for (let d = 0; d < numDepths; d++) {
+        const numVisuals = body.readUInt16LE(offset + 2);
+        offset += 8;
+        for (let v = 0; v < numVisuals; v++) {
+          const visualId = body.readUInt32LE(offset);
+          if (visualId === rootVisual) {
+            redMask = body.readUInt32LE(offset + 8);
+            greenMask = body.readUInt32LE(offset + 12);
+            blueMask = body.readUInt32LE(offset + 16);
+          }
+          offset += 24;
+        }
+      }
+      const fmt = formats.get(rootDepth) ?? { bpp: 32, scanlinePad: 32 };
+      const info = {
+        root,
+        width,
+        height,
+        rootDepth,
+        rootVisual,
+        bitsPerPixel: fmt.bpp,
+        scanlinePad: fmt.scanlinePad,
+        imageByteOrder,
+        redMask,
+        greenMask,
+        blueMask
+      };
+      if (s === screenIndex || !chosenScreen) {
+        chosenScreen = info;
+      }
+    }
+    if (!chosenScreen) {
+      throw new Error("X11 server reported zero screens.");
+    }
+    this.screenInfo = chosenScreen;
+  }
+  drainIncoming() {
+    while (this.rxBuf.length >= 32) {
+      const packetType = this.rxBuf[0];
+      if (packetType === 1) {
+        const extraWords = this.rxBuf.readUInt32LE(4);
+        const totalLen = 32 + extraWords * 4;
+        if (this.rxBuf.length < totalLen) return;
+        const seq = this.rxBuf.readUInt16LE(2);
+        const packet = this.rxBuf.subarray(0, totalLen);
+        this.rxBuf = this.rxBuf.subarray(totalLen);
+        const waiter = this.pending.get(seq);
+        if (waiter) {
+          this.pending.delete(seq);
+          waiter.resolve(packet);
+        }
+      } else if (packetType === 0) {
+        const errCode = this.rxBuf[1];
+        const seq = this.rxBuf.readUInt16LE(2);
+        const majorOp = this.rxBuf[10];
+        const minorOp = this.rxBuf.readUInt16LE(8);
+        this.rxBuf = this.rxBuf.subarray(32);
+        const waiter = this.pending.get(seq);
+        if (waiter) {
+          this.pending.delete(seq);
+          waiter.reject(new Error(`X11 protocol error code=${errCode} opcode=${majorOp}:${minorOp} seq=${seq}`));
+        }
+      } else {
+        this.rxBuf = this.rxBuf.subarray(32);
+      }
+    }
+  }
+  nextSeq() {
+    this.seq = this.seq + 1 & 65535;
+    return this.seq;
+  }
+  sendOneWay(req) {
+    if (!this.socket || this.socket.destroyed) {
+      throw new Error("X11 socket is not connected.");
+    }
+    this.nextSeq();
+    this.socket.write(req);
+  }
+  sendRequestWithReply(req, timeoutMs = 4e3) {
+    if (!this.socket || this.socket.destroyed) {
+      return Promise.reject(new Error("X11 socket is not connected."));
+    }
+    const seq = this.nextSeq();
+    return new Promise((resolve2, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pending.delete(seq)) {
+          reject(new Error(`X11 request opcode=${req[0]} seq=${seq} timed out after ${timeoutMs}ms`));
+        }
+      }, timeoutMs);
+      this.pending.set(seq, {
+        resolve: (pkt) => {
+          clearTimeout(timer);
+          resolve2(pkt);
+        },
+        reject: (err) => {
+          clearTimeout(timer);
+          reject(err);
+        }
+      });
+      this.socket.write(req);
+    });
+  }
+  async sync() {
+    const req = Buffer.from([43, 0, 1, 0]);
+    await this.sendRequestWithReply(req);
+  }
+  async queryExtension(name) {
+    const nameBytes = Buffer.from(name, "ascii");
+    const padded = pad4(nameBytes.length);
+    const req = Buffer.alloc(8 + padded);
+    req[0] = 98;
+    req[1] = 0;
+    req.writeUInt16LE((8 + padded) / 4, 2);
+    req.writeUInt16LE(nameBytes.length, 4);
+    nameBytes.copy(req, 8);
+    const reply = await this.sendRequestWithReply(req);
+    return {
+      present: reply[8] === 1,
+      majorOpcode: reply[9]
+    };
+  }
+  async loadKeyboardMapping() {
+    const count = this.maxKeycode - this.minKeycode + 1;
+    const req = Buffer.alloc(8);
+    req[0] = 101;
+    req[1] = 0;
+    req.writeUInt16LE(2, 2);
+    req[4] = this.minKeycode;
+    req[5] = count;
+    const reply = await this.sendRequestWithReply(req);
+    const keysymsPerKeycode = reply[1];
+    if (keysymsPerKeycode === 0) return;
+    this.keysymMap.clear();
+    let unusedCandidate = this.maxKeycode;
+    for (let i = 0; i < count; i++) {
+      const keycode = this.minKeycode + i;
+      const baseOffset = 32 + i * keysymsPerKeycode * 4;
+      let allZero = true;
+      for (let col = 0; col < Math.min(2, keysymsPerKeycode); col++) {
+        const symOffset = baseOffset + col * 4;
+        if (symOffset + 4 > reply.length) break;
+        const sym = reply.readUInt32LE(symOffset);
+        if (sym !== 0) {
+          allZero = false;
+          if (!this.keysymMap.has(sym)) {
+            this.keysymMap.set(sym, { keycode, shift: col === 1 });
+          }
+        }
+      }
+      if (allZero && keycode >= 96) {
+        unusedCandidate = keycode;
+      }
+    }
+    this.scratchKeycode = unusedCandidate;
+    this.modifierKeycodes = {
+      shift: this.keysymMap.get(X11_KEYSYMS.shift)?.keycode ?? 50,
+      ctrl: this.keysymMap.get(X11_KEYSYMS.ctrl)?.keycode ?? 37,
+      alt: this.keysymMap.get(X11_KEYSYMS.alt)?.keycode ?? 64,
+      meta: this.keysymMap.get(X11_KEYSYMS.meta)?.keycode ?? 133
+    };
+  }
+  sendXTestEvent(type, detail, x = 0, y = 0) {
+    if (this.xtestOpcode === null) {
+      throw new Error(
+        "X11 server does not advertise the XTEST extension needed for synthetic keyboard/mouse button injection."
+      );
+    }
+    const req = Buffer.alloc(36);
+    req[0] = this.xtestOpcode;
+    req[1] = 2;
+    req.writeUInt16LE(9, 2);
+    req[4] = type;
+    req[5] = detail & 255;
+    req.writeUInt32LE(0, 8);
+    req.writeUInt32LE(this.screenInfo?.root ?? 0, 12);
+    req.writeInt16LE(Math.round(x), 24);
+    req.writeInt16LE(Math.round(y), 26);
+    this.sendOneWay(req);
+  }
+  async resolveKeycodeForKeysym(keysym) {
+    const existing = this.keysymMap.get(keysym);
+    if (existing) return existing;
+    for (const [sym, entry] of this.keysymMap.entries()) {
+      if (entry.keycode === this.scratchKeycode) {
+        this.keysymMap.delete(sym);
+      }
+    }
+    const req = Buffer.alloc(12);
+    req[0] = 100;
+    req[1] = 1;
+    req.writeUInt16LE(3, 2);
+    req[4] = this.scratchKeycode;
+    req[5] = 1;
+    req.writeUInt32LE(keysym >>> 0, 8);
+    this.sendOneWay(req);
+    await this.sync();
+    const mapped = { keycode: this.scratchKeycode, shift: false };
+    this.keysymMap.set(keysym, mapped);
+    return mapped;
+  }
+  async close() {
+    this.initialized = false;
+    if (this.socket) {
+      this.socket.destroy();
+      this.socket = null;
+    }
+    this.pending.clear();
+    this.atomCache.clear();
+  }
+  async ensureReady() {
+    if (!this.initialized || !this.screenInfo || !this.socket || this.socket.destroyed) {
+      await this.init();
+    }
+    return this.screenInfo;
+  }
+  async getDisplays() {
+    const screen = await this.ensureReady();
+    if (this.randrOpcode !== null) {
+      try {
+        const verReq = Buffer.alloc(12);
+        verReq[0] = this.randrOpcode;
+        verReq[1] = 0;
+        verReq.writeUInt16LE(3, 2);
+        verReq.writeUInt32LE(1, 4);
+        verReq.writeUInt32LE(5, 8);
+        const verRep = await this.sendRequestWithReply(verReq);
+        const maj = verRep.readUInt32LE(8);
+        const min = verRep.readUInt32LE(12);
+        if (maj > 1 || maj === 1 && min >= 5) {
+          const monReq = Buffer.alloc(12);
+          monReq[0] = this.randrOpcode;
+          monReq[1] = 42;
+          monReq.writeUInt16LE(3, 2);
+          monReq.writeUInt32LE(screen.root, 4);
+          monReq[8] = 1;
+          const monRep = await this.sendRequestWithReply(monReq);
+          const nMonitors = monRep.readUInt32LE(12);
+          if (nMonitors > 0) {
+            const displays = [];
+            let off = 32;
+            for (let i = 0; i < nMonitors && off + 24 <= monRep.length; i++) {
+              const primary = monRep[off + 4] === 1;
+              const nOutput = monRep.readUInt16LE(off + 6);
+              const mx = monRep.readInt16LE(off + 8);
+              const my = monRep.readInt16LE(off + 10);
+              const mw = monRep.readUInt16LE(off + 12);
+              const mh = monRep.readUInt16LE(off + 14);
+              displays.push({
+                id: i,
+                name: `X11 Monitor ${i}`,
+                x: mx,
+                y: my,
+                width: mw,
+                height: mh,
+                scaleFactor: 1,
+                primary: primary || i === 0
+              });
+              off += 24 + nOutput * 4;
+            }
+            if (displays.length > 0) return displays;
+          }
+        }
+      } catch {
+      }
+    }
+    return [
+      {
+        id: 0,
+        name: `X11 Screen (${this.displayStr})`,
+        x: 0,
+        y: 0,
+        width: screen.width,
+        height: screen.height,
+        scaleFactor: 1,
+        primary: true
+      }
+    ];
+  }
+  async internAtom(name) {
+    const cached2 = this.atomCache.get(name);
+    if (cached2 !== void 0) return cached2;
+    const nameBytes = Buffer.from(name, "ascii");
+    const padded = pad4(nameBytes.length);
+    const req = Buffer.alloc(8 + padded);
+    req[0] = 16;
+    req[1] = 0;
+    req.writeUInt16LE((8 + padded) / 4, 2);
+    req.writeUInt16LE(nameBytes.length, 4);
+    nameBytes.copy(req, 8);
+    const reply = await this.sendRequestWithReply(req);
+    const atom = reply.readUInt32LE(8);
+    this.atomCache.set(name, atom);
+    return atom;
+  }
+  async getProperty(window, propertyAtom) {
+    const req = Buffer.alloc(24);
+    req[0] = 20;
+    req[1] = 0;
+    req.writeUInt16LE(6, 2);
+    req.writeUInt32LE(window >>> 0, 4);
+    req.writeUInt32LE(propertyAtom >>> 0, 8);
+    req.writeUInt32LE(0, 12);
+    req.writeUInt32LE(0, 16);
+    req.writeUInt32LE(1024, 20);
+    const reply = await this.sendRequestWithReply(req);
+    const format = reply[1];
+    if (format === 0) return { format: 0, value: Buffer.alloc(0) };
+    const valueLen = reply.readUInt32LE(16);
+    const byteCount = valueLen * (format / 8);
+    return {
+      format,
+      value: reply.subarray(32, Math.min(reply.length, 32 + byteCount))
+    };
+  }
+  async getActiveWindowId(root) {
+    try {
+      const netActive = await this.internAtom("_NET_ACTIVE_WINDOW");
+      const prop = await this.getProperty(root, netActive);
+      if (prop.format === 32 && prop.value.length >= 4) {
+        const id = prop.value.readUInt32LE(0);
+        if (id > 0 && id !== root) return id;
+      }
+    } catch {
+    }
+    try {
+      const reply = await this.sendRequestWithReply(Buffer.from([43, 0, 1, 0]));
+      const focus = reply.readUInt32LE(8);
+      if (focus > 1 && focus !== root) return focus;
+    } catch {
+    }
+    return 0;
+  }
+  async inspectX11Window(winId, root, activeId, netWmNameAtom, netWmPidAtom) {
+    try {
+      let title = "";
+      const utf8Name = await this.getProperty(winId, netWmNameAtom);
+      if (utf8Name.format === 8 && utf8Name.value.length > 0) {
+        title = utf8Name.value.toString("utf8").replace(/\0+$/g, "").trim();
+      }
+      if (!title) {
+        const wmName = await this.getProperty(winId, 39);
+        if (wmName.format === 8 && wmName.value.length > 0) {
+          title = wmName.value.toString("utf8").replace(/\0+$/g, "").trim();
+        }
+      }
+      let app;
+      const wmClass = await this.getProperty(winId, 67);
+      if (wmClass.format === 8 && wmClass.value.length > 0) {
+        const parts = wmClass.value.toString("utf8").split("\0").map((s) => s.trim()).filter(Boolean);
+        app = parts[1] ?? parts[0];
+      }
+      if (!title && !app) return null;
+      let pid;
+      const pidProp = await this.getProperty(winId, netWmPidAtom);
+      if (pidProp.format === 32 && pidProp.value.length >= 4) {
+        const p = pidProp.value.readUInt32LE(0);
+        if (p > 0) pid = p;
+      }
+      let bounds;
+      try {
+        const geomReq = Buffer.alloc(8);
+        geomReq[0] = 14;
+        geomReq.writeUInt16LE(2, 2);
+        geomReq.writeUInt32LE(winId >>> 0, 4);
+        const geomRep = await this.sendRequestWithReply(geomReq);
+        let wx = geomRep.readInt16LE(12);
+        let wy = geomRep.readInt16LE(14);
+        const ww = geomRep.readUInt16LE(16);
+        const wh = geomRep.readUInt16LE(18);
+        try {
+          const transReq = Buffer.alloc(16);
+          transReq[0] = 40;
+          transReq.writeUInt16LE(4, 2);
+          transReq.writeUInt32LE(winId >>> 0, 4);
+          transReq.writeUInt32LE(root >>> 0, 8);
+          const transRep = await this.sendRequestWithReply(transReq);
+          wx = transRep.readInt16LE(12);
+          wy = transRep.readInt16LE(14);
+        } catch {
+        }
+        if (ww > 0 && wh > 0) {
+          bounds = { x: wx, y: wy, width: ww, height: wh };
+        }
+      } catch {
+      }
+      return {
+        id: winId,
+        title: title || app || `Window ${winId}`,
+        app,
+        pid,
+        bounds,
+        focused: winId === activeId
+      };
+    } catch {
+      return null;
+    }
+  }
+  async listWindows() {
+    const screen = await this.ensureReady();
+    const activeId = await this.getActiveWindowId(screen.root);
+    const netClientList = await this.internAtom("_NET_CLIENT_LIST");
+    const netWmName = await this.internAtom("_NET_WM_NAME");
+    const netWmPid = await this.internAtom("_NET_WM_PID");
+    const windowIds = [];
+    try {
+      const listProp = await this.getProperty(screen.root, netClientList);
+      if (listProp.format === 32 && listProp.value.length >= 4) {
+        for (let off = 0; off + 4 <= listProp.value.length; off += 4) {
+          const id = listProp.value.readUInt32LE(off);
+          if (id > 0) windowIds.push(id);
+        }
+      }
+    } catch {
+    }
+    if (windowIds.length === 0) {
+      try {
+        const treeReq = Buffer.alloc(8);
+        treeReq[0] = 15;
+        treeReq.writeUInt16LE(2, 2);
+        treeReq.writeUInt32LE(screen.root, 4);
+        const treeRep = await this.sendRequestWithReply(treeReq);
+        const numChildren = treeRep.readUInt16LE(16);
+        for (let i = 0; i < numChildren && 32 + (i + 1) * 4 <= treeRep.length; i++) {
+          const cid = treeRep.readUInt32LE(32 + i * 4);
+          if (cid > 0) windowIds.push(cid);
+        }
+      } catch {
+      }
+    }
+    if (activeId > 0 && !windowIds.includes(activeId)) {
+      windowIds.unshift(activeId);
+    }
+    const windows = [];
+    for (const id of windowIds) {
+      const info = await this.inspectX11Window(id, screen.root, activeId, netWmName, netWmPid);
+      if (info) windows.push(info);
+    }
+    return windows;
+  }
+  async getActiveWindow() {
+    const screen = await this.ensureReady();
+    const activeId = await this.getActiveWindowId(screen.root);
+    if (!activeId) return null;
+    const netWmName = await this.internAtom("_NET_WM_NAME");
+    const netWmPid = await this.internAtom("_NET_WM_PID");
+    return this.inspectX11Window(activeId, screen.root, activeId, netWmName, netWmPid);
+  }
+  async focusWindow(query) {
+    const screen = await this.ensureReady();
+    const windows = await this.listWindows();
+    const titleNeedle = query.title?.toLowerCase();
+    const appNeedle = query.app?.toLowerCase();
+    const target = windows.find((w) => {
+      if (query.id !== void 0 && String(w.id) === String(query.id)) return true;
+      if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
+      if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
+      return false;
+    });
+    if (!target) return false;
+    const winId = typeof target.id === "number" ? target.id : Number(target.id);
+    if (!Number.isFinite(winId) || winId <= 0) return false;
+    const netActive = await this.internAtom("_NET_ACTIVE_WINDOW");
+    const sendEv = Buffer.alloc(44);
+    sendEv[0] = 25;
+    sendEv[1] = 0;
+    sendEv.writeUInt16LE(11, 2);
+    sendEv.writeUInt32LE(screen.root, 4);
+    sendEv.writeUInt32LE(1572864, 8);
+    sendEv[12] = 33;
+    sendEv[13] = 32;
+    sendEv.writeUInt32LE(winId >>> 0, 16);
+    sendEv.writeUInt32LE(netActive >>> 0, 20);
+    sendEv.writeUInt32LE(2, 24);
+    sendEv.writeUInt32LE(0, 28);
+    sendEv.writeUInt32LE(0, 32);
+    this.sendOneWay(sendEv);
+    const raiseReq = Buffer.alloc(16);
+    raiseReq[0] = 12;
+    raiseReq.writeUInt16LE(4, 2);
+    raiseReq.writeUInt32LE(winId >>> 0, 4);
+    raiseReq.writeUInt16LE(64, 8);
+    raiseReq.writeUInt32LE(0, 12);
+    this.sendOneWay(raiseReq);
+    const focusReq = Buffer.alloc(12);
+    focusReq[0] = 42;
+    focusReq[1] = 2;
+    focusReq.writeUInt16LE(3, 2);
+    focusReq.writeUInt32LE(winId >>> 0, 4);
+    focusReq.writeUInt32LE(0, 8);
+    this.sendOneWay(focusReq);
+    await this.sync();
+    return true;
+  }
+  async getClipboardText() {
+    return readLinuxClipboard();
+  }
+  async setClipboardText(text) {
+    await writeLinuxClipboard(text);
+  }
+  async getMousePosition() {
+    const screen = await this.ensureReady();
+    const req = Buffer.alloc(8);
+    req[0] = 38;
+    req[1] = 0;
+    req.writeUInt16LE(2, 2);
+    req.writeUInt32LE(screen.root, 4);
+    const reply = await this.sendRequestWithReply(req);
+    return {
+      x: reply.readInt16LE(16),
+      y: reply.readInt16LE(18)
+    };
+  }
+  async moveMouse(x, y) {
+    const screen = await this.ensureReady();
+    const cx = Math.max(0, Math.min(screen.width - 1, Math.round(x)));
+    const cy = Math.max(0, Math.min(screen.height - 1, Math.round(y)));
+    if (this.xtestOpcode !== null) {
+      this.sendXTestEvent(6, 0, cx, cy);
+    } else {
+      const req = Buffer.alloc(24);
+      req[0] = 41;
+      req[1] = 0;
+      req.writeUInt16LE(6, 2);
+      req.writeUInt32LE(0, 4);
+      req.writeUInt32LE(screen.root, 8);
+      req.writeInt16LE(cx, 20);
+      req.writeInt16LE(cy, 22);
+      this.sendOneWay(req);
+    }
+    await this.sync();
+  }
+  buttonCode(button) {
+    switch (button) {
+      case "left":
+        return 1;
+      case "middle":
+        return 2;
+      case "right":
+        return 3;
+    }
+  }
+  async mouseDown(button) {
+    await this.ensureReady();
+    this.sendXTestEvent(4, this.buttonCode(button));
+    await this.sync();
+  }
+  async mouseUp(button) {
+    await this.ensureReady();
+    this.sendXTestEvent(5, this.buttonCode(button));
+    await this.sync();
+  }
+  async scroll(deltaX, deltaY) {
+    await this.ensureReady();
+    const vSteps = Math.round(Math.abs(deltaY));
+    const vButton = deltaY < 0 ? 4 : 5;
+    for (let i = 0; i < vSteps; i++) {
+      this.sendXTestEvent(4, vButton);
+      this.sendXTestEvent(5, vButton);
+    }
+    const hSteps = Math.round(Math.abs(deltaX));
+    const hButton = deltaX < 0 ? 6 : 7;
+    for (let i = 0; i < hSteps; i++) {
+      this.sendXTestEvent(4, hButton);
+      this.sendXTestEvent(5, hButton);
+    }
+    await this.sync();
+  }
+  async keyDown(key) {
+    await this.ensureReady();
+    const parsed = parseKeyChord(key, [], "linux");
+    const sym = toX11Keysym(parsed.key);
+    const resolved = await this.resolveKeycodeForKeysym(sym);
+    if (resolved.shift) {
+      this.sendXTestEvent(2, this.modifierKeycodes.shift);
+    }
+    this.sendXTestEvent(2, resolved.keycode);
+    await this.sync();
+  }
+  async keyUp(key) {
+    await this.ensureReady();
+    const parsed = parseKeyChord(key, [], "linux");
+    const sym = toX11Keysym(parsed.key);
+    const resolved = await this.resolveKeycodeForKeysym(sym);
+    this.sendXTestEvent(3, resolved.keycode);
+    if (resolved.shift) {
+      this.sendXTestEvent(3, this.modifierKeycodes.shift);
+    }
+    await this.sync();
+  }
+  async keyTap(key, modifiers = []) {
+    await this.ensureReady();
+    const sym = toX11Keysym(key);
+    const resolved = await this.resolveKeycodeForKeysym(sym);
+    const activeMods = [...modifiers];
+    if (resolved.shift && !activeMods.includes("shift")) {
+      activeMods.push("shift");
+    }
+    for (const m of activeMods) {
+      this.sendXTestEvent(2, this.modifierKeycodes[m]);
+    }
+    this.sendXTestEvent(2, resolved.keycode);
+    this.sendXTestEvent(3, resolved.keycode);
+    for (let i = activeMods.length - 1; i >= 0; i--) {
+      this.sendXTestEvent(3, this.modifierKeycodes[activeMods[i]]);
+    }
+    await this.sync();
+  }
+  async typeText(text) {
+    await this.ensureReady();
+    for (const ch of Array.from(text)) {
+      if (ch === "\r") continue;
+      if (ch === "\n") {
+        await this.keyTap("enter");
+        continue;
+      }
+      if (ch === "	") {
+        await this.keyTap("tab");
+        continue;
+      }
+      const cp = ch.codePointAt(0);
+      const sym = cp >= 32 && cp <= 255 ? cp : 16777216 | cp;
+      const resolved = await this.resolveKeycodeForKeysym(sym);
+      if (resolved.shift) {
+        this.sendXTestEvent(2, this.modifierKeycodes.shift);
+      }
+      this.sendXTestEvent(2, resolved.keycode);
+      this.sendXTestEvent(3, resolved.keycode);
+      if (resolved.shift) {
+        this.sendXTestEvent(3, this.modifierKeycodes.shift);
+      }
+      await this.sync();
+    }
+  }
+  async captureScreen(options = {}) {
+    const screen = await this.ensureReady();
+    const displays = await this.getDisplays();
+    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
+    const rx = options.region ? Math.max(0, Math.min(screen.width - 1, Math.round(options.region.x))) : disp.x;
+    const ry = options.region ? Math.max(0, Math.min(screen.height - 1, Math.round(options.region.y))) : disp.y;
+    const rw = options.region ? Math.max(1, Math.min(screen.width - rx, Math.round(options.region.width))) : Math.min(disp.width, screen.width - rx);
+    const rh = options.region ? Math.max(1, Math.min(screen.height - ry, Math.round(options.region.height))) : Math.min(disp.height, screen.height - ry);
+    const bytesPerPixel = Math.max(2, Math.floor(screen.bitsPerPixel / 8));
+    const padBytes = screen.scanlinePad / 8;
+    const scanlineStride = Math.ceil(rw * bytesPerPixel / padBytes) * padBytes;
+    const rowsPerBand = Math.max(1, Math.min(rh, Math.floor(4 * 1024 * 1024 / Math.max(1, scanlineStride))));
+    const rgba = new Uint8Array(rw * rh * 4);
+    const rShift = maskShift(screen.redMask);
+    const gShift = maskShift(screen.greenMask);
+    const bShift = maskShift(screen.blueMask);
+    const msb = screen.imageByteOrder === 1;
+    for (let bandY = 0; bandY < rh; bandY += rowsPerBand) {
+      const bandH = Math.min(rowsPerBand, rh - bandY);
+      const req = Buffer.alloc(20);
+      req[0] = 73;
+      req[1] = 2;
+      req.writeUInt16LE(5, 2);
+      req.writeUInt32LE(screen.root, 4);
+      req.writeInt16LE(rx, 8);
+      req.writeInt16LE(ry + bandY, 10);
+      req.writeUInt16LE(rw, 12);
+      req.writeUInt16LE(bandH, 14);
+      req.writeUInt32LE(4294967295, 16);
+      let reply;
+      try {
+        reply = await this.sendRequestWithReply(req);
+      } catch (err) {
+        if (err instanceof Error && err.message.includes("code=8")) {
+          const fallback = new LinuxCliBackend();
+          await fallback.init();
+          return fallback.captureScreen(options);
+        }
+        throw err;
+      }
+      const data = reply.subarray(32);
+      for (let row = 0; row < bandH; row++) {
+        const srcRowStart = row * scanlineStride;
+        const dstRowStart = (bandY + row) * rw * 4;
+        if (bytesPerPixel === 4) {
+          for (let col = 0; col < rw; col++) {
+            const s = srcRowStart + col * 4;
+            const pixel = msb ? data.readUInt32BE(s) : data.readUInt32LE(s);
+            const d = dstRowStart + col * 4;
+            rgba[d] = (pixel & screen.redMask) >>> rShift & 255;
+            rgba[d + 1] = (pixel & screen.greenMask) >>> gShift & 255;
+            rgba[d + 2] = (pixel & screen.blueMask) >>> bShift & 255;
+            rgba[d + 3] = 255;
+          }
+        } else if (bytesPerPixel === 3) {
+          for (let col = 0; col < rw; col++) {
+            const s = srcRowStart + col * 3;
+            const pixel = msb ? data[s] << 16 | data[s + 1] << 8 | data[s + 2] : data[s] | data[s + 1] << 8 | data[s + 2] << 16;
+            const d = dstRowStart + col * 4;
+            rgba[d] = (pixel & screen.redMask) >>> rShift & 255;
+            rgba[d + 1] = (pixel & screen.greenMask) >>> gShift & 255;
+            rgba[d + 2] = (pixel & screen.blueMask) >>> bShift & 255;
+            rgba[d + 3] = 255;
+          }
+        } else {
+          for (let col = 0; col < rw; col++) {
+            const s = srcRowStart + col * 2;
+            const pixel = msb ? data.readUInt16BE(s) : data.readUInt16LE(s);
+            const d = dstRowStart + col * 4;
+            rgba[d] = (pixel >>> 11 & 31) * 255 / 31;
+            rgba[d + 1] = (pixel >>> 5 & 63) * 255 / 63;
+            rgba[d + 2] = (pixel & 31) * 255 / 31;
+            rgba[d + 3] = 255;
+          }
+        }
+      }
+    }
+    return {
+      width: rw,
+      height: rh,
+      data: rgba,
+      originX: rx,
+      originY: ry,
+      logicalWidth: rw,
+      logicalHeight: rh,
+      scaleFactor: 1,
+      displayId: disp.id
+    };
+  }
+  async doctor() {
+    const checks = [];
+    try {
+      const screen = await this.ensureReady();
+      checks.push({
+        name: "X11 Socket Connection",
+        ok: true,
+        detail: `Connected to ${this.displayStr} (${screen.width}x${screen.height}, depth=${screen.rootDepth})`
+      });
+      checks.push({
+        name: "XTEST Input Extension",
+        ok: this.xtestOpcode !== null,
+        detail: this.xtestOpcode !== null ? `Available (opcode ${this.xtestOpcode})` : "Missing XTEST extension on X server"
+      });
+    } catch (err) {
+      checks.push({
+        name: "X11 Socket Connection",
+        ok: false,
+        detail: err instanceof Error ? err.message : String(err)
+      });
+    }
+    return checks;
+  }
+};
+
+// src/font.ts
+var GLYPHS_5X7 = {
+  " ": [0, 0, 0, 0, 0, 0, 0],
+  "!": [4, 4, 4, 4, 4, 0, 4],
+  '"': [10, 10, 4, 0, 0, 0, 0],
+  "#": [10, 10, 31, 10, 31, 10, 10],
+  $: [4, 15, 20, 14, 5, 30, 4],
+  "%": [24, 25, 2, 4, 8, 19, 3],
+  "&": [12, 18, 20, 8, 21, 18, 13],
+  "'": [4, 4, 2, 0, 0, 0, 0],
+  "(": [2, 4, 8, 8, 8, 4, 2],
+  ")": [8, 4, 2, 2, 2, 4, 8],
+  "*": [0, 4, 21, 14, 21, 4, 0],
+  "+": [0, 4, 4, 31, 4, 4, 0],
+  ",": [0, 0, 0, 0, 6, 4, 8],
+  "-": [0, 0, 0, 31, 0, 0, 0],
+  ".": [0, 0, 0, 0, 0, 6, 6],
+  "/": [1, 2, 2, 4, 8, 8, 16],
+  "0": [14, 17, 19, 21, 25, 17, 14],
+  "1": [4, 12, 4, 4, 4, 4, 14],
+  "2": [14, 17, 1, 6, 8, 16, 31],
+  "3": [31, 2, 4, 6, 1, 17, 14],
+  "4": [2, 6, 10, 18, 31, 2, 2],
+  "5": [31, 16, 30, 1, 1, 17, 14],
+  "6": [6, 8, 16, 30, 17, 17, 14],
+  "7": [31, 1, 2, 4, 8, 8, 8],
+  "8": [14, 17, 17, 14, 17, 17, 14],
+  "9": [14, 17, 17, 15, 1, 2, 12],
+  ":": [0, 6, 6, 0, 6, 6, 0],
+  ";": [0, 6, 6, 0, 6, 4, 8],
+  "<": [2, 4, 8, 16, 8, 4, 2],
+  "=": [0, 0, 31, 0, 31, 0, 0],
+  ">": [8, 4, 2, 1, 2, 4, 8],
+  "?": [14, 17, 1, 2, 4, 0, 4],
+  "@": [14, 17, 23, 21, 23, 16, 14],
+  A: [14, 17, 17, 31, 17, 17, 17],
+  B: [30, 17, 17, 30, 17, 17, 30],
+  C: [14, 17, 16, 16, 16, 17, 14],
+  D: [28, 18, 17, 17, 17, 18, 28],
+  E: [31, 16, 16, 30, 16, 16, 31],
+  F: [31, 16, 16, 30, 16, 16, 16],
+  G: [14, 17, 16, 23, 17, 17, 15],
+  H: [17, 17, 17, 31, 17, 17, 17],
+  I: [14, 4, 4, 4, 4, 4, 14],
+  J: [7, 2, 2, 2, 2, 18, 12],
+  K: [17, 18, 20, 24, 20, 18, 17],
+  L: [16, 16, 16, 16, 16, 16, 31],
+  M: [17, 27, 21, 21, 17, 17, 17],
+  N: [17, 25, 21, 19, 17, 17, 17],
+  O: [14, 17, 17, 17, 17, 17, 14],
+  P: [30, 17, 17, 30, 16, 16, 16],
+  Q: [14, 17, 17, 17, 21, 18, 13],
+  R: [30, 17, 17, 30, 20, 18, 17],
+  S: [15, 16, 16, 14, 1, 1, 30],
+  T: [31, 4, 4, 4, 4, 4, 4],
+  U: [17, 17, 17, 17, 17, 17, 14],
+  V: [17, 17, 17, 17, 17, 10, 4],
+  W: [17, 17, 17, 21, 21, 27, 17],
+  X: [17, 17, 10, 4, 10, 17, 17],
+  Y: [17, 17, 10, 4, 4, 4, 4],
+  Z: [31, 1, 2, 4, 8, 16, 31],
+  "[": [14, 8, 8, 8, 8, 8, 14],
+  "\\": [16, 8, 8, 4, 2, 2, 1],
+  "]": [14, 2, 2, 2, 2, 2, 14],
+  "^": [4, 10, 17, 0, 0, 0, 0],
+  _: [0, 0, 0, 0, 0, 0, 31],
+  "`": [8, 4, 2, 0, 0, 0, 0],
+  a: [0, 0, 14, 1, 15, 17, 15],
+  b: [16, 16, 30, 17, 17, 17, 30],
+  c: [0, 0, 14, 17, 16, 17, 14],
+  d: [1, 1, 15, 17, 17, 17, 15],
+  e: [0, 0, 14, 17, 31, 16, 14],
+  f: [6, 8, 30, 8, 8, 8, 8],
+  g: [0, 15, 17, 17, 15, 1, 14],
+  h: [16, 16, 30, 17, 17, 17, 17],
+  i: [4, 0, 12, 4, 4, 4, 14],
+  j: [2, 0, 6, 2, 2, 18, 12],
+  k: [16, 16, 18, 20, 24, 20, 18],
+  l: [12, 4, 4, 4, 4, 4, 14],
+  m: [0, 0, 26, 21, 21, 21, 21],
+  n: [0, 0, 30, 17, 17, 17, 17],
+  o: [0, 0, 14, 17, 17, 17, 14],
+  p: [0, 0, 30, 17, 30, 16, 16],
+  q: [0, 0, 15, 17, 15, 1, 1],
+  r: [0, 0, 22, 25, 16, 16, 16],
+  s: [0, 0, 15, 16, 14, 1, 30],
+  t: [8, 8, 30, 8, 8, 9, 6],
+  u: [0, 0, 17, 17, 17, 19, 13],
+  v: [0, 0, 17, 17, 17, 10, 4],
+  w: [0, 0, 17, 17, 21, 21, 10],
+  x: [0, 0, 17, 10, 4, 10, 17],
+  y: [0, 0, 17, 17, 15, 1, 14],
+  z: [0, 0, 31, 2, 4, 8, 31],
+  "{": [2, 4, 4, 8, 4, 4, 2],
+  "|": [4, 4, 4, 4, 4, 4, 4],
+  "}": [8, 4, 4, 2, 4, 4, 8],
+  "~": [0, 8, 21, 2, 0, 0, 0]
+};
+var FALLBACK_GLYPH = [
+  31,
+  17,
+  21,
+  17,
+  21,
+  17,
+  31
+];
+function blendPixel(rgba, width, height, x, y, color) {
+  const ix = x | 0;
+  const iy = y | 0;
+  if (ix < 0 || iy < 0 || ix >= width || iy >= height) return;
+  const alpha = color[3];
+  if (alpha <= 0) return;
+  const idx = (iy * width + ix) * 4;
+  if (alpha >= 255) {
+    rgba[idx] = color[0];
+    rgba[idx + 1] = color[1];
+    rgba[idx + 2] = color[2];
+    rgba[idx + 3] = 255;
+    return;
+  }
+  const inv = 255 - alpha;
+  rgba[idx] = (color[0] * alpha + rgba[idx] * inv + 127) / 255 | 0;
+  rgba[idx + 1] = (color[1] * alpha + rgba[idx + 1] * inv + 127) / 255 | 0;
+  rgba[idx + 2] = (color[2] * alpha + rgba[idx + 2] * inv + 127) / 255 | 0;
+  rgba[idx + 3] = 255;
+}
+function fillRect(rgba, width, height, x, y, rectWidth, rectHeight, color) {
+  const x0 = Math.max(0, Math.floor(x));
+  const y0 = Math.max(0, Math.floor(y));
+  const x1 = Math.min(width, Math.ceil(x + rectWidth));
+  const y1 = Math.min(height, Math.ceil(y + rectHeight));
+  if (x1 <= x0 || y1 <= y0) return;
+  for (let py = y0; py < y1; py++) {
+    for (let px = x0; px < x1; px++) {
+      blendPixel(rgba, width, height, px, py, color);
+    }
+  }
+}
+function strokeRect(rgba, width, height, x, y, rectWidth, rectHeight, color, thickness = 1) {
+  fillRect(rgba, width, height, x, y, rectWidth, thickness, color);
+  fillRect(rgba, width, height, x, y + rectHeight - thickness, rectWidth, thickness, color);
+  fillRect(rgba, width, height, x, y + thickness, thickness, rectHeight - thickness * 2, color);
+  fillRect(
+    rgba,
+    width,
+    height,
+    x + rectWidth - thickness,
+    y + thickness,
+    thickness,
+    rectHeight - thickness * 2,
+    color
+  );
+}
+function drawLine(rgba, width, height, x0, y0, x1, y1, color) {
+  let cx = Math.round(x0);
+  let cy = Math.round(y0);
+  const tx = Math.round(x1);
+  const ty = Math.round(y1);
+  const dx = Math.abs(tx - cx);
+  const dy = -Math.abs(ty - cy);
+  const sx = cx < tx ? 1 : -1;
+  const sy = cy < ty ? 1 : -1;
+  let err = dx + dy;
+  for (; ; ) {
+    blendPixel(rgba, width, height, cx, cy, color);
+    if (cx === tx && cy === ty) break;
+    const e2 = 2 * err;
+    if (e2 >= dy) {
+      err += dy;
+      cx += sx;
+    }
+    if (e2 <= dx) {
+      err += dx;
+      cy += sy;
+    }
+  }
+}
+function drawCircleRing(rgba, width, height, cx, cy, radius, thickness, color) {
+  const rOuter = radius + thickness / 2;
+  const rInner = Math.max(0, radius - thickness / 2);
+  const rOuterSq = rOuter * rOuter;
+  const rInnerSq = rInner * rInner;
+  const minX = Math.max(0, Math.floor(cx - rOuter - 1));
+  const maxX = Math.min(width - 1, Math.ceil(cx + rOuter + 1));
+  const minY = Math.max(0, Math.floor(cy - rOuter - 1));
+  const maxY = Math.min(height - 1, Math.ceil(cy + rOuter + 1));
+  for (let py = minY; py <= maxY; py++) {
+    for (let px = minX; px <= maxX; px++) {
+      const dx = px - cx;
+      const dy = py - cy;
+      const distSq = dx * dx + dy * dy;
+      if (distSq >= rInnerSq && distSq <= rOuterSq) {
+        blendPixel(rgba, width, height, px, py, color);
+      }
+    }
+  }
+}
+function measureText(text, scale = 1) {
+  const chars = Array.from(text);
+  if (chars.length === 0) return { width: 0, height: 7 * scale };
+  return {
+    width: (chars.length * 6 - 1) * scale,
+    height: 7 * scale
+  };
+}
+function drawText(rgba, width, height, x, y, text, color, scale = 1) {
+  const chars = Array.from(text);
+  let cursorX = Math.round(x);
+  const startY = Math.round(y);
+  for (const ch of chars) {
+    const glyph = GLYPHS_5X7[ch] ?? FALLBACK_GLYPH;
+    for (let row = 0; row < 7; row++) {
+      const rowBits = glyph[row];
+      for (let col = 0; col < 5; col++) {
+        if ((rowBits & 1 << 4 - col) !== 0) {
+          if (scale === 1) {
+            blendPixel(rgba, width, height, cursorX + col, startY + row, color);
+          } else {
+            fillRect(rgba, width, height, cursorX + col * scale, startY + row * scale, scale, scale, color);
+          }
+        }
+      }
+    }
+    cursorX += 6 * scale;
+  }
+}
+function drawBadge(rgba, width, height, x, y, text, options = {}) {
+  const scale = options.scale ?? 1;
+  const padX = options.padX ?? 4 * scale;
+  const padY = options.padY ?? 3 * scale;
+  const bg = options.bg ?? [15, 23, 42, 220];
+  const fg = options.fg ?? [248, 250, 252, 255];
+  const border = options.border;
+  const metrics = measureText(text, scale);
+  const bw = metrics.width + padX * 2;
+  const bh = metrics.height + padY * 2;
+  fillRect(rgba, width, height, x, y, bw, bh, bg);
+  if (border) {
+    strokeRect(rgba, width, height, x, y, bw, bh, border, 1);
+  }
+  drawText(rgba, width, height, x + padX, y + padY, text, fg, scale);
+  return { width: bw, height: bh };
+}
+
+// src/backends/virtual.ts
+var VirtualDesktopBackend = class _VirtualDesktopBackend {
+  name = "virtual";
+  platform = "virtual";
+  width;
+  height;
+  mouse;
+  heldButtons = /* @__PURE__ */ new Set();
+  heldKeys = /* @__PURE__ */ new Set();
+  lastClickTime = 0;
+  lastClickPos = { x: -1, y: -1 };
+  clickStreak = 0;
+  state = {
+    activeWindowId: "workbench",
+    focusedField: null,
+    fields: {
+      name: "",
+      notes: "",
+      scratchpad: ""
+    },
+    clipboard: "",
+    selectedAll: false,
+    submittedValue: "",
+    counter: 0,
+    lastButton: null,
+    lastClickCount: 0,
+    scrollOffset: 0,
+    cardPosition: { x: 760, y: 150 },
+    draggingCard: false,
+    dragOffset: { x: 0, y: 0 },
+    events: ["Virtual desktop initialized"]
+  };
+  static LAYOUT = {
+    workbenchWindow: { x: 80, y: 80, width: 580, height: 630 },
+    scratchpadWindow: { x: 720, y: 310, width: 490, height: 360 },
+    scratchpadInput: { x: 745, y: 365, width: 440, height: 280 },
+    nameInput: { x: 120, y: 150, width: 360, height: 44 },
+    notesInput: { x: 120, y: 230, width: 360, height: 44 },
+    submitButton: { x: 120, y: 305, width: 150, height: 42 },
+    counterButton: { x: 295, y: 305, width: 185, height: 42 },
+    clearButton: { x: 500, y: 305, width: 120, height: 42 },
+    scrollBox: { x: 120, y: 390, width: 500, height: 280 },
+    cardSize: { width: 220, height: 110 }
+  };
+  constructor(options = {}) {
+    this.width = options.width ?? 1280;
+    this.height = options.height ?? 800;
+    this.mouse = { x: Math.round(this.width / 2), y: Math.round(this.height / 2) };
+  }
+  async init() {
+  }
+  async close() {
+    this.heldButtons.clear();
+    this.heldKeys.clear();
+  }
+  async getDisplays() {
+    return [
+      {
+        id: 0,
+        name: "Handy Virtual Display",
+        x: 0,
+        y: 0,
+        width: this.width,
+        height: this.height,
+        scaleFactor: 1,
+        primary: true
+      }
+    ];
+  }
+  async listWindows() {
+    const L = _VirtualDesktopBackend.LAYOUT;
+    return [
+      {
+        id: "workbench",
+        title: "Agent Control Workbench",
+        app: "HandyWorkbench",
+        bounds: { ...L.workbenchWindow },
+        focused: this.state.activeWindowId === "workbench"
+      },
+      {
+        id: "scratchpad",
+        title: "Notes Scratchpad",
+        app: "Scratchpad",
+        bounds: { ...L.scratchpadWindow },
+        focused: this.state.activeWindowId === "scratchpad"
+      }
+    ];
+  }
+  async getActiveWindow() {
+    const wins = await this.listWindows();
+    return wins.find((w) => w.focused) ?? wins[0] ?? null;
+  }
+  async focusWindow(query) {
+    const wins = await this.listWindows();
+    const titleNeedle = query.title?.toLowerCase();
+    const appNeedle = query.app?.toLowerCase();
+    const match = wins.find((w) => {
+      if (query.id !== void 0 && String(w.id) === String(query.id)) return true;
+      if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
+      if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
+      return false;
+    });
+    if (!match) return false;
+    this.state.activeWindowId = match.id;
+    if (this.state.activeWindowId === "scratchpad") {
+      this.state.focusedField = "scratchpad";
+    }
+    this.pushEvent(`Focused window "${match.title}"`);
+    return true;
+  }
+  async getClipboardText() {
+    return this.state.clipboard;
+  }
+  async setClipboardText(text) {
+    this.state.clipboard = text;
+  }
+  async getMousePosition() {
+    return { ...this.mouse };
+  }
+  async moveMouse(x, y) {
+    this.mouse = {
+      x: Math.max(0, Math.min(this.width - 1, Math.round(x))),
+      y: Math.max(0, Math.min(this.height - 1, Math.round(y)))
+    };
+    if (this.state.draggingCard && this.heldButtons.has("left")) {
+      this.state.cardPosition = {
+        x: Math.max(40, Math.min(this.width - 260, this.mouse.x - this.state.dragOffset.x)),
+        y: Math.max(60, Math.min(this.height - 140, this.mouse.y - this.state.dragOffset.y))
+      };
+    }
+  }
+  hitRect(p, r) {
+    return p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height;
+  }
+  pushEvent(msg) {
+    this.state.events.unshift(msg);
+    if (this.state.events.length > 25) {
+      this.state.events.length = 25;
+    }
+  }
+  async mouseDown(button) {
+    this.heldButtons.add(button);
+    this.state.lastButton = button;
+    const now = Date.now();
+    const nearPrev = Math.abs(this.mouse.x - this.lastClickPos.x) <= 6 && Math.abs(this.mouse.y - this.lastClickPos.y) <= 6;
+    if (now - this.lastClickTime <= 450 && nearPrev) {
+      this.clickStreak += 1;
+    } else {
+      this.clickStreak = 1;
+    }
+    this.lastClickTime = now;
+    this.lastClickPos = { ...this.mouse };
+    this.state.lastClickCount = this.clickStreak;
+    if (button === "left") {
+      const L = _VirtualDesktopBackend.LAYOUT;
+      const cardRect = {
+        x: this.state.cardPosition.x,
+        y: this.state.cardPosition.y,
+        width: L.cardSize.width,
+        height: L.cardSize.height
+      };
+      if (this.hitRect(this.mouse, L.workbenchWindow)) {
+        this.state.activeWindowId = "workbench";
+      } else if (this.hitRect(this.mouse, L.scratchpadWindow)) {
+        this.state.activeWindowId = "scratchpad";
+      }
+      if (this.hitRect(this.mouse, L.nameInput)) {
+        this.state.focusedField = "name";
+        this.state.selectedAll = this.clickStreak >= 2;
+        this.pushEvent(`Focused Name input (${this.mouse.x},${this.mouse.y})`);
+      } else if (this.hitRect(this.mouse, L.notesInput)) {
+        this.state.focusedField = "notes";
+        this.state.selectedAll = this.clickStreak >= 2;
+        this.pushEvent(`Focused Notes input (${this.mouse.x},${this.mouse.y})`);
+      } else if (this.hitRect(this.mouse, L.scratchpadInput)) {
+        this.state.focusedField = "scratchpad";
+        this.state.selectedAll = this.clickStreak >= 2;
+        this.pushEvent(`Focused Scratchpad (${this.mouse.x},${this.mouse.y})`);
+      } else if (this.hitRect(this.mouse, L.submitButton)) {
+        this.state.submittedValue = this.state.fields.name;
+        this.pushEvent(`Clicked Submit -> "${this.state.submittedValue}"`);
+      } else if (this.hitRect(this.mouse, L.counterButton)) {
+        this.state.counter += 1;
+        this.pushEvent(`Incremented counter -> ${this.state.counter}`);
+      } else if (this.hitRect(this.mouse, L.clearButton)) {
+        this.state.fields.name = "";
+        this.state.fields.notes = "";
+        this.state.submittedValue = "";
+        this.state.selectedAll = false;
+        this.pushEvent("Cleared form fields");
+      } else if (this.hitRect(this.mouse, cardRect)) {
+        this.state.draggingCard = true;
+        this.state.dragOffset = {
+          x: this.mouse.x - this.state.cardPosition.x,
+          y: this.mouse.y - this.state.cardPosition.y
+        };
+        this.pushEvent(`Started dragging card at (${this.mouse.x},${this.mouse.y})`);
+      } else {
+        this.state.focusedField = null;
+        this.state.selectedAll = false;
+        this.pushEvent(`Left click at (${this.mouse.x},${this.mouse.y})`);
+      }
+    } else {
+      this.pushEvent(`${button} click at (${this.mouse.x},${this.mouse.y})`);
+    }
+  }
+  async mouseUp(button) {
+    this.heldButtons.delete(button);
+    if (button === "left" && this.state.draggingCard) {
+      this.state.draggingCard = false;
+      this.pushEvent(`Dropped card at (${this.state.cardPosition.x},${this.state.cardPosition.y})`);
+    }
+  }
+  async scroll(deltaX, deltaY) {
+    this.state.scrollOffset = Math.max(0, Math.min(200, this.state.scrollOffset + deltaY * 10));
+    this.pushEvent(`Scrolled dx=${deltaX} dy=${deltaY} -> offset=${this.state.scrollOffset}`);
+  }
+  async keyDown(key) {
+    const parsed = parseKeyChord(key, [], "linux");
+    this.heldKeys.add(parsed.key);
+  }
+  async keyUp(key) {
+    const parsed = parseKeyChord(key, [], "linux");
+    this.heldKeys.delete(parsed.key);
+  }
+  async keyTap(key, modifiers = []) {
+    const modSet = new Set(modifiers);
+    if (this.heldKeys.has("ctrl")) modSet.add("ctrl");
+    if (this.heldKeys.has("meta")) modSet.add("meta");
+    if (this.heldKeys.has("shift")) modSet.add("shift");
+    if (this.heldKeys.has("alt")) modSet.add("alt");
+    const field = this.state.focusedField;
+    const isCmdOrCtrl = modSet.has("ctrl") || modSet.has("meta");
+    if (isCmdOrCtrl && key === "a") {
+      if (field) {
+        this.state.selectedAll = true;
+        this.pushEvent(`Selected all in ${field}`);
+      }
+      return;
+    }
+    if (isCmdOrCtrl && key === "c") {
+      if (field) {
+        this.state.clipboard = this.state.fields[field];
+        this.pushEvent(`Copied ${this.state.clipboard.length} chars from ${field}`);
+      }
+      return;
+    }
+    if (isCmdOrCtrl && key === "v") {
+      if (field && this.state.clipboard) {
+        await this.typeText(this.state.clipboard);
+      }
+      return;
+    }
+    if (key === "tab") {
+      this.state.focusedField = field === "name" ? "notes" : "name";
+      this.state.selectedAll = false;
+      this.pushEvent(`Tabbed focus -> ${this.state.focusedField}`);
+      return;
+    }
+    if (key === "enter") {
+      if (field === "scratchpad") {
+        this.state.fields.scratchpad += "\n";
+      } else {
+        this.state.submittedValue = this.state.fields.name;
+        this.pushEvent(`Enter submit -> "${this.state.submittedValue}"`);
+      }
+      return;
+    }
+    if (key === "escape") {
+      this.state.focusedField = null;
+      this.state.selectedAll = false;
+      this.pushEvent("Escape -> blurred focus");
+      return;
+    }
+    if ((key === "backspace" || key === "delete") && field) {
+      if (this.state.selectedAll) {
+        this.state.fields[field] = "";
+        this.state.selectedAll = false;
+      } else {
+        const chars = Array.from(this.state.fields[field]);
+        chars.pop();
+        this.state.fields[field] = chars.join("");
+      }
+      return;
+    }
+    if (key === "space" && field) {
+      await this.typeText(" ");
+      return;
+    }
+    if (key.length === 1 && !isCmdOrCtrl && !modSet.has("alt") && field) {
+      const ch = modSet.has("shift") ? key.toUpperCase() : key;
+      await this.typeText(ch);
+      return;
+    }
+    this.pushEvent(`Key ${[...modSet, key].join("+")}`);
+  }
+  async typeText(text) {
+    const field = this.state.focusedField;
+    if (!field) {
+      this.pushEvent(`Typed "${text}" (no focused input)`);
+      return;
+    }
+    if (this.state.selectedAll) {
+      this.state.fields[field] = "";
+      this.state.selectedAll = false;
+    }
+    for (const ch of text) {
+      if (ch === "\n") {
+        if (field === "scratchpad") {
+          this.state.fields.scratchpad += "\n";
+        } else {
+          this.state.submittedValue = this.state.fields.name;
+        }
+      } else if (ch !== "\r") {
+        this.state.fields[field] += ch;
+      }
+    }
+    this.pushEvent(`Typed ${Array.from(text).length} chars into ${field}`);
+  }
+  renderDesktop() {
+    const w = this.width;
+    const h = this.height;
+    const rgba = new Uint8Array(w * h * 4);
+    fillRect(rgba, w, h, 0, 0, w, h, [241, 245, 249, 255]);
+    fillRect(rgba, w, h, 0, 0, w, 46, [15, 23, 42, 255]);
+    drawText(rgba, w, h, 24, 16, "HANDY VIRTUAL DESKTOP", [248, 250, 252, 255], 2);
+    const L = _VirtualDesktopBackend.LAYOUT;
+    const wbFocused = this.state.activeWindowId === "workbench";
+    const spFocused = this.state.activeWindowId === "scratchpad";
+    fillRect(rgba, w, h, L.workbenchWindow.x, L.workbenchWindow.y, L.workbenchWindow.width, L.workbenchWindow.height, [
+      255,
+      255,
+      255,
+      255
+    ]);
+    strokeRect(
+      rgba,
+      w,
+      h,
+      L.workbenchWindow.x,
+      L.workbenchWindow.y,
+      L.workbenchWindow.width,
+      L.workbenchWindow.height,
+      wbFocused ? [14, 165, 233, 255] : [203, 213, 225, 255],
+      2
+    );
+    drawText(rgba, w, h, 120, 102, "AGENT CONTROL WORKBENCH", [30, 41, 59, 255], 2);
+    drawText(rgba, w, h, L.nameInput.x, L.nameInput.y - 16, "NAME:", [71, 85, 105, 255], 1);
+    const nameFocused = this.state.focusedField === "name";
+    fillRect(rgba, w, h, L.nameInput.x, L.nameInput.y, L.nameInput.width, L.nameInput.height, [248, 250, 252, 255]);
+    strokeRect(
+      rgba,
+      w,
+      h,
+      L.nameInput.x,
+      L.nameInput.y,
+      L.nameInput.width,
+      L.nameInput.height,
+      nameFocused ? [2, 132, 199, 255] : [148, 163, 184, 255],
+      nameFocused ? 2 : 1
+    );
+    const nameDisplay = this.state.fields.name || (nameFocused ? "|" : "Click here to type...");
+    const nameColor = this.state.fields.name ? [15, 23, 42, 255] : [148, 163, 184, 255];
+    drawText(rgba, w, h, L.nameInput.x + 12, L.nameInput.y + 15, nameDisplay.slice(0, 28), nameColor, 2);
+    drawText(rgba, w, h, L.notesInput.x, L.notesInput.y - 16, "NOTES:", [71, 85, 105, 255], 1);
+    const notesFocused = this.state.focusedField === "notes";
+    fillRect(rgba, w, h, L.notesInput.x, L.notesInput.y, L.notesInput.width, L.notesInput.height, [248, 250, 252, 255]);
+    strokeRect(
+      rgba,
+      w,
+      h,
+      L.notesInput.x,
+      L.notesInput.y,
+      L.notesInput.width,
+      L.notesInput.height,
+      notesFocused ? [2, 132, 199, 255] : [148, 163, 184, 255],
+      notesFocused ? 2 : 1
+    );
+    const notesDisplay = this.state.fields.notes || (notesFocused ? "|" : "Secondary field");
+    const notesColor = this.state.fields.notes ? [15, 23, 42, 255] : [148, 163, 184, 255];
+    drawText(rgba, w, h, L.notesInput.x + 12, L.notesInput.y + 15, notesDisplay.slice(0, 28), notesColor, 2);
+    fillRect(rgba, w, h, L.submitButton.x, L.submitButton.y, L.submitButton.width, L.submitButton.height, [
+      2,
+      132,
+      199,
+      255
+    ]);
+    drawText(rgba, w, h, L.submitButton.x + 38, L.submitButton.y + 14, "SUBMIT", [255, 255, 255, 255], 2);
+    fillRect(rgba, w, h, L.counterButton.x, L.counterButton.y, L.counterButton.width, L.counterButton.height, [
+      16,
+      185,
+      129,
+      255
+    ]);
+    drawText(
+      rgba,
+      w,
+      h,
+      L.counterButton.x + 18,
+      L.counterButton.y + 14,
+      `COUNT: ${this.state.counter}`,
+      [255, 255, 255, 255],
+      2
+    );
+    fillRect(rgba, w, h, L.clearButton.x, L.clearButton.y, L.clearButton.width, L.clearButton.height, [
+      100,
+      116,
+      139,
+      255
+    ]);
+    drawText(rgba, w, h, L.clearButton.x + 30, L.clearButton.y + 14, "CLEAR", [255, 255, 255, 255], 2);
+    if (this.state.submittedValue) {
+      fillRect(rgba, w, h, 120, 356, 500, 26, [220, 252, 231, 255]);
+      strokeRect(rgba, w, h, 120, 356, 500, 26, [34, 197, 94, 255], 1);
+      drawText(
+        rgba,
+        w,
+        h,
+        130,
+        365,
+        `SUBMITTED: ${this.state.submittedValue}`.slice(0, 64),
+        [22, 101, 52, 255],
+        1
+      );
+    }
+    fillRect(rgba, w, h, L.scrollBox.x, L.scrollBox.y, L.scrollBox.width, L.scrollBox.height, [15, 23, 42, 255]);
+    drawText(
+      rgba,
+      w,
+      h,
+      L.scrollBox.x + 12,
+      L.scrollBox.y + 10,
+      `EVENT LOG (SCROLL=${this.state.scrollOffset})`,
+      [56, 189, 248, 255],
+      1
+    );
+    const startIdx = Math.min(Math.floor(this.state.scrollOffset / 20), Math.max(0, this.state.events.length - 1));
+    for (let i = 0; i < 12; i++) {
+      const ev = this.state.events[startIdx + i];
+      if (!ev) break;
+      drawText(rgba, w, h, L.scrollBox.x + 12, L.scrollBox.y + 32 + i * 18, ev.slice(0, 76), [226, 232, 240, 255], 1);
+    }
+    fillRect(
+      rgba,
+      w,
+      h,
+      L.scratchpadWindow.x,
+      L.scratchpadWindow.y,
+      L.scratchpadWindow.width,
+      L.scratchpadWindow.height,
+      [255, 255, 255, 255]
+    );
+    strokeRect(
+      rgba,
+      w,
+      h,
+      L.scratchpadWindow.x,
+      L.scratchpadWindow.y,
+      L.scratchpadWindow.width,
+      L.scratchpadWindow.height,
+      spFocused ? [14, 165, 233, 255] : [203, 213, 225, 255],
+      2
+    );
+    drawText(rgba, w, h, L.scratchpadWindow.x + 24, L.scratchpadWindow.y + 20, "NOTES SCRATCHPAD", [30, 41, 59, 255], 2);
+    fillRect(
+      rgba,
+      w,
+      h,
+      L.scratchpadInput.x,
+      L.scratchpadInput.y,
+      L.scratchpadInput.width,
+      L.scratchpadInput.height,
+      [248, 250, 252, 255]
+    );
+    strokeRect(
+      rgba,
+      w,
+      h,
+      L.scratchpadInput.x,
+      L.scratchpadInput.y,
+      L.scratchpadInput.width,
+      L.scratchpadInput.height,
+      this.state.focusedField === "scratchpad" ? [2, 132, 199, 255] : [203, 213, 225, 255],
+      1
+    );
+    const spLines = (this.state.fields.scratchpad || "Ready for paste or multi-line notes...").split("\n");
+    for (let i = 0; i < Math.min(12, spLines.length); i++) {
+      drawText(
+        rgba,
+        w,
+        h,
+        L.scratchpadInput.x + 12,
+        L.scratchpadInput.y + 14 + i * 18,
+        spLines[i].slice(0, 62),
+        this.state.fields.scratchpad ? [15, 23, 42, 255] : [148, 163, 184, 255],
+        1
+      );
+    }
+    const cx = this.state.cardPosition.x;
+    const cy = this.state.cardPosition.y;
+    fillRect(rgba, w, h, cx, cy, L.cardSize.width, L.cardSize.height, [254, 243, 199, 255]);
+    strokeRect(rgba, w, h, cx, cy, L.cardSize.width, L.cardSize.height, [245, 158, 11, 255], 2);
+    drawText(rgba, w, h, cx + 14, cy + 16, "DRAG CARD", [146, 64, 14, 255], 2);
+    drawText(rgba, w, h, cx + 14, cy + 48, `POS: ${cx},${cy}`, [180, 83, 9, 255], 1);
+    return rgba;
+  }
+  async captureScreen(options = {}) {
+    const full = this.renderDesktop();
+    if (options.region) {
+      const cropped = cropRgba(
+        full,
+        this.width,
+        this.height,
+        options.region.x,
+        options.region.y,
+        options.region.width,
+        options.region.height
+      );
+      return {
+        width: cropped.width,
+        height: cropped.height,
+        data: cropped.data,
+        originX: cropped.x,
+        originY: cropped.y,
+        logicalWidth: cropped.width,
+        logicalHeight: cropped.height,
+        scaleFactor: 1,
+        displayId: 0
+      };
+    }
+    return {
+      width: this.width,
+      height: this.height,
+      data: full,
+      originX: 0,
+      originY: 0,
+      logicalWidth: this.width,
+      logicalHeight: this.height,
+      scaleFactor: 1,
+      displayId: 0
+    };
+  }
+  async doctor() {
+    return [
+      {
+        name: "Virtual Desktop Backend",
+        ok: true,
+        detail: `Ready (${this.width}x${this.height} interactive multi-window virtual screen)`
+      }
+    ];
+  }
+};
+
+// src/backends/win32.ts
+var WIN32_POWERSHELL_SCRIPT = `
+$ErrorActionPreference = "Stop"
+[Console]::InputEncoding = [System.Text.Encoding]::UTF8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$csharp = @"
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Windows.Forms;
+
+public static class HandyWin32 {
+    public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiFlag);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDPIAware();
+
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int X, int Y);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetCursorPos(out POINT lpPoint);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern int GetWindowTextLength(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool OpenClipboard(IntPtr hWndNewOwner);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool CloseClipboard();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EmptyClipboard();
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetClipboardData(uint uFormat);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GlobalAlloc(uint uFlags, UIntPtr dwBytes);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GlobalLock(IntPtr hMem);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GlobalUnlock(IntPtr hMem);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GlobalFree(IntPtr hMem);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT {
+        public int X;
+        public int Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct INPUT {
+        public uint type;
+        public InputUnion U;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    public struct InputUnion {
+        [FieldOffset(0)] public MOUSEINPUT mi;
+        [FieldOffset(0)] public KEYBDINPUT ki;
+        [FieldOffset(0)] public HARDWAREINPUT hi;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct MOUSEINPUT {
+        public int dx;
+        public int dy;
+        public uint mouseData;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct KEYBDINPUT {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct HARDWAREINPUT {
+        public uint uMsg;
+        public ushort wParamL;
+        public ushort wParamH;
+    }
+
+    public class WinItem {
+        public long id;
+        public string title;
+        public string app;
+        public int pid;
+        public int x;
+        public int y;
+        public int width;
+        public int height;
+        public bool focused;
+    }
+
+    public const uint INPUT_MOUSE = 0;
+    public const uint INPUT_KEYBOARD = 1;
+
+    public const uint MOUSEEVENTF_MOVE = 0x0001;
+    public const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP = 0x0004;
+    public const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+    public const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+    public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+    public const uint MOUSEEVENTF_MIDDLEUP = 0x0040;
+    public const uint MOUSEEVENTF_WHEEL = 0x0800;
+    public const uint MOUSEEVENTF_HWHEEL = 0x01000;
+    public const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
+    public const uint MOUSEEVENTF_ABSOLUTE = 0x8000;
+
+    public const uint KEYEVENTF_KEYUP = 0x0002;
+    public const uint KEYEVENTF_UNICODE = 0x0004;
+
+    private const uint CF_UNICODETEXT = 13;
+    private const uint GMEM_MOVEABLE = 0x0002;
+
+    public static void InitDpi() {
+        try {
+            if (!SetProcessDpiAwarenessContext(new IntPtr(-4))) {
+                SetProcessDPIAware();
+            }
+        } catch {
+            try { SetProcessDPIAware(); } catch { }
+        }
+    }
+
+    public static void MoveMouseAbs(int x, int y) {
+        SetCursorPos(x, y);
+        Rectangle vs = SystemInformation.VirtualScreen;
+        int vw = Math.Max(1, vs.Width - 1);
+        int vh = Math.Max(1, vs.Height - 1);
+        int normX = (int)Math.Round(((x - vs.Left) * 65535.0) / vw);
+        int normY = (int)Math.Round(((y - vs.Top) * 65535.0) / vh);
+        INPUT[] inputs = new INPUT[1];
+        inputs[0].type = INPUT_MOUSE;
+        inputs[0].U.mi.dx = normX;
+        inputs[0].U.mi.dy = normY;
+        inputs[0].U.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    public static void MouseButton(uint flag) {
+        INPUT[] inputs = new INPUT[1];
+        inputs[0].type = INPUT_MOUSE;
+        inputs[0].U.mi.dwFlags = flag;
+        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    public static void ScrollWheel(int dx, int dy) {
+        if (dy != 0) {
+            INPUT[] v = new INPUT[1];
+            v[0].type = INPUT_MOUSE;
+            v[0].U.mi.dwFlags = MOUSEEVENTF_WHEEL;
+            v[0].U.mi.mouseData = unchecked((uint)(-dy * 120));
+            SendInput(1, v, Marshal.SizeOf(typeof(INPUT)));
+        }
+        if (dx != 0) {
+            INPUT[] h = new INPUT[1];
+            h[0].type = INPUT_MOUSE;
+            h[0].U.mi.dwFlags = MOUSEEVENTF_HWHEEL;
+            h[0].U.mi.mouseData = unchecked((uint)(dx * 120));
+            SendInput(1, h, Marshal.SizeOf(typeof(INPUT)));
+        }
+    }
+
+    public static void SendVk(ushort vk, bool down) {
+        INPUT[] inputs = new INPUT[1];
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].U.ki.wVk = vk;
+        inputs[0].U.ki.dwFlags = down ? 0u : KEYEVENTF_KEYUP;
+        SendInput(1, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    public static void SendUnicodeString(string text) {
+        if (string.IsNullOrEmpty(text)) return;
+        INPUT[] inputs = new INPUT[text.Length * 2];
+        for (int i = 0; i < text.Length; i++) {
+            ushort codeUnit = (ushort)text[i];
+            inputs[i * 2].type = INPUT_KEYBOARD;
+            inputs[i * 2].U.ki.wScan = codeUnit;
+            inputs[i * 2].U.ki.dwFlags = KEYEVENTF_UNICODE;
+
+            inputs[i * 2 + 1].type = INPUT_KEYBOARD;
+            inputs[i * 2 + 1].U.ki.wScan = codeUnit;
+            inputs[i * 2 + 1].U.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP;
+        }
+        SendInput((uint)inputs.Length, inputs, Marshal.SizeOf(typeof(INPUT)));
+    }
+
+    public static string CapturePngBase64(int x, int y, int width, int height) {
+        using (Bitmap bmp = new Bitmap(width, height, PixelFormat.Format32bppArgb)) {
+            using (Graphics g = Graphics.FromImage(bmp)) {
+                g.CopyFromScreen(x, y, 0, 0, new Size(width, height), CopyPixelOperation.SourceCopy);
+            }
+            using (MemoryStream ms = new MemoryStream()) {
+                bmp.Save(ms, ImageFormat.Png);
+                return Convert.ToBase64String(ms.ToArray());
+            }
+        }
+    }
+
+    public static WinItem[] ListVisibleWindows() {
+        IntPtr fg = GetForegroundWindow();
+        List<WinItem> results = new List<WinItem>();
+        EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+            if (!IsWindowVisible(hWnd)) return true;
+            int len = GetWindowTextLength(hWnd);
+            if (len <= 0) return true;
+            StringBuilder sb = new StringBuilder(len + 1);
+            GetWindowText(hWnd, sb, sb.Capacity);
+            string title = sb.ToString().Trim();
+            if (title.Length == 0) return true;
+            RECT r;
+            if (!GetWindowRect(hWnd, out r)) return true;
+            int w = r.Right - r.Left;
+            int h = r.Bottom - r.Top;
+            if (w <= 0 || h <= 0) return true;
+            uint pid = 0;
+            GetWindowThreadProcessId(hWnd, out pid);
+            string appName = "";
+            if (pid > 0) {
+                try { appName = Process.GetProcessById((int)pid).ProcessName; } catch { }
+            }
+            WinItem item = new WinItem();
+            item.id = hWnd.ToInt64();
+            item.title = title;
+            item.app = appName;
+            item.pid = (int)pid;
+            item.x = r.Left;
+            item.y = r.Top;
+            item.width = w;
+            item.height = h;
+            item.focused = (hWnd == fg);
+            results.Add(item);
+            return true;
+        }, IntPtr.Zero);
+        return results.ToArray();
+    }
+
+    public static bool FocusWindowById(long hwndVal) {
+        IntPtr hWnd = new IntPtr(hwndVal);
+        if (IsIconic(hWnd)) {
+            ShowWindow(hWnd, 9);
+        }
+        return SetForegroundWindow(hWnd);
+    }
+
+    private static bool TryOpenClipboard() {
+        for (int i = 0; i < 6; i++) {
+            if (OpenClipboard(IntPtr.Zero)) return true;
+            Thread.Sleep(15);
+        }
+        return false;
+    }
+
+    public static string ReadClipboardUnicode() {
+        if (!TryOpenClipboard()) return "";
+        try {
+            IntPtr hData = GetClipboardData(CF_UNICODETEXT);
+            if (hData == IntPtr.Zero) return "";
+            IntPtr ptr = GlobalLock(hData);
+            if (ptr == IntPtr.Zero) return "";
+            try {
+                return Marshal.PtrToStringUni(ptr) ?? "";
+            } finally {
+                GlobalUnlock(hData);
+            }
+        } finally {
+            CloseClipboard();
+        }
+    }
+
+    public static void WriteClipboardUnicode(string text) {
+        string safe = text ?? "";
+        if (!TryOpenClipboard()) {
+            throw new InvalidOperationException("Unable to open Win32 clipboard.");
+        }
+        try {
+            EmptyClipboard();
+            int byteLen = (safe.Length + 1) * 2;
+            IntPtr hGlobal = GlobalAlloc(GMEM_MOVEABLE, new UIntPtr((uint)byteLen));
+            if (hGlobal == IntPtr.Zero) {
+                throw new InvalidOperationException("GlobalAlloc failed for clipboard.");
+            }
+            IntPtr target = GlobalLock(hGlobal);
+            if (target == IntPtr.Zero) {
+                GlobalFree(hGlobal);
+                throw new InvalidOperationException("GlobalLock failed for clipboard.");
+            }
+            try {
+                Marshal.Copy(safe.ToCharArray(), 0, target, safe.Length);
+                Marshal.WriteInt16(target, safe.Length * 2, 0);
+            } finally {
+                GlobalUnlock(hGlobal);
+            }
+            if (SetClipboardData(CF_UNICODETEXT, hGlobal) == IntPtr.Zero) {
+                GlobalFree(hGlobal);
+                throw new InvalidOperationException("SetClipboardData failed.");
+            }
+        } finally {
+            CloseClipboard();
+        }
+    }
+}
+"@
+
+Add-Type -TypeDefinition $csharp -ReferencedAssemblies System.Windows.Forms, System.Drawing
+[HandyWin32]::InitDpi()
+
+while (($line = [Console]::In.ReadLine()) -ne $null) {
+    $trimmed = $line.Trim()
+    if ($trimmed.Length -eq 0) { continue }
+    $id = -1
+    try {
+        $cmd = $trimmed | ConvertFrom-Json
+        $id = [int]$cmd.id
+        $op = [string]$cmd.op
+        if ($op -eq "doctor") {
+            $resp = @{ id = $id; ok = $true; dpiAware = $true } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "displays") {
+            $screens = [System.Windows.Forms.Screen]::AllScreens
+            $list = @()
+            for ($i = 0; $i -lt $screens.Length; $i++) {
+                $s = $screens[$i]
+                $b = $s.Bounds
+                $list += @{
+                    id = $i
+                    name = [string]$s.DeviceName
+                    x = [int]$b.X
+                    y = [int]$b.Y
+                    width = [int]$b.Width
+                    height = [int]$b.Height
+                    scaleFactor = 1
+                    primary = [bool]$s.Primary
+                }
+            }
+            $resp = @{ id = $id; ok = $true; displays = $list } | ConvertTo-Json -Compress -Depth 4
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "windows") {
+            $items = [HandyWin32]::ListVisibleWindows()
+            $list = @()
+            for ($i = 0; $i -lt $items.Length; $i++) {
+                $w = $items[$i]
+                $list += @{
+                    id = [int64]$w.id
+                    title = [string]$w.title
+                    app = [string]$w.app
+                    pid = [int]$w.pid
+                    bounds = @{
+                        x = [int]$w.x
+                        y = [int]$w.y
+                        width = [int]$w.width
+                        height = [int]$w.height
+                    }
+                    focused = [bool]$w.focused
+                }
+            }
+            $resp = @{ id = $id; ok = $true; windows = $list } | ConvertTo-Json -Compress -Depth 5
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "focus_window") {
+            $okFocus = [HandyWin32]::FocusWindowById([int64]$cmd.hwnd)
+            $resp = @{ id = $id; ok = $true; focused = [bool]$okFocus } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "clipboard_get") {
+            $txt = [HandyWin32]::ReadClipboardUnicode()
+            $resp = @{ id = $id; ok = $true; text = [string]$txt } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "clipboard_set") {
+            [HandyWin32]::WriteClipboardUnicode([string]$cmd.text)
+            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "mouse_pos") {
+            $pt = New-Object HandyWin32+POINT
+            [void][HandyWin32]::GetCursorPos([ref]$pt)
+            $resp = @{ id = $id; ok = $true; x = [int]$pt.X; y = [int]$pt.Y } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "move") {
+            [HandyWin32]::MoveMouseAbs([int]$cmd.x, [int]$cmd.y)
+            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "mouse_btn") {
+            [HandyWin32]::MouseButton([uint32]$cmd.flag)
+            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "scroll") {
+            [HandyWin32]::ScrollWheel([int]$cmd.dx, [int]$cmd.dy)
+            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "vk") {
+            [HandyWin32]::SendVk([uint16]$cmd.vk, [bool]$cmd.down)
+            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "unicode") {
+            [HandyWin32]::SendUnicodeString([string]$cmd.text)
+            $resp = @{ id = $id; ok = $true } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        elseif ($op -eq "capture") {
+            $b64 = [HandyWin32]::CapturePngBase64([int]$cmd.x, [int]$cmd.y, [int]$cmd.width, [int]$cmd.height)
+            $resp = @{ id = $id; ok = $true; pngBase64 = $b64 } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+        else {
+            $resp = @{ id = $id; ok = $false; error = "Unknown op: $op" } | ConvertTo-Json -Compress
+            [Console]::Out.WriteLine($resp)
+        }
+    } catch {
+        $errMsg = $_.Exception.Message
+        $resp = @{ id = $id; ok = $false; error = [string]$errMsg } | ConvertTo-Json -Compress
+        [Console]::Out.WriteLine($resp)
+    }
+}
+`;
+var Win32Backend = class {
+  name = "win32-sendinput";
+  platform = "win32";
+  worker;
+  constructor(options = {}) {
+    const encoded = Buffer.from(WIN32_POWERSHELL_SCRIPT, "utf16le").toString("base64");
+    this.worker = new JsonlWorker(
+      options.workerOptions ?? {
+        command: "powershell.exe",
+        args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+        requestTimeoutMs: 15e3
+      }
+    );
+  }
+  async init() {
+    await this.worker.start();
+  }
+  async close() {
+    await this.worker.stop();
+  }
+  async getDisplays() {
+    const res = await this.worker.request({ op: "displays" });
+    const raw = res.displays;
+    const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    if (list.length > 0) return list;
+    return [
+      {
+        id: 0,
+        name: "Windows Primary Display",
+        x: 0,
+        y: 0,
+        width: 1920,
+        height: 1080,
+        scaleFactor: 1,
+        primary: true
+      }
+    ];
+  }
+  async listWindows() {
+    const res = await this.worker.request({ op: "windows" });
+    const raw = res.windows;
+    const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+    return list.map((w) => ({
+      ...w,
+      app: w.app || void 0,
+      pid: w.pid || void 0
+    }));
+  }
+  async getActiveWindow() {
+    const wins = await this.listWindows();
+    return wins.find((w) => w.focused) ?? wins[0] ?? null;
+  }
+  async focusWindow(query) {
+    const wins = await this.listWindows();
+    const titleNeedle = query.title?.toLowerCase();
+    const appNeedle = query.app?.toLowerCase();
+    const match = wins.find((w) => {
+      if (query.id !== void 0 && String(w.id) === String(query.id)) return true;
+      if (titleNeedle && w.title.toLowerCase().includes(titleNeedle)) return true;
+      if (appNeedle && (w.app ?? "").toLowerCase().includes(appNeedle)) return true;
+      return false;
+    });
+    if (!match) return false;
+    const res = await this.worker.request({ op: "focus_window", hwnd: Number(match.id) });
+    return Boolean(res.focused);
+  }
+  async getClipboardText() {
+    const res = await this.worker.request({ op: "clipboard_get" });
+    return typeof res.text === "string" ? res.text : "";
+  }
+  async setClipboardText(text) {
+    await this.worker.request({ op: "clipboard_set", text });
+  }
+  async getMousePosition() {
+    const res = await this.worker.request({ op: "mouse_pos" });
+    return { x: Number(res.x ?? 0), y: Number(res.y ?? 0) };
+  }
+  async moveMouse(x, y) {
+    await this.worker.request({ op: "move", x: Math.round(x), y: Math.round(y) });
+  }
+  async mouseDown(button) {
+    const flag = button === "left" ? 2 : button === "right" ? 8 : 32;
+    await this.worker.request({ op: "mouse_btn", flag });
+  }
+  async mouseUp(button) {
+    const flag = button === "left" ? 4 : button === "right" ? 16 : 64;
+    await this.worker.request({ op: "mouse_btn", flag });
+  }
+  async scroll(deltaX, deltaY) {
+    await this.worker.request({ op: "scroll", dx: Math.round(deltaX), dy: Math.round(deltaY) });
+  }
+  async keyDown(key) {
+    const parsed = parseKeyChord(key, [], "win32");
+    const mapped = toWin32Vk(parsed.key);
+    if (!mapped) {
+      throw new Error(`Unsupported Windows keyDown key "${key}".`);
+    }
+    if (mapped.shift) {
+      await this.worker.request({ op: "vk", vk: WIN32_VK_CODES.shift.vk, down: true });
+    }
+    await this.worker.request({ op: "vk", vk: mapped.vk, down: true });
+  }
+  async keyUp(key) {
+    const parsed = parseKeyChord(key, [], "win32");
+    const mapped = toWin32Vk(parsed.key);
+    if (!mapped) {
+      throw new Error(`Unsupported Windows keyUp key "${key}".`);
+    }
+    await this.worker.request({ op: "vk", vk: mapped.vk, down: false });
+    if (mapped.shift) {
+      await this.worker.request({ op: "vk", vk: WIN32_VK_CODES.shift.vk, down: false });
+    }
+  }
+  async keyTap(key, modifiers = []) {
+    const mapped = toWin32Vk(key);
+    if (!mapped) {
+      if (modifiers.length === 0) {
+        await this.typeText(key);
+        return;
+      }
+      throw new Error(`Unsupported Windows key "${key}".`);
+    }
+    const activeMods = [...modifiers];
+    if (mapped.shift && !activeMods.includes("shift")) {
+      activeMods.push("shift");
+    }
+    for (const m of activeMods) {
+      await this.worker.request({ op: "vk", vk: WIN32_VK_CODES[m].vk, down: true });
+    }
+    await this.worker.request({ op: "vk", vk: mapped.vk, down: true });
+    await this.worker.request({ op: "vk", vk: mapped.vk, down: false });
+    for (const m of [...activeMods].reverse()) {
+      await this.worker.request({ op: "vk", vk: WIN32_VK_CODES[m].vk, down: false });
+    }
+  }
+  async typeText(text) {
+    let chunk = "";
+    const flush = async () => {
+      if (chunk.length > 0) {
+        await this.worker.request({ op: "unicode", text: chunk });
+        chunk = "";
+      }
+    };
+    for (const ch of text) {
+      if (ch === "\r") continue;
+      if (ch === "\n") {
+        await flush();
+        await this.keyTap("enter");
+      } else if (ch === "	") {
+        await flush();
+        await this.keyTap("tab");
+      } else {
+        chunk += ch;
+      }
+    }
+    await flush();
+  }
+  async captureScreen(options = {}) {
+    const displays = await this.getDisplays();
+    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
+    const rx = options.region ? Math.round(options.region.x) : disp.x;
+    const ry = options.region ? Math.round(options.region.y) : disp.y;
+    const rw = options.region ? Math.max(1, Math.round(options.region.width)) : disp.width;
+    const rh = options.region ? Math.max(1, Math.round(options.region.height)) : disp.height;
+    const res = await this.worker.request({ op: "capture", x: rx, y: ry, width: rw, height: rh }, 15e3);
+    const pngBase64 = String(res.pngBase64 ?? "");
+    if (!pngBase64) {
+      throw new Error("Windows screen capture returned empty PNG buffer.");
+    }
+    const decoded = decodePng(Buffer.from(pngBase64, "base64"));
+    return {
+      width: decoded.width,
+      height: decoded.height,
+      data: decoded.data,
+      originX: rx,
+      originY: ry,
+      logicalWidth: decoded.width,
+      logicalHeight: decoded.height,
+      scaleFactor: 1,
+      displayId: disp.id
+    };
+  }
+  async doctor() {
+    try {
+      await this.worker.request({ op: "doctor" });
+      const displays = await this.getDisplays();
+      return [
+        {
+          name: "Win32 SendInput + GDI Bridge",
+          ok: true,
+          detail: `Ready (${displays.length} display${displays.length === 1 ? "" : "s"} detected, Per-Monitor V2 DPI aware)`
+        }
+      ];
+    } catch (err) {
+      return [
+        {
+          name: "Win32 SendInput + GDI Bridge",
+          ok: false,
+          detail: err instanceof Error ? err.message : String(err)
+        }
+      ];
+    }
+  }
+};
+
+// src/backends/index.ts
+function createBackend(options = {}) {
+  const rawKind = (options.kind ?? process.env.HANDY_BACKEND ?? "auto").trim().toLowerCase();
+  if (rawKind === "virtual") {
+    return new VirtualDesktopBackend();
+  }
+  if (rawKind === "x11" || rawKind === "linux-x11") {
+    return new LinuxX11Backend({ display: options.display });
+  }
+  if (rawKind === "linux-cli" || rawKind === "wayland") {
+    return new LinuxCliBackend();
+  }
+  if (rawKind === "darwin" || rawKind === "macos") {
+    return new DarwinBackend();
+  }
+  if (rawKind === "win32" || rawKind === "windows") {
+    return new Win32Backend();
+  }
+  if (process.platform === "win32") {
+    return new Win32Backend();
+  }
+  if (process.platform === "darwin") {
+    return new DarwinBackend();
+  }
+  if (process.platform === "linux") {
+    const display = options.display ?? process.env.DISPLAY;
+    if (!display && process.env.WAYLAND_DISPLAY) {
+      return new LinuxCliBackend();
+    }
+    return new LinuxX11Backend({ display });
+  }
+  throw new Error(`Unsupported OS platform "${process.platform}". Set HANDY_BACKEND=virtual for headless testing.`);
+}
+
+// src/diff.ts
+function samplePixelHex(frame, point) {
+  const relX = point.x - frame.originX;
+  const relY = point.y - frame.originY;
+  if (relX < 0 || relY < 0 || relX >= frame.logicalWidth || relY >= frame.logicalHeight) {
+    return null;
+  }
+  const px = Math.min(frame.width - 1, Math.max(0, Math.round(relX / Math.max(1, frame.logicalWidth) * frame.width)));
+  const py = Math.min(
+    frame.height - 1,
+    Math.max(0, Math.round(relY / Math.max(1, frame.logicalHeight) * frame.height))
+  );
+  const idx = (py * frame.width + px) * 4;
+  const r = frame.data[idx] ?? 0;
+  const g = frame.data[idx + 1] ?? 0;
+  const b = frame.data[idx + 2] ?? 0;
+  return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+}
+function computeFrameDiff(prev, curr, channelDeltaThreshold = 14) {
+  if (prev.width !== curr.width || prev.height !== curr.height || prev.originX !== curr.originX || prev.originY !== curr.originY) {
+    return null;
+  }
+  const w = curr.width;
+  const h = curr.height;
+  const totalPixels = w * h;
+  if (totalPixels === 0) {
+    return { changedPercent: 0, changedPixels: 0, changedBounds: null };
+  }
+  const a = prev.data;
+  const b = curr.data;
+  let changedPixels = 0;
+  let minX = w;
+  let minY = h;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < h; y++) {
+    const rowOff = y * w * 4;
+    for (let x = 0; x < w; x++) {
+      const i = rowOff + x * 4;
+      const dr = Math.abs(a[i] - b[i]);
+      const dg = Math.abs(a[i + 1] - b[i + 1]);
+      const db = Math.abs(a[i + 2] - b[i + 2]);
+      if (dr > channelDeltaThreshold || dg > channelDeltaThreshold || db > channelDeltaThreshold) {
+        changedPixels++;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  if (changedPixels === 0 || maxX < minX || maxY < minY) {
+    return { changedPercent: 0, changedPixels: 0, changedBounds: null };
+  }
+  const changedPercent = Math.round(changedPixels / totalPixels * 1e5) / 1e3;
+  const scaleX = curr.logicalWidth / Math.max(1, w);
+  const scaleY = curr.logicalHeight / Math.max(1, h);
+  const bx = Math.round(curr.originX + minX * scaleX);
+  const by = Math.round(curr.originY + minY * scaleY);
+  const bw = Math.max(1, Math.round((maxX - minX + 1) * scaleX));
+  const bh = Math.max(1, Math.round((maxY - minY + 1) * scaleY));
+  return {
+    changedPercent,
+    changedPixels,
+    changedBounds: { x: bx, y: by, width: bw, height: bh }
+  };
+}
+
+// src/overlay.ts
+var NICE_STEPS = [25, 50, 100, 200, 250, 400, 500, 1e3];
+function chooseGridStep(logicalWidth, logicalHeight) {
+  const maxDim = Math.max(logicalWidth, logicalHeight);
+  const targetIntervals = 8;
+  const raw = maxDim / targetIntervals;
+  for (const step of NICE_STEPS) {
+    if (step >= raw) return step;
+  }
+  return 1e3;
+}
+function renderScreenOverlay(rgba, imageWidth, imageHeight, options) {
+  const drawGrid = options.grid ?? true;
+  const drawMouse = options.showMouse ?? true;
+  const toImgX = (screenX) => Math.round((screenX - options.originX) / Math.max(1, options.logicalWidth) * imageWidth);
+  const toImgY = (screenY) => Math.round((screenY - options.originY) / Math.max(1, options.logicalHeight) * imageHeight);
+  let resolvedStep = null;
+  if (drawGrid) {
+    const majorStep = options.gridStep && options.gridStep >= 10 ? Math.round(options.gridStep) : chooseGridStep(options.logicalWidth, options.logicalHeight);
+    resolvedStep = majorStep;
+    const minorStep = majorStep >= 50 ? Math.round(majorStep / 2) : 0;
+    const majorColor = [14, 165, 233, 88];
+    const majorShadow = [15, 23, 42, 34];
+    const minorColor = [148, 163, 184, 40];
+    const tickColor = [56, 189, 248, 225];
+    const startX = Math.ceil(options.originX / (minorStep || majorStep)) * (minorStep || majorStep);
+    const endX = options.originX + options.logicalWidth;
+    const startY = Math.ceil(options.originY / (minorStep || majorStep)) * (minorStep || majorStep);
+    const endY = options.originY + options.logicalHeight;
+    const stepIterX = minorStep || majorStep;
+    for (let sx = startX; sx <= endX; sx += stepIterX) {
+      const ix = toImgX(sx);
+      if (ix <= 0 || ix >= imageWidth) continue;
+      const isMajor = sx % majorStep === 0;
+      const col = isMajor ? majorColor : minorColor;
+      for (let py = 0; py < imageHeight; py++) {
+        if (isMajor || (py & 3) < 2) {
+          blendPixel(rgba, imageWidth, imageHeight, ix, py, col);
+          if (isMajor && ix + 1 < imageWidth) {
+            blendPixel(rgba, imageWidth, imageHeight, ix + 1, py, majorShadow);
+          }
+        }
+      }
+    }
+    const stepIterY = minorStep || majorStep;
+    for (let sy = startY; sy <= endY; sy += stepIterY) {
+      const iy = toImgY(sy);
+      if (iy <= 0 || iy >= imageHeight) continue;
+      const isMajor = sy % majorStep === 0;
+      const col = isMajor ? majorColor : minorColor;
+      for (let px = 0; px < imageWidth; px++) {
+        if (isMajor || (px & 3) < 2) {
+          blendPixel(rgba, imageWidth, imageHeight, px, iy, col);
+          if (isMajor && iy + 1 < imageHeight) {
+            blendPixel(rgba, imageWidth, imageHeight, px, iy + 1, majorShadow);
+          }
+        }
+      }
+    }
+    fillRect(rgba, imageWidth, imageHeight, 0, 0, imageWidth, 15, [15, 23, 42, 185]);
+    fillRect(rgba, imageWidth, imageHeight, 0, 15, 34, imageHeight - 15, [15, 23, 42, 165]);
+    const majorStartX = Math.ceil(options.originX / majorStep) * majorStep;
+    const majorStartY = Math.ceil(options.originY / majorStep) * majorStep;
+    let rowIdx = 0;
+    for (let sy = majorStartY; sy < endY; sy += majorStep) {
+      const iy = toImgY(sy);
+      rowIdx++;
+      if (iy < 32 || iy > imageHeight - 24) continue;
+      let colIdx = 0;
+      for (let sx = majorStartX; sx < endX; sx += majorStep) {
+        const ix = toImgX(sx);
+        colIdx++;
+        if (ix < 52 || ix > imageWidth - 64) continue;
+        if ((rowIdx + colIdx) % 2 === 0) {
+          drawLine(rgba, imageWidth, imageHeight, ix - 3, iy, ix + 3, iy, [56, 189, 248, 175]);
+          drawLine(rgba, imageWidth, imageHeight, ix, iy - 3, ix, iy + 3, [56, 189, 248, 175]);
+          drawBadge(rgba, imageWidth, imageHeight, ix + 3, iy + 3, `${sx},${sy}`, {
+            bg: [15, 23, 42, 155],
+            fg: [186, 230, 253, 230],
+            padX: 2,
+            padY: 1
+          });
+        }
+      }
+    }
+    for (let sx = majorStartX; sx <= endX; sx += majorStep) {
+      const ix = toImgX(sx);
+      if (ix < 36 || ix > imageWidth - 20) continue;
+      drawLine(rgba, imageWidth, imageHeight, ix, 0, ix, 14, tickColor);
+      const label = String(sx);
+      const m = measureText(label, 1);
+      drawBadge(rgba, imageWidth, imageHeight, Math.max(36, ix - Math.floor(m.width / 2) - 2), 2, label, {
+        bg: [15, 23, 42, 220],
+        fg: [125, 211, 252, 255],
+        padX: 2,
+        padY: 2
+      });
+    }
+    for (let sy = majorStartY; sy <= endY; sy += majorStep) {
+      const iy = toImgY(sy);
+      if (iy < 20 || iy > imageHeight - 12) continue;
+      drawLine(rgba, imageWidth, imageHeight, 0, iy, 12, iy, tickColor);
+      drawBadge(rgba, imageWidth, imageHeight, 2, Math.max(16, iy - 5), String(sy), {
+        bg: [15, 23, 42, 220],
+        fg: [125, 211, 252, 255],
+        padX: 2,
+        padY: 2
+      });
+    }
+    drawBadge(rgba, imageWidth, imageHeight, 2, 2, `${options.originX},${options.originY}`, {
+      bg: [2, 132, 199, 240],
+      fg: [255, 255, 255, 255],
+      padX: 3,
+      padY: 2
+    });
+  }
+  if (options.trail && options.trail.length > 0) {
+    const amberRing = [245, 158, 11, 235];
+    const amberHalo = [255, 255, 255, 210];
+    for (let i = 0; i < options.trail.length; i++) {
+      const m = options.trail[i];
+      if (m.x < options.originX || m.x > options.originX + options.logicalWidth || m.y < options.originY || m.y > options.originY + options.logicalHeight) {
+        continue;
+      }
+      const mx = Math.max(0, Math.min(imageWidth - 1, toImgX(m.x)));
+      const my = Math.max(0, Math.min(imageHeight - 1, toImgY(m.y)));
+      if (m.kind === "drag_end" && i > 0 && options.trail[i - 1]?.kind === "drag_start") {
+        const prev = options.trail[i - 1];
+        drawLine(rgba, imageWidth, imageHeight, toImgX(prev.x), toImgY(prev.y), mx, my, [245, 158, 11, 185]);
+      }
+      drawCircleRing(rgba, imageWidth, imageHeight, mx, my, 7, 2.5, amberHalo);
+      drawCircleRing(rgba, imageWidth, imageHeight, mx, my, 7, 1.5, amberRing);
+      const bx = Math.min(imageWidth - 22, Math.max(4, mx + 8));
+      const by = Math.max(16, Math.min(imageHeight - 16, my - 14));
+      drawBadge(rgba, imageWidth, imageHeight, bx, by, `#${m.stepNumber}`, {
+        bg: [120, 53, 15, 230],
+        fg: [254, 243, 199, 255],
+        border: [251, 191, 36, 255],
+        padX: 3,
+        padY: 2
+      });
+    }
+  }
+  if (drawMouse) {
+    const mx = Math.round(options.mouse.x);
+    const my = Math.round(options.mouse.y);
+    const inBounds = mx >= options.originX && mx <= options.originX + options.logicalWidth && my >= options.originY && my <= options.originY + options.logicalHeight;
+    if (inBounds) {
+      const cx = Math.max(0, Math.min(imageWidth - 1, toImgX(mx)));
+      const cy = Math.max(0, Math.min(imageHeight - 1, toImgY(my)));
+      const whiteHalo = [255, 255, 255, 235];
+      const redCore = [239, 68, 68, 250];
+      drawCircleRing(rgba, imageWidth, imageHeight, cx, cy, 12, 3.2, whiteHalo);
+      drawCircleRing(rgba, imageWidth, imageHeight, cx, cy, 12, 1.8, redCore);
+      drawCircleRing(rgba, imageWidth, imageHeight, cx, cy, 4, 1.5, redCore);
+      drawLine(rgba, imageWidth, imageHeight, cx - 18, cy, cx - 5, cy, redCore);
+      drawLine(rgba, imageWidth, imageHeight, cx + 5, cy, cx + 18, cy, redCore);
+      drawLine(rgba, imageWidth, imageHeight, cx, cy - 18, cx, cy - 5, redCore);
+      drawLine(rgba, imageWidth, imageHeight, cx, cy + 5, cx, cy + 18, redCore);
+      const badgeText = `MOUSE (${mx},${my})`;
+      const textMetrics = measureText(badgeText, 1);
+      const badgeW = textMetrics.width + 10;
+      const badgeH = textMetrics.height + 6;
+      let bx = cx + 15;
+      let by = cy + 14;
+      if (bx + badgeW > imageWidth - 4) {
+        bx = Math.max(4, cx - 15 - badgeW);
+      }
+      if (by + badgeH > imageHeight - 4) {
+        by = Math.max(4, cy - 14 - badgeH);
+      }
+      drawBadge(rgba, imageWidth, imageHeight, bx, by, badgeText, {
+        bg: [127, 29, 29, 235],
+        fg: [255, 255, 255, 255],
+        border: [248, 113, 113, 255],
+        padX: 5,
+        padY: 3
+      });
+    } else {
+      const badgeText = `MOUSE (${mx},${my}) [outside region]`;
+      const textMetrics = measureText(badgeText, 1);
+      const badgeW = textMetrics.width + 10;
+      const badgeH = textMetrics.height + 6;
+      drawBadge(
+        rgba,
+        imageWidth,
+        imageHeight,
+        Math.max(4, imageWidth - badgeW - 6),
+        Math.max(4, imageHeight - badgeH - 6),
+        badgeText,
+        {
+          bg: [127, 29, 29, 230],
+          fg: [254, 226, 226, 255],
+          border: [248, 113, 113, 255],
+          padX: 5,
+          padY: 3
+        }
+      );
+    }
+  }
+  return { gridStep: resolvedStep };
+}
+
+// src/permissions.ts
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync4, renameSync, statSync, watch, writeFileSync } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { join as join4 } from "node:path";
+var HandyPermissionError = class extends Error {
+  code = "HANDY_PERMISSION_DENIED";
+  state;
+  constructor(message, state) {
+    super(message);
+    this.name = "HandyPermissionError";
+    this.state = state;
+  }
+};
+function parseBoolEnv(raw) {
+  if (raw === void 0) return void 0;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "" || normalized === "${user_config.enabled}") return void 0;
+  if (["1", "true", "yes", "on", "enabled"].includes(normalized)) return true;
+  if (["0", "false", "no", "off", "disabled"].includes(normalized)) return false;
+  return void 0;
+}
+function resolveConfigDir(overrideDir) {
+  if (overrideDir) return overrideDir;
+  const fromEnv = process.env.HANDY_CONFIG_DIR?.trim();
+  if (fromEnv) return fromEnv;
+  return join4(homedir2(), ".handy");
+}
+function parseDurationMs(input2) {
+  const match = /^(\d+(?:\.\d+)?)\s*(ms|s|sec|secs|m|min|mins|h|hr|hrs)?$/i.exec(input2.trim());
+  if (!match) {
+    throw new Error(`Invalid duration "${input2}". Examples: 30s, 15m, 2h.`);
+  }
+  const value = Number(match[1]);
+  const unit = (match[2] ?? "s").toLowerCase();
+  const multipliers = {
+    ms: 1,
+    s: 1e3,
+    sec: 1e3,
+    secs: 1e3,
+    m: 6e4,
+    min: 6e4,
+    mins: 6e4,
+    h: 36e5,
+    hr: 36e5,
+    hrs: 36e5
+  };
+  const ms = Math.round(value * (multipliers[unit] ?? 1e3));
+  if (!Number.isFinite(ms) || ms <= 0) {
+    throw new Error(`Duration must be positive: "${input2}".`);
+  }
+  return ms;
+}
+var PermissionStore = class {
+  configDir;
+  filePath;
+  allowMcpEnableOption;
+  constructor(options = {}) {
+    this.configDir = resolveConfigDir(options.configDir);
+    this.filePath = join4(this.configDir, "permissions.json");
+    this.allowMcpEnableOption = options.allowMcpEnable;
+  }
+  get allowMcpEnable() {
+    if (this.allowMcpEnableOption !== void 0) return this.allowMcpEnableOption;
+    return parseBoolEnv(process.env.HANDY_ALLOW_MCP_ENABLE) === true;
+  }
+  getState() {
+    const envEnabled = parseBoolEnv(process.env.HANDY_ENABLED);
+    if (envEnabled === false) {
+      return {
+        enabled: false,
+        mode: "full",
+        expiresAt: null,
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        updatedBy: "env"
+      };
+    }
+    const disk = this.readDiskState();
+    if (disk) {
+      if (disk.enabled && disk.expiresAt) {
+        const exp = Date.parse(disk.expiresAt);
+        if (!Number.isNaN(exp) && Date.now() >= exp) {
+          const expiredState = {
+            ...disk,
+            enabled: false,
+            expiresAt: null,
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            updatedBy: "expired"
+          };
+          this.writeDiskState(expiredState);
+          return expiredState;
+        }
+      }
+      return disk;
+    }
+    const defaultEnabled = parseBoolEnv(process.env.HANDY_DEFAULT_ENABLED) ?? true;
+    const defaultMode = process.env.HANDY_DEFAULT_MODE?.trim().toLowerCase() === "view_only" ? "view_only" : "full";
+    return {
+      enabled: envEnabled ?? defaultEnabled,
+      mode: defaultMode,
+      expiresAt: null,
+      updatedAt: (/* @__PURE__ */ new Date(0)).toISOString(),
+      updatedBy: envEnabled !== void 0 ? "env" : "default"
+    };
+  }
+  setEnabled(enabled, options = {}) {
+    const updatedBy = options.updatedBy ?? "cli";
+    const current = this.getState();
+    if (updatedBy === "mcp" && enabled && !current.enabled && !this.allowMcpEnable) {
+      throw new HandyPermissionError(
+        "Handy is currently turned OFF by user permission controls and cannot re-enable itself via MCP. Ask the user to run `handy on` (or `/handy:on`).",
+        current
+      );
+    }
+    if (enabled && parseBoolEnv(process.env.HANDY_ENABLED) === false && updatedBy === "mcp") {
+      throw new HandyPermissionError(
+        "Handy is disabled via HANDY_ENABLED=false in the host configuration.",
+        current
+      );
+    }
+    const now = Date.now();
+    const next = {
+      enabled,
+      mode: options.mode ?? current.mode ?? "full",
+      expiresAt: enabled && options.ttlMs && options.ttlMs > 0 ? new Date(now + options.ttlMs).toISOString() : null,
+      updatedAt: new Date(now).toISOString(),
+      updatedBy
+    };
+    this.writeDiskState(next);
+    return next;
+  }
+  toggle(options = {}) {
+    const current = this.getState();
+    return this.setEnabled(!current.enabled, {
+      mode: options.mode ?? current.mode,
+      updatedBy: options.updatedBy ?? "cli"
+    });
+  }
+  assertCanSee() {
+    const state = this.getState();
+    if (!state.enabled) {
+      throw new HandyPermissionError(
+        "Handy permission is OFF \u2014 screen capture and computer control are disabled. Run `handy on` (or `/handy:on`) to enable.",
+        state
+      );
+    }
+    return state;
+  }
+  assertCanControl() {
+    const state = this.assertCanSee();
+    if (state.mode === "view_only") {
+      throw new HandyPermissionError(
+        "Handy is in VIEW-ONLY permission mode \u2014 screen viewing is allowed, but mouse and keyboard control are disabled. Run `handy on` (without --view-only) to allow input control.",
+        state
+      );
+    }
+    return state;
+  }
+  watch(onChange) {
+    this.ensureDir();
+    let closed = false;
+    let watcher = null;
+    let lastMtime = this.getMtimeMs();
+    const check2 = () => {
+      if (closed) return;
+      const mtime = this.getMtimeMs();
+      if (mtime !== lastMtime) {
+        lastMtime = mtime;
+        onChange(this.getState());
+      }
+    };
+    try {
+      watcher = watch(this.configDir, (_event, filename) => {
+        if (!filename || filename === "permissions.json") {
+          check2();
+        }
+      });
+      watcher.unref?.();
+    } catch {
+    }
+    const interval = setInterval(check2, 1e3);
+    interval.unref?.();
+    return () => {
+      closed = true;
+      clearInterval(interval);
+      watcher?.close();
+    };
+  }
+  getMtimeMs() {
+    try {
+      return statSync(this.filePath).mtimeMs;
+    } catch {
+      return -1;
+    }
+  }
+  ensureDir() {
+    if (!existsSync2(this.configDir)) {
+      mkdirSync(this.configDir, { recursive: true, mode: 448 });
+    }
+  }
+  readDiskState() {
+    if (!existsSync2(this.filePath)) return null;
+    try {
+      const raw = JSON.parse(readFileSync4(this.filePath, "utf8"));
+      if (typeof raw.enabled !== "boolean") return null;
+      return {
+        enabled: raw.enabled,
+        mode: raw.mode === "view_only" ? "view_only" : "full",
+        expiresAt: typeof raw.expiresAt === "string" ? raw.expiresAt : null,
+        updatedAt: typeof raw.updatedAt === "string" ? raw.updatedAt : (/* @__PURE__ */ new Date(0)).toISOString(),
+        updatedBy: raw.updatedBy === "cli" || raw.updatedBy === "mcp" || raw.updatedBy === "env" || raw.updatedBy === "expired" ? raw.updatedBy : "default"
+      };
+    } catch {
+      return null;
+    }
+  }
+  writeDiskState(state) {
+    this.ensureDir();
+    const tmpPath = `${this.filePath}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}
+`, { encoding: "utf8", mode: 384 });
+    renameSync(tmpPath, this.filePath);
+  }
+};
+
+// src/controller.ts
+function sleepAbortable(ms, signal) {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve2, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Action chain aborted."));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new Error("Action chain aborted."));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve2();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function isTopLeftCorner(p) {
+  return p.x <= 2 && p.y <= 2;
+}
+var HandyController = class _HandyController {
+  backend;
+  permissions;
+  heldButtons = /* @__PURE__ */ new Set();
+  heldKeys = /* @__PURE__ */ new Set();
+  queueTail = Promise.resolve();
+  queuedCount = 0;
+  lastSeenFrame = null;
+  lastObservedMouse = null;
+  lastCommandedTarget = null;
+  static MAX_QUEUED_CHAINS = 8;
+  constructor(options) {
+    this.backend = options.backend;
+    this.permissions = options.permissions ?? new PermissionStore();
+  }
+  async init() {
+    await this.backend.init();
+  }
+  async close() {
+    await this.releaseHeldInputs();
+    await this.backend.close();
+  }
+  async releaseHeldInputs() {
+    for (const btn of Array.from(this.heldButtons)) {
+      try {
+        await this.backend.mouseUp(btn);
+      } catch {
+      }
+      this.heldButtons.delete(btn);
+    }
+    for (const key of Array.from(this.heldKeys).reverse()) {
+      try {
+        await this.backend.keyUp(key);
+      } catch {
+      }
+      this.heldKeys.delete(key);
+    }
+  }
+  async status() {
+    const perm = this.permissions.getState();
+    const base = {
+      enabled: perm.enabled,
+      mode: perm.mode,
+      expiresAt: perm.expiresAt,
+      updatedAt: perm.updatedAt,
+      updatedBy: perm.updatedBy,
+      platform: process.platform,
+      backend: this.backend.name
+    };
+    if (!perm.enabled) {
+      return base;
+    }
+    try {
+      const [displays, mouse, activeWindow] = await Promise.all([
+        this.backend.getDisplays(),
+        this.backend.getMousePosition(),
+        this.backend.getActiveWindow ? this.backend.getActiveWindow().catch(() => null) : Promise.resolve(null)
+      ]);
+      return { ...base, displays, mouse, activeWindow };
+    } catch {
+      return base;
+    }
+  }
+  async doctor() {
+    const permission = this.permissions.getState();
+    const checks = await this.backend.doctor();
+    return {
+      permission,
+      backend: this.backend.name,
+      checks
+    };
+  }
+  async listWindows() {
+    this.permissions.assertCanSee();
+    if (!this.backend.listWindows) return [];
+    return this.backend.listWindows();
+  }
+  async getActiveWindow() {
+    this.permissions.assertCanSee();
+    if (!this.backend.getActiveWindow) return null;
+    return this.backend.getActiveWindow();
+  }
+  async focusWindow(query) {
+    this.permissions.assertCanControl();
+    if (!this.backend.focusWindow) {
+      throw new Error(`Window focusing is not supported by backend "${this.backend.name}".`);
+    }
+    const focused = await this.backend.focusWindow(query);
+    const activeWindow = this.backend.getActiveWindow ? await this.backend.getActiveWindow().catch(() => null) : null;
+    return { focused, activeWindow };
+  }
+  async readClipboard() {
+    this.permissions.assertCanSee();
+    if (!this.backend.getClipboardText) {
+      throw new Error(`Clipboard read is not supported by backend "${this.backend.name}".`);
+    }
+    return this.backend.getClipboardText();
+  }
+  async writeClipboard(text) {
+    this.permissions.assertCanControl();
+    if (!this.backend.setClipboardText) {
+      throw new Error(`Clipboard write is not supported by backend "${this.backend.name}".`);
+    }
+    await this.backend.setClipboardText(text);
+  }
+  async see(options = {}) {
+    this.permissions.assertCanSee();
+    const t0 = performance.now();
+    const [frame, mouse, activeWindow] = await Promise.all([
+      this.backend.captureScreen({ display: options.display, region: options.region }),
+      this.backend.getMousePosition(),
+      this.backend.getActiveWindow ? this.backend.getActiveWindow().catch(() => null) : Promise.resolve(null)
+    ]);
+    this.lastObservedMouse = { ...mouse };
+    const pixelUnderMouse = samplePixelHex(frame, mouse);
+    let screenDiff = null;
+    if (this.lastSeenFrame && this.lastSeenFrame.displayId === frame.displayId && this.lastSeenFrame.originX === frame.originX && this.lastSeenFrame.originY === frame.originY && this.lastSeenFrame.width === frame.width && this.lastSeenFrame.height === frame.height) {
+      screenDiff = computeFrameDiff(this.lastSeenFrame, frame);
+    }
+    this.lastSeenFrame = frame;
+    const maxWidth = options.maxWidth ?? 1280;
+    let outWidth = frame.width;
+    let outHeight = frame.height;
+    let rgba;
+    if (frame.width > maxWidth) {
+      const ratio = maxWidth / frame.width;
+      outWidth = maxWidth;
+      outHeight = Math.max(1, Math.round(frame.height * ratio));
+      rgba = resizeRgba(frame.data, frame.width, frame.height, outWidth, outHeight);
+    } else {
+      rgba = new Uint8Array(frame.data);
+    }
+    const overlayMeta = renderScreenOverlay(rgba, outWidth, outHeight, {
+      originX: frame.originX,
+      originY: frame.originY,
+      logicalWidth: frame.logicalWidth,
+      logicalHeight: frame.logicalHeight,
+      mouse,
+      grid: options.grid ?? true,
+      gridStep: options.gridStep,
+      showMouse: options.showMouse ?? true,
+      trail: options.trail
+    });
+    const pngBuffer = encodePng(outWidth, outHeight, rgba, { compressionLevel: 3 });
+    const captureMs = Math.round((performance.now() - t0) * 10) / 10;
+    return {
+      pngBuffer,
+      base64Png: pngBuffer.toString("base64"),
+      imageWidth: outWidth,
+      imageHeight: outHeight,
+      screen: {
+        displayId: frame.displayId,
+        originX: frame.originX,
+        originY: frame.originY,
+        width: frame.logicalWidth,
+        height: frame.logicalHeight,
+        scaleFactor: frame.scaleFactor
+      },
+      region: {
+        x: frame.originX,
+        y: frame.originY,
+        width: frame.logicalWidth,
+        height: frame.logicalHeight
+      },
+      mouse,
+      pixelUnderMouse,
+      activeWindow,
+      screenDiff,
+      gridStep: overlayMeta.gridStep,
+      coordinateSpace: "screen",
+      captureMs,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  async act(options) {
+    if (!options.actions || options.actions.length === 0) {
+      throw new Error("actions must contain at least one step.");
+    }
+    if (options.actions.length > 100) {
+      throw new Error("actions cannot exceed 100 steps in a single chain.");
+    }
+    if (this.queuedCount >= _HandyController.MAX_QUEUED_CHAINS) {
+      throw new Error("Too many concurrent action chains queued; wait for active chain to finish.");
+    }
+    this.queuedCount += 1;
+    const run = this.queueTail.then(
+      () => this.executeChainInternal(options),
+      () => this.executeChainInternal(options)
+    );
+    this.queueTail = run.then(
+      () => void 0,
+      () => void 0
+    );
+    try {
+      return await run;
+    } finally {
+      this.queuedCount -= 1;
+    }
+  }
+  async checkFailsafe(enabled) {
+    const cur = await this.backend.getMousePosition();
+    if (enabled && isTopLeftCorner(cur) && this.lastObservedMouse !== null && !isTopLeftCorner(this.lastObservedMouse) && (!this.lastCommandedTarget || !isTopLeftCorner(this.lastCommandedTarget))) {
+      this.lastObservedMouse = { ...cur };
+      throw new Error(
+        "Failsafe triggered: cursor was moved to the top-left corner (0,0). Action chain aborted immediately."
+      );
+    }
+    this.lastObservedMouse = { ...cur };
+  }
+  async commandMoveMouse(x, y) {
+    const rx = Math.round(x);
+    const ry = Math.round(y);
+    this.lastCommandedTarget = { x: rx, y: ry };
+    await this.backend.moveMouse(rx, ry);
+    this.lastObservedMouse = { x: rx, y: ry };
+  }
+  async resolvePoint(x, y, space, displayIndex, cachedDisplays) {
+    if (!space || space === "screen") {
+      return { point: { x: Math.round(x), y: Math.round(y) }, displays: cachedDisplays };
+    }
+    const displays = cachedDisplays ?? await this.backend.getDisplays();
+    const disp = displays.find((d) => d.id === (displayIndex ?? 0)) ?? displays[0];
+    if (!disp) {
+      throw new Error("No display found for normalized coordinate conversion.");
+    }
+    const clampedX = Math.max(0, Math.min(1e3, x));
+    const clampedY = Math.max(0, Math.min(1e3, y));
+    return {
+      point: {
+        x: Math.round(disp.x + clampedX / 1e3 * Math.max(1, disp.width - 1)),
+        y: Math.round(disp.y + clampedY / 1e3 * Math.max(1, disp.height - 1))
+      },
+      displays
+    };
+  }
+  async interpolateMove(from, to, durationMs, steps, failsafe, signal) {
+    const count = steps ?? Math.max(2, Math.min(60, Math.round(durationMs / 10)));
+    const interval = durationMs / count;
+    for (let i = 1; i <= count; i++) {
+      this.permissions.assertCanControl();
+      if (signal?.aborted) throw new Error("Action chain aborted.");
+      if (i > 1 && i % 4 === 0) {
+        await this.checkFailsafe(failsafe);
+      }
+      const t = i / count;
+      const eased = 1 - (1 - t) * (1 - t);
+      const nx = Math.round(from.x + (to.x - from.x) * eased);
+      const ny = Math.round(from.y + (to.y - from.y) * eased);
+      await this.commandMoveMouse(nx, ny);
+      if (i < count && interval >= 1) {
+        await sleepAbortable(interval, signal);
+      }
+    }
+  }
+  async performClick(button, count, modifiers, signal) {
+    const resolvedMods = (modifiers ?? []).map((m) => resolveModifier(m, this.backend.platform));
+    for (const mod of resolvedMods) {
+      await this.backend.keyDown(mod);
+      this.heldKeys.add(mod);
+    }
+    try {
+      for (let c = 1; c <= count; c++) {
+        this.permissions.assertCanControl();
+        if (this.backend instanceof DarwinBackend) {
+          await this.backend.mouseDown(button, c, resolvedMods);
+          this.heldButtons.add(button);
+          await this.backend.mouseUp(button, c, resolvedMods);
+          this.heldButtons.delete(button);
+        } else {
+          await this.backend.mouseDown(button);
+          this.heldButtons.add(button);
+          await this.backend.mouseUp(button);
+          this.heldButtons.delete(button);
+        }
+        if (c < count) {
+          await sleepAbortable(20, signal);
+        }
+      }
+    } finally {
+      for (const mod of [...resolvedMods].reverse()) {
+        await this.backend.keyUp(mod);
+        this.heldKeys.delete(mod);
+      }
+    }
+  }
+  async executeChainInternal(options) {
+    this.permissions.assertCanControl();
+    const chainStart = performance.now();
+    const stepDelayMs = options.stepDelayMs ?? 15;
+    const failsafeEnabled = options.failsafe ?? true;
+    const showTrail = options.showTrail ?? true;
+    const receipts = [];
+    const screenshots = [];
+    const trail = [];
+    let cachedDisplays = null;
+    try {
+      await this.checkFailsafe(failsafeEnabled);
+      for (let i = 0; i < options.actions.length; i++) {
+        const step = options.actions[i];
+        if (options.signal?.aborted) {
+          throw new Error("Action chain aborted.");
+        }
+        if (i > 0) {
+          await this.checkFailsafe(failsafeEnabled);
+        }
+        if (step.type === "screenshot" || step.type === "wait_for_change" || step.type === "wait_for_settled") {
+          this.permissions.assertCanSee();
+        } else {
+          this.permissions.assertCanControl();
+        }
+        const stepStart = performance.now();
+        let detail;
+        switch (step.type) {
+          case "move": {
+            let target;
+            if (step.relative) {
+              const cur = await this.backend.getMousePosition();
+              target = { x: Math.round(cur.x + step.x), y: Math.round(cur.y + step.y) };
+            } else {
+              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
+              cachedDisplays = res.displays;
+              target = res.point;
+            }
+            if (step.durationMs && step.durationMs > 0) {
+              const startPos = await this.backend.getMousePosition();
+              await this.interpolateMove(startPos, target, step.durationMs, step.steps, failsafeEnabled, options.signal);
+            } else {
+              await this.commandMoveMouse(target.x, target.y);
+            }
+            detail = `moved to (${target.x},${target.y})`;
+            break;
+          }
+          case "click":
+          case "double_click":
+          case "triple_click":
+          case "right_click": {
+            let clickPos;
+            if (step.x !== void 0 && step.y !== void 0) {
+              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
+              cachedDisplays = res.displays;
+              clickPos = res.point;
+              await this.commandMoveMouse(clickPos.x, clickPos.y);
+              await sleepAbortable(6, options.signal);
+            } else {
+              clickPos = await this.backend.getMousePosition();
+            }
+            const button = step.type === "right_click" ? "right" : "button" in step && step.button ? step.button : "left";
+            const count = step.type === "double_click" ? 2 : step.type === "triple_click" ? 3 : "count" in step && step.count ? step.count : 1;
+            await this.performClick(button, count, step.modifiers, options.signal);
+            trail.push({
+              stepNumber: i + 1,
+              kind: "click",
+              x: clickPos.x,
+              y: clickPos.y
+            });
+            detail = `${button} click x${count} at (${clickPos.x},${clickPos.y})`;
+            break;
+          }
+          case "mouse_down": {
+            if (step.x !== void 0 && step.y !== void 0) {
+              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
+              cachedDisplays = res.displays;
+              await this.commandMoveMouse(res.point.x, res.point.y);
+            }
+            const btn = step.button ?? "left";
+            await this.backend.mouseDown(btn);
+            this.heldButtons.add(btn);
+            detail = `${btn} mouse_down`;
+            break;
+          }
+          case "mouse_up": {
+            if (step.x !== void 0 && step.y !== void 0) {
+              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
+              cachedDisplays = res.displays;
+              await this.commandMoveMouse(res.point.x, res.point.y);
+            }
+            const btn = step.button ?? "left";
+            await this.backend.mouseUp(btn);
+            this.heldButtons.delete(btn);
+            detail = `${btn} mouse_up`;
+            break;
+          }
+          case "drag": {
+            let startPos;
+            if (step.fromX !== void 0 && step.fromY !== void 0) {
+              const fromRes = await this.resolvePoint(
+                step.fromX,
+                step.fromY,
+                step.coordinateSpace,
+                options.display,
+                cachedDisplays
+              );
+              cachedDisplays = fromRes.displays;
+              startPos = fromRes.point;
+              await this.commandMoveMouse(startPos.x, startPos.y);
+              await sleepAbortable(8, options.signal);
+            } else {
+              startPos = await this.backend.getMousePosition();
+            }
+            const toRes = await this.resolvePoint(
+              step.toX,
+              step.toY,
+              step.coordinateSpace,
+              options.display,
+              cachedDisplays
+            );
+            cachedDisplays = toRes.displays;
+            const btn = step.button ?? "left";
+            await this.backend.mouseDown(btn);
+            this.heldButtons.add(btn);
+            try {
+              await this.interpolateMove(
+                startPos,
+                toRes.point,
+                step.durationMs ?? 160,
+                step.steps ?? 16,
+                failsafeEnabled,
+                options.signal
+              );
+            } finally {
+              await this.backend.mouseUp(btn);
+              this.heldButtons.delete(btn);
+            }
+            trail.push(
+              {
+                stepNumber: i + 1,
+                kind: "drag_start",
+                x: startPos.x,
+                y: startPos.y
+              },
+              {
+                stepNumber: i + 1,
+                kind: "drag_end",
+                x: toRes.point.x,
+                y: toRes.point.y
+              }
+            );
+            detail = `dragged (${startPos.x},${startPos.y}) -> (${toRes.point.x},${toRes.point.y})`;
+            break;
+          }
+          case "scroll": {
+            if (step.x !== void 0 && step.y !== void 0) {
+              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
+              cachedDisplays = res.displays;
+              await this.commandMoveMouse(res.point.x, res.point.y);
+            }
+            const amount = step.amount ?? 3;
+            let dx = step.deltaX ?? 0;
+            let dy = step.deltaY ?? 0;
+            if (step.direction === "up") dy -= amount;
+            else if (step.direction === "down") dy += amount;
+            else if (step.direction === "left") dx -= amount;
+            else if (step.direction === "right") dx += amount;
+            await this.backend.scroll(dx, dy);
+            detail = `scrolled dx=${dx} dy=${dy}`;
+            break;
+          }
+          case "type": {
+            if (step.delayMs && step.delayMs > 0) {
+              const chars = Array.from(step.text);
+              for (let cIdx = 0; cIdx < chars.length; cIdx++) {
+                this.permissions.assertCanControl();
+                if (options.signal?.aborted) throw new Error("Action chain aborted.");
+                await this.backend.typeText(chars[cIdx]);
+                if (cIdx < chars.length - 1) {
+                  await sleepAbortable(step.delayMs, options.signal);
+                }
+              }
+            } else if (step.text.length > 0) {
+              await this.backend.typeText(step.text);
+            }
+            if (step.submit) {
+              await sleepAbortable(10, options.signal);
+              await this.backend.keyTap("enter", []);
+            }
+            detail = `typed ${Array.from(step.text).length} chars${step.submit ? " + Enter" : ""}`;
+            break;
+          }
+          case "paste": {
+            if (!this.backend.setClipboardText) {
+              await this.backend.typeText(step.text);
+              if (step.submit) {
+                await sleepAbortable(10, options.signal);
+                await this.backend.keyTap("enter", []);
+              }
+              detail = `typed (clipboard fallback) ${Array.from(step.text).length} chars`;
+              break;
+            }
+            const shouldRestore = step.restoreClipboard ?? true;
+            let previousClip = null;
+            if (shouldRestore && this.backend.getClipboardText) {
+              try {
+                previousClip = await this.backend.getClipboardText();
+              } catch {
+                previousClip = null;
+              }
+            }
+            await this.backend.setClipboardText(step.text);
+            const pasteParsed = parseKeyChord("mod+v", [], this.backend.platform);
+            await this.backend.keyTap(pasteParsed.key, pasteParsed.modifiers);
+            if (previousClip !== null && this.backend.setClipboardText) {
+              await sleepAbortable(35, options.signal);
+              try {
+                await this.backend.setClipboardText(previousClip);
+              } catch {
+              }
+            }
+            if (step.submit) {
+              await sleepAbortable(10, options.signal);
+              await this.backend.keyTap("enter", []);
+            }
+            detail = `pasted ${Array.from(step.text).length} chars${step.submit ? " + Enter" : ""}`;
+            break;
+          }
+          case "key": {
+            const parsed = parseKeyChord(step.key, step.modifiers ?? [], this.backend.platform);
+            const repeat = step.count ?? 1;
+            for (let r = 0; r < repeat; r++) {
+              this.permissions.assertCanControl();
+              await this.backend.keyTap(parsed.key, parsed.modifiers);
+              if (r < repeat - 1) {
+                await sleepAbortable(15, options.signal);
+              }
+            }
+            const chordLabel = [...parsed.modifiers, parsed.key].join("+");
+            detail = repeat > 1 ? `key ${chordLabel} x${repeat}` : `key ${chordLabel}`;
+            break;
+          }
+          case "key_down": {
+            await this.backend.keyDown(step.key);
+            this.heldKeys.add(step.key);
+            detail = `key_down ${step.key}`;
+            break;
+          }
+          case "key_up": {
+            await this.backend.keyUp(step.key);
+            this.heldKeys.delete(step.key);
+            detail = `key_up ${step.key}`;
+            break;
+          }
+          case "focus_window": {
+            if (!this.backend.focusWindow) {
+              throw new Error(`Window focusing is not supported by backend "${this.backend.name}".`);
+            }
+            const ok = await this.backend.focusWindow({
+              title: step.title,
+              app: step.app,
+              id: step.id
+            });
+            if (!ok) {
+              const targetDesc = step.title ?? step.app ?? String(step.id ?? "");
+              throw new Error(`Could not find or focus window matching "${targetDesc}".`);
+            }
+            await sleepAbortable(35, options.signal);
+            detail = `focused window (${step.title ?? step.app ?? step.id})`;
+            break;
+          }
+          case "wait": {
+            await sleepAbortable(step.ms, options.signal);
+            detail = `waited ${step.ms}ms`;
+            break;
+          }
+          case "wait_for_change": {
+            const timeoutMs = step.timeoutMs ?? 3e3;
+            const pollMs = step.pollMs ?? 60;
+            const threshold = step.threshold ?? 0.05;
+            const baseline = await this.backend.captureScreen({
+              display: options.display,
+              region: step.region
+            });
+            const deadline = performance.now() + timeoutMs;
+            let maxObserved = 0;
+            let matchedDiff = null;
+            while (performance.now() < deadline) {
+              await sleepAbortable(pollMs, options.signal);
+              await this.checkFailsafe(failsafeEnabled);
+              const next = await this.backend.captureScreen({
+                display: options.display,
+                region: step.region
+              });
+              const diff = computeFrameDiff(baseline, next);
+              if (diff) {
+                if (diff.changedPercent > maxObserved) maxObserved = diff.changedPercent;
+                if (diff.changedPercent >= threshold) {
+                  matchedDiff = diff;
+                  break;
+                }
+              }
+            }
+            if (!matchedDiff) {
+              throw new Error(
+                `Timed out after ${timeoutMs}ms waiting for screen change >= ${threshold}% (max observed: ${maxObserved}%).`
+              );
+            }
+            detail = `detected ${matchedDiff.changedPercent}% visual change`;
+            break;
+          }
+          case "wait_for_settled": {
+            const timeoutMs = step.timeoutMs ?? 3e3;
+            const quietMs = step.quietMs ?? 120;
+            const pollMs = step.pollMs ?? 80;
+            const threshold = step.threshold ?? 0.1;
+            let prev = await this.backend.captureScreen({
+              display: options.display,
+              region: step.region
+            });
+            const deadline = performance.now() + timeoutMs;
+            let quietSince = performance.now();
+            let settled = false;
+            while (performance.now() < deadline) {
+              await sleepAbortable(pollMs, options.signal);
+              await this.checkFailsafe(failsafeEnabled);
+              const curr = await this.backend.captureScreen({
+                display: options.display,
+                region: step.region
+              });
+              const diff = computeFrameDiff(prev, curr);
+              prev = curr;
+              if (!diff || diff.changedPercent <= threshold) {
+                if (performance.now() - quietSince >= quietMs) {
+                  settled = true;
+                  break;
+                }
+              } else {
+                quietSince = performance.now();
+              }
+            }
+            detail = settled ? `screen settled (${quietMs}ms quiet)` : `timeout (${timeoutMs}ms) reached while waiting for settle`;
+            break;
+          }
+          case "screenshot": {
+            const shot = await this.see({
+              display: options.display,
+              region: step.region,
+              grid: step.grid ?? options.grid ?? true,
+              showMouse: step.showMouse ?? options.showMouse ?? true,
+              maxWidth: step.maxWidth ?? options.maxWidth,
+              trail: showTrail && trail.length > 0 ? trail : void 0
+            });
+            if (step.label) shot.label = step.label;
+            screenshots.push(shot);
+            detail = `captured ${shot.imageWidth}x${shot.imageHeight}`;
+            break;
+          }
+        }
+        const stepDurationMs = Math.round((performance.now() - stepStart) * 10) / 10;
+        receipts.push({
+          index: i,
+          type: step.type,
+          durationMs: stepDurationMs,
+          detail
+        });
+        if (i < options.actions.length - 1 && stepDelayMs > 0 && step.type !== "wait" && step.type !== "wait_for_change" && step.type !== "wait_for_settled" && step.type !== "screenshot") {
+          await sleepAbortable(stepDelayMs, options.signal);
+        }
+      }
+      if (options.screenshotAfter) {
+        const settleMs = options.settleMs ?? 50;
+        if (settleMs > 0) {
+          await sleepAbortable(settleMs, options.signal);
+        }
+        const postShot = await this.see({
+          display: options.display,
+          grid: options.grid ?? true,
+          showMouse: options.showMouse ?? true,
+          maxWidth: options.maxWidth,
+          trail: showTrail && trail.length > 0 ? trail : void 0
+        });
+        postShot.label = "after";
+        screenshots.push(postShot);
+      }
+      const [finalMouse, activeWindow] = await Promise.all([
+        this.backend.getMousePosition(),
+        this.backend.getActiveWindow ? this.backend.getActiveWindow().catch(() => null) : Promise.resolve(null)
+      ]);
+      this.lastObservedMouse = { ...finalMouse };
+      const totalDurationMs = Math.round((performance.now() - chainStart) * 10) / 10;
+      return {
+        ok: true,
+        stepsCompleted: receipts.length,
+        totalDurationMs,
+        mouse: finalMouse,
+        activeWindow,
+        receipts,
+        screenshots
+      };
+    } catch (err) {
+      await this.releaseHeldInputs();
+      throw err;
+    }
+  }
+};
+function parseChainInput(input2) {
+  const trimmed = input2.trim();
+  if (!trimmed) {
+    throw new Error("Empty action input.");
+  }
+  if (trimmed.startsWith("[")) {
+    const parsed = JSON.parse(trimmed);
+    if (!Array.isArray(parsed)) {
+      throw new Error("JSON action input must be an array of steps.");
+    }
+    return parsed;
+  }
+  if (trimmed.startsWith("{")) {
+    return [JSON.parse(trimmed)];
+  }
+  const segments = [];
+  let current = "";
+  let quote = null;
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (quote) {
+      if (ch === "\\" && i + 1 < trimmed.length) {
+        current += ch + trimmed[i + 1];
+        i++;
+        continue;
+      }
+      if (ch === quote) quote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === ";") {
+      if (current.trim()) segments.push(current.trim());
+      current = "";
+      continue;
+    }
+    if (ch === "-" && trimmed[i + 1] === ">") {
+      if (current.trim()) segments.push(current.trim());
+      current = "";
+      i++;
+      continue;
+    }
+    current += ch;
+  }
+  if (current.trim()) segments.push(current.trim());
+  const tokenize = (seg) => {
+    const out = [];
+    let tok = "";
+    let q = null;
+    for (let i = 0; i < seg.length; i++) {
+      const ch = seg[i];
+      if (q) {
+        if (ch === "\\" && i + 1 < seg.length) {
+          const next = seg[i + 1];
+          tok += next === "n" ? "\n" : next === "t" ? "	" : next;
+          i++;
+          continue;
+        }
+        if (ch === q) {
+          q = null;
+          continue;
+        }
+        tok += ch;
+        continue;
+      }
+      if (ch === '"' || ch === "'") {
+        q = ch;
+        continue;
+      }
+      if (/\s/.test(ch)) {
+        if (tok.length > 0) {
+          out.push(tok);
+          tok = "";
+        }
+        continue;
+      }
+      tok += ch;
+    }
+    if (tok.length > 0) out.push(tok);
+    return out;
+  };
+  return segments.map((seg) => {
+    const tokens = tokenize(seg);
+    const cmd = (tokens[0] ?? "").toLowerCase();
+    const parseCoords = (a, b) => {
+      if (a && a.includes(",") && b === void 0) {
+        const [xs, ys] = a.split(",");
+        const x = Number(xs);
+        const y = Number(ys);
+        if (!Number.isNaN(x) && !Number.isNaN(y)) return [x, y];
+      }
+      if (a !== void 0 && b !== void 0) {
+        const x = Number(a);
+        const y = Number(b);
+        if (!Number.isNaN(x) && !Number.isNaN(y)) return [x, y];
+      }
+      return null;
+    };
+    switch (cmd) {
+      case "move": {
+        const coords = parseCoords(tokens[1], tokens[2]);
+        if (!coords) throw new Error(`Invalid move step "${seg}". Expected: move <x> <y>`);
+        return { type: "move", x: coords[0], y: coords[1] };
+      }
+      case "click": {
+        const coords = parseCoords(tokens[1], tokens[2]);
+        return coords ? { type: "click", x: coords[0], y: coords[1] } : { type: "click" };
+      }
+      case "double_click":
+      case "doubleclick":
+      case "dblclick": {
+        const coords = parseCoords(tokens[1], tokens[2]);
+        return coords ? { type: "double_click", x: coords[0], y: coords[1] } : { type: "double_click" };
+      }
+      case "triple_click":
+      case "tripleclick": {
+        const coords = parseCoords(tokens[1], tokens[2]);
+        return coords ? { type: "triple_click", x: coords[0], y: coords[1] } : { type: "triple_click" };
+      }
+      case "right_click":
+      case "rightclick":
+      case "rclick": {
+        const coords = parseCoords(tokens[1], tokens[2]);
+        return coords ? { type: "right_click", x: coords[0], y: coords[1] } : { type: "right_click" };
+      }
+      case "drag": {
+        if (tokens.length >= 5) {
+          return {
+            type: "drag",
+            fromX: Number(tokens[1]),
+            fromY: Number(tokens[2]),
+            toX: Number(tokens[3]),
+            toY: Number(tokens[4])
+          };
+        }
+        const coords = parseCoords(tokens[1], tokens[2]);
+        if (!coords) throw new Error(`Invalid drag step "${seg}". Expected: drag [fromX fromY] <toX> <toY>`);
+        return { type: "drag", toX: coords[0], toY: coords[1] };
+      }
+      case "scroll": {
+        const dir = tokens[1]?.toLowerCase();
+        if (dir === "up" || dir === "down" || dir === "left" || dir === "right") {
+          const amount = tokens[2] ? Number(tokens[2]) : 3;
+          return { type: "scroll", direction: dir, amount };
+        }
+        const coords = parseCoords(tokens[1], tokens[2]);
+        if (coords) return { type: "scroll", deltaX: coords[0], deltaY: coords[1] };
+        throw new Error(`Invalid scroll step "${seg}". Expected: scroll <up|down|left|right> [amount]`);
+      }
+      case "type": {
+        const rawAfterCmd = seg.replace(/^type\s+/i, "");
+        const text = rawAfterCmd.startsWith('"') && rawAfterCmd.endsWith('"') || rawAfterCmd.startsWith("'") && rawAfterCmd.endsWith("'") ? tokens[1] ?? "" : rawAfterCmd;
+        return { type: "type", text };
+      }
+      case "paste": {
+        const rawAfterCmd = seg.replace(/^paste\s+/i, "");
+        const text = rawAfterCmd.startsWith('"') && rawAfterCmd.endsWith('"') || rawAfterCmd.startsWith("'") && rawAfterCmd.endsWith("'") ? tokens[1] ?? "" : rawAfterCmd;
+        return { type: "paste", text };
+      }
+      case "key":
+      case "press": {
+        if (!tokens[1]) throw new Error(`Invalid key step "${seg}". Expected: key <KeyOrChord>`);
+        return { type: "key", key: tokens[1] };
+      }
+      case "focus":
+      case "focus_window": {
+        const title = tokens.slice(1).join(" ").trim();
+        if (!title) throw new Error(`Invalid focus_window step "${seg}". Expected: focus <WindowTitle>`);
+        return { type: "focus_window", title };
+      }
+      case "wait":
+      case "sleep": {
+        const ms = Number(tokens[1] ?? 0);
+        if (Number.isNaN(ms) || ms < 0) throw new Error(`Invalid wait step "${seg}". Expected: wait <ms>`);
+        return { type: "wait", ms };
+      }
+      case "wait_for_change": {
+        const timeoutMs = tokens[1] ? Number(tokens[1]) : void 0;
+        return { type: "wait_for_change", timeoutMs };
+      }
+      case "wait_for_settled": {
+        const timeoutMs = tokens[1] ? Number(tokens[1]) : void 0;
+        const quietMs = tokens[2] ? Number(tokens[2]) : void 0;
+        return { type: "wait_for_settled", timeoutMs, quietMs };
+      }
+      case "screenshot":
+      case "see":
+        return { type: "screenshot" };
+      default:
+        throw new Error(
+          `Unknown step "${cmd}" in "${seg}". Supported steps: move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, screenshot.`
+        );
+    }
+  });
+}
+
+// src/installer.ts
+import { copyFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { dirname, join as join5 } from "node:path";
+var SUPPORTED_MCP_HOSTS = [
+  "claude-desktop",
+  "cursor",
+  "windsurf",
+  "claude-code"
+];
+function resolveHostConfigPath(host, env = {}) {
+  const platform = env.platform ?? process.platform;
+  const home = env.homeDir ?? homedir3();
+  const appData = env.appDataDir ?? process.env.APPDATA ?? join5(home, "AppData", "Roaming");
+  switch (host) {
+    case "claude-desktop": {
+      if (platform === "darwin") {
+        return join5(home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
+      }
+      if (platform === "win32") {
+        return join5(appData, "Claude", "claude_desktop_config.json");
+      }
+      return join5(home, ".config", "Claude", "claude_desktop_config.json");
+    }
+    case "cursor":
+      return join5(home, ".cursor", "mcp.json");
+    case "windsurf":
+      return join5(home, ".codeium", "windsurf", "mcp_config.json");
+    case "claude-code":
+      return join5(home, ".claude.json");
+  }
+}
+function buildHandyMcpEntry(platform = process.platform) {
+  if (platform === "win32") {
+    return {
+      command: "cmd",
+      args: ["/c", "npx", "-y", "@miisodev/handy", "mcp"]
+    };
+  }
+  return {
+    command: "npx",
+    args: ["-y", "@miisodev/handy", "mcp"]
+  };
+}
+function readJsonObject(filePath) {
+  if (!existsSync3(filePath)) return {};
+  const raw = readFileSync5(filePath, "utf8").trim();
+  if (!raw) return {};
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Expected JSON object in ${filePath}`);
+  }
+  return parsed;
+}
+function atomicWriteJson(filePath, data) {
+  const dir = dirname(filePath);
+  mkdirSync2(dir, { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}`;
+  writeFileSync2(tmp, `${JSON.stringify(data, null, 2)}
+`, "utf8");
+  renameSync2(tmp, filePath);
+}
+function installHandyToHosts(target = "all", env = {}) {
+  const platform = env.platform ?? process.platform;
+  const dryRun = Boolean(env.dryRun);
+  const hosts = target === "all" ? [...SUPPORTED_MCP_HOSTS] : [target];
+  const entry = buildHandyMcpEntry(platform);
+  const results = [];
+  for (const host of hosts) {
+    const configPath = resolveHostConfigPath(host, env);
+    const parentExists = existsSync3(dirname(configPath)) || existsSync3(configPath);
+    if (target === "all" && !parentExists && host !== "claude-desktop" && host !== "cursor") {
+      results.push({
+        host,
+        configPath,
+        action: "skipped",
+        dryRun,
+        detail: "Host directory not present on this machine"
+      });
+      continue;
+    }
+    const fileExisted = existsSync3(configPath);
+    const doc = readJsonObject(configPath);
+    const servers = doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers) ? { ...doc.mcpServers } : {};
+    const prev = JSON.stringify(servers.handy ?? null);
+    const next = JSON.stringify(entry);
+    if (prev === next) {
+      results.push({
+        host,
+        configPath,
+        action: "unchanged",
+        dryRun,
+        detail: "Handy MCP server already configured"
+      });
+      continue;
+    }
+    servers.handy = entry;
+    const updatedDoc = { ...doc, mcpServers: servers };
+    let backupPath;
+    if (!dryRun) {
+      if (fileExisted) {
+        backupPath = `${configPath}.handy.bak`;
+        copyFileSync(configPath, backupPath);
+      }
+      atomicWriteJson(configPath, updatedDoc);
+    }
+    results.push({
+      host,
+      configPath,
+      action: fileExisted ? "updated" : "installed",
+      backupPath,
+      dryRun,
+      detail: dryRun ? "Dry run \u2014 would write Handy MCP configuration" : "Configured Handy MCP server"
+    });
+  }
+  return results;
+}
+function uninstallHandyFromHosts(target = "all", env = {}) {
+  const dryRun = Boolean(env.dryRun);
+  const hosts = target === "all" ? [...SUPPORTED_MCP_HOSTS] : [target];
+  const results = [];
+  for (const host of hosts) {
+    const configPath = resolveHostConfigPath(host, env);
+    if (!existsSync3(configPath)) {
+      results.push({
+        host,
+        configPath,
+        action: "skipped",
+        dryRun,
+        detail: "Config file does not exist"
+      });
+      continue;
+    }
+    const doc = readJsonObject(configPath);
+    const servers = doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers) ? { ...doc.mcpServers } : {};
+    if (!("handy" in servers)) {
+      results.push({
+        host,
+        configPath,
+        action: "unchanged",
+        dryRun,
+        detail: "Handy entry not present"
+      });
+      continue;
+    }
+    delete servers.handy;
+    const updatedDoc = { ...doc, mcpServers: servers };
+    let backupPath;
+    if (!dryRun) {
+      backupPath = `${configPath}.handy.bak`;
+      copyFileSync(configPath, backupPath);
+      atomicWriteJson(configPath, updatedDoc);
+    }
+    results.push({
+      host,
+      configPath,
+      action: "removed",
+      backupPath,
+      dryRun,
+      detail: dryRun ? "Dry run \u2014 would remove Handy MCP entry" : "Removed Handy MCP entry"
+    });
+  }
+  return results;
+}
+
+// node_modules/zod/v3/helpers/util.js
+var util;
+(function(util2) {
+  util2.assertEqual = (_) => {
+  };
+  function assertIs2(_arg) {
+  }
+  util2.assertIs = assertIs2;
+  function assertNever2(_x) {
+    throw new Error();
+  }
+  util2.assertNever = assertNever2;
+  util2.arrayToEnum = (items) => {
+    const obj = {};
+    for (const item of items) {
+      obj[item] = item;
+    }
+    return obj;
+  };
+  util2.getValidEnumValues = (obj) => {
+    const validKeys = util2.objectKeys(obj).filter((k) => typeof obj[obj[k]] !== "number");
+    const filtered = {};
+    for (const k of validKeys) {
+      filtered[k] = obj[k];
+    }
+    return util2.objectValues(filtered);
+  };
+  util2.objectValues = (obj) => {
+    return util2.objectKeys(obj).map(function(e) {
+      return obj[e];
+    });
+  };
+  util2.objectKeys = typeof Object.keys === "function" ? (obj) => Object.keys(obj) : (object3) => {
+    const keys = [];
+    for (const key in object3) {
+      if (Object.prototype.hasOwnProperty.call(object3, key)) {
+        keys.push(key);
+      }
+    }
+    return keys;
+  };
+  util2.find = (arr, checker) => {
+    for (const item of arr) {
+      if (checker(item))
+        return item;
+    }
+    return void 0;
+  };
+  util2.isInteger = typeof Number.isInteger === "function" ? (val) => Number.isInteger(val) : (val) => typeof val === "number" && Number.isFinite(val) && Math.floor(val) === val;
+  function joinValues2(array2, separator = " | ") {
+    return array2.map((val) => typeof val === "string" ? `'${val}'` : val).join(separator);
+  }
+  util2.joinValues = joinValues2;
+  util2.jsonStringifyReplacer = (_, value) => {
+    if (typeof value === "bigint") {
+      return value.toString();
+    }
+    return value;
+  };
+})(util || (util = {}));
+var objectUtil;
+(function(objectUtil2) {
+  objectUtil2.mergeShapes = (first, second) => {
+    return {
+      ...first,
+      ...second
+      // second overwrites first
+    };
+  };
+})(objectUtil || (objectUtil = {}));
+var ZodParsedType = util.arrayToEnum([
+  "string",
+  "nan",
+  "number",
+  "integer",
+  "float",
+  "boolean",
+  "date",
+  "bigint",
+  "symbol",
+  "function",
+  "undefined",
+  "null",
+  "array",
+  "object",
+  "unknown",
+  "promise",
+  "void",
+  "never",
+  "map",
+  "set"
+]);
+var getParsedType2 = (data) => {
+  const t = typeof data;
+  switch (t) {
+    case "undefined":
+      return ZodParsedType.undefined;
+    case "string":
+      return ZodParsedType.string;
+    case "number":
+      return Number.isNaN(data) ? ZodParsedType.nan : ZodParsedType.number;
+    case "boolean":
+      return ZodParsedType.boolean;
+    case "function":
+      return ZodParsedType.function;
+    case "bigint":
+      return ZodParsedType.bigint;
+    case "symbol":
+      return ZodParsedType.symbol;
+    case "object":
+      if (Array.isArray(data)) {
+        return ZodParsedType.array;
+      }
+      if (data === null) {
+        return ZodParsedType.null;
+      }
+      if (data.then && typeof data.then === "function" && data.catch && typeof data.catch === "function") {
+        return ZodParsedType.promise;
+      }
+      if (typeof Map !== "undefined" && data instanceof Map) {
+        return ZodParsedType.map;
+      }
+      if (typeof Set !== "undefined" && data instanceof Set) {
+        return ZodParsedType.set;
+      }
+      if (typeof Date !== "undefined" && data instanceof Date) {
+        return ZodParsedType.date;
+      }
+      return ZodParsedType.object;
+    default:
+      return ZodParsedType.unknown;
+  }
+};
+
+// node_modules/zod/v3/ZodError.js
+var ZodIssueCode2 = util.arrayToEnum([
+  "invalid_type",
+  "invalid_literal",
+  "custom",
+  "invalid_union",
+  "invalid_union_discriminator",
+  "invalid_enum_value",
+  "unrecognized_keys",
+  "invalid_arguments",
+  "invalid_return_type",
+  "invalid_date",
+  "invalid_string",
+  "too_small",
+  "too_big",
+  "invalid_intersection_types",
+  "not_multiple_of",
+  "not_finite"
+]);
+var ZodError2 = class _ZodError extends Error {
+  get errors() {
+    return this.issues;
+  }
+  constructor(issues) {
+    super();
+    this.issues = [];
+    this.addIssue = (sub) => {
+      this.issues = [...this.issues, sub];
+    };
+    this.addIssues = (subs = []) => {
+      this.issues = [...this.issues, ...subs];
+    };
+    const actualProto = new.target.prototype;
+    if (Object.setPrototypeOf) {
+      Object.setPrototypeOf(this, actualProto);
+    } else {
+      this.__proto__ = actualProto;
+    }
+    this.name = "ZodError";
+    this.issues = issues;
+  }
+  format(_mapper) {
+    const mapper = _mapper || function(issue2) {
+      return issue2.message;
+    };
+    const fieldErrors = { _errors: [] };
+    const processError = (error62) => {
+      for (const issue2 of error62.issues) {
+        if (issue2.code === "invalid_union") {
+          issue2.unionErrors.map(processError);
+        } else if (issue2.code === "invalid_return_type") {
+          processError(issue2.returnTypeError);
+        } else if (issue2.code === "invalid_arguments") {
+          processError(issue2.argumentsError);
+        } else if (issue2.path.length === 0) {
+          fieldErrors._errors.push(mapper(issue2));
+        } else {
+          let curr = fieldErrors;
+          let i = 0;
+          while (i < issue2.path.length) {
+            const el = issue2.path[i];
+            const terminal = i === issue2.path.length - 1;
+            if (el === "_errors") {
+              if (terminal)
+                curr._errors.push(mapper(issue2));
+              i++;
+              continue;
+            }
+            if (!Object.prototype.hasOwnProperty.call(curr, el)) {
+              if (el === "__proto__") {
+                Object.defineProperty(curr, el, {
+                  value: { _errors: [] },
+                  writable: true,
+                  enumerable: true,
+                  configurable: true
+                });
+              } else {
+                curr[el] = { _errors: [] };
+              }
+            }
+            curr = curr[el];
+            if (terminal) {
+              curr._errors.push(mapper(issue2));
+            }
+            i++;
+          }
+        }
+      }
+    };
+    processError(this);
+    return fieldErrors;
+  }
+  static assert(value) {
+    if (!(value instanceof _ZodError)) {
+      throw new Error(`Not a ZodError: ${value}`);
+    }
+  }
+  toString() {
+    return this.message;
+  }
+  get message() {
+    return JSON.stringify(this.issues, util.jsonStringifyReplacer, 2);
+  }
+  get isEmpty() {
+    return this.issues.length === 0;
+  }
+  flatten(mapper = (issue2) => issue2.message) {
+    const fieldErrors = /* @__PURE__ */ Object.create(null);
+    const formErrors = [];
+    for (const sub of this.issues) {
+      if (sub.path.length > 0) {
+        const firstEl = sub.path[0];
+        fieldErrors[firstEl] = fieldErrors[firstEl] || [];
+        fieldErrors[firstEl].push(mapper(sub));
+      } else {
+        formErrors.push(mapper(sub));
+      }
+    }
+    return { formErrors, fieldErrors };
+  }
+  get formErrors() {
+    return this.flatten();
+  }
+};
+ZodError2.create = (issues) => {
+  const error62 = new ZodError2(issues);
+  return error62;
+};
+
+// node_modules/zod/v3/locales/en.js
+var errorMap = (issue2, _ctx) => {
+  let message;
+  switch (issue2.code) {
+    case ZodIssueCode2.invalid_type:
+      if (issue2.received === ZodParsedType.undefined) {
+        message = "Required";
+      } else {
+        message = `Expected ${issue2.expected}, received ${issue2.received}`;
+      }
+      break;
+    case ZodIssueCode2.invalid_literal:
+      message = `Invalid literal value, expected ${JSON.stringify(issue2.expected, util.jsonStringifyReplacer)}`;
+      break;
+    case ZodIssueCode2.unrecognized_keys:
+      message = `Unrecognized key(s) in object: ${util.joinValues(issue2.keys, ", ")}`;
+      break;
+    case ZodIssueCode2.invalid_union:
+      message = `Invalid input`;
+      break;
+    case ZodIssueCode2.invalid_union_discriminator:
+      message = `Invalid discriminator value. Expected ${util.joinValues(issue2.options)}`;
+      break;
+    case ZodIssueCode2.invalid_enum_value:
+      message = `Invalid enum value. Expected ${util.joinValues(issue2.options)}, received '${issue2.received}'`;
+      break;
+    case ZodIssueCode2.invalid_arguments:
+      message = `Invalid function arguments`;
+      break;
+    case ZodIssueCode2.invalid_return_type:
+      message = `Invalid function return type`;
+      break;
+    case ZodIssueCode2.invalid_date:
+      message = `Invalid date`;
+      break;
+    case ZodIssueCode2.invalid_string:
+      if (typeof issue2.validation === "object") {
+        if ("includes" in issue2.validation) {
+          message = `Invalid input: must include "${issue2.validation.includes}"`;
+          if (typeof issue2.validation.position === "number") {
+            message = `${message} at one or more positions greater than or equal to ${issue2.validation.position}`;
+          }
+        } else if ("startsWith" in issue2.validation) {
+          message = `Invalid input: must start with "${issue2.validation.startsWith}"`;
+        } else if ("endsWith" in issue2.validation) {
+          message = `Invalid input: must end with "${issue2.validation.endsWith}"`;
+        } else {
+          util.assertNever(issue2.validation);
+        }
+      } else if (issue2.validation !== "regex") {
+        message = `Invalid ${issue2.validation}`;
+      } else {
+        message = "Invalid";
+      }
+      break;
+    case ZodIssueCode2.too_small:
+      if (issue2.type === "array")
+        message = `Array must contain ${issue2.exact ? "exactly" : issue2.inclusive ? `at least` : `more than`} ${issue2.minimum} element(s)`;
+      else if (issue2.type === "string")
+        message = `String must contain ${issue2.exact ? "exactly" : issue2.inclusive ? `at least` : `over`} ${issue2.minimum} character(s)`;
+      else if (issue2.type === "number")
+        message = `Number must be ${issue2.exact ? `exactly equal to ` : issue2.inclusive ? `greater than or equal to ` : `greater than `}${issue2.minimum}`;
+      else if (issue2.type === "bigint")
+        message = `Number must be ${issue2.exact ? `exactly equal to ` : issue2.inclusive ? `greater than or equal to ` : `greater than `}${issue2.minimum}`;
+      else if (issue2.type === "date")
+        message = `Date must be ${issue2.exact ? `exactly equal to ` : issue2.inclusive ? `greater than or equal to ` : `greater than `}${new Date(Number(issue2.minimum))}`;
+      else
+        message = "Invalid input";
+      break;
+    case ZodIssueCode2.too_big:
+      if (issue2.type === "array")
+        message = `Array must contain ${issue2.exact ? `exactly` : issue2.inclusive ? `at most` : `less than`} ${issue2.maximum} element(s)`;
+      else if (issue2.type === "string")
+        message = `String must contain ${issue2.exact ? `exactly` : issue2.inclusive ? `at most` : `under`} ${issue2.maximum} character(s)`;
+      else if (issue2.type === "number")
+        message = `Number must be ${issue2.exact ? `exactly` : issue2.inclusive ? `less than or equal to` : `less than`} ${issue2.maximum}`;
+      else if (issue2.type === "bigint")
+        message = `BigInt must be ${issue2.exact ? `exactly` : issue2.inclusive ? `less than or equal to` : `less than`} ${issue2.maximum}`;
+      else if (issue2.type === "date")
+        message = `Date must be ${issue2.exact ? `exactly` : issue2.inclusive ? `smaller than or equal to` : `smaller than`} ${new Date(Number(issue2.maximum))}`;
+      else
+        message = "Invalid input";
+      break;
+    case ZodIssueCode2.custom:
+      message = `Invalid input`;
+      break;
+    case ZodIssueCode2.invalid_intersection_types:
+      message = `Intersection results could not be merged`;
+      break;
+    case ZodIssueCode2.not_multiple_of:
+      message = `Number must be a multiple of ${issue2.multipleOf}`;
+      break;
+    case ZodIssueCode2.not_finite:
+      message = "Number must be finite";
+      break;
+    default:
+      message = _ctx.defaultError;
+      util.assertNever(issue2);
+  }
+  return { message };
+};
+var en_default2 = errorMap;
+
+// node_modules/zod/v3/errors.js
+var overrideErrorMap = en_default2;
+function getErrorMap2() {
+  return overrideErrorMap;
+}
+
+// node_modules/zod/v3/helpers/parseUtil.js
+var makeIssue = (params) => {
+  const { data, path, errorMaps, issueData } = params;
+  const fullPath = [...path, ...issueData.path || []];
+  const fullIssue = {
+    ...issueData,
+    path: fullPath
+  };
+  if (issueData.message !== void 0) {
+    return {
+      ...issueData,
+      path: fullPath,
+      message: issueData.message
+    };
+  }
+  let errorMessage = "";
+  const maps = errorMaps.filter((m) => !!m).slice().reverse();
+  for (const map2 of maps) {
+    errorMessage = map2(fullIssue, { data, defaultError: errorMessage }).message;
+  }
+  return {
+    ...issueData,
+    path: fullPath,
+    message: errorMessage
+  };
+};
+function addIssueToContext(ctx, issueData) {
+  const overrideMap = getErrorMap2();
+  const issue2 = makeIssue({
+    issueData,
+    data: ctx.data,
+    path: ctx.path,
+    errorMaps: [
+      ctx.common.contextualErrorMap,
+      // contextual error map is first priority
+      ctx.schemaErrorMap,
+      // then schema-bound map if available
+      overrideMap,
+      // then global override map
+      overrideMap === en_default2 ? void 0 : en_default2
+      // then global default map
+    ].filter((x) => !!x)
+  });
+  ctx.common.issues.push(issue2);
+}
+var ParseStatus = class _ParseStatus {
+  constructor() {
+    this.value = "valid";
+  }
+  dirty() {
+    if (this.value === "valid")
+      this.value = "dirty";
+  }
+  abort() {
+    if (this.value !== "aborted")
+      this.value = "aborted";
+  }
+  static mergeArray(status, results) {
+    const arrayValue = [];
+    for (const s of results) {
+      if (s.status === "aborted")
+        return INVALID2;
+      if (s.status === "dirty")
+        status.dirty();
+      arrayValue.push(s.value);
+    }
+    return { status: status.value, value: arrayValue };
+  }
+  static async mergeObjectAsync(status, pairs) {
+    const syncPairs = [];
+    for (const pair of pairs) {
+      const key = await pair.key;
+      const value = await pair.value;
+      syncPairs.push({
+        key,
+        value
+      });
+    }
+    return _ParseStatus.mergeObjectSync(status, syncPairs);
+  }
+  static mergeObjectSync(status, pairs) {
+    const finalObject = {};
+    for (const pair of pairs) {
+      const { key, value } = pair;
+      if (key.status === "aborted")
+        return INVALID2;
+      if (value.status === "aborted")
+        return INVALID2;
+      if (key.status === "dirty")
+        status.dirty();
+      if (value.status === "dirty")
+        status.dirty();
+      if (key.value !== "__proto__" && (typeof value.value !== "undefined" || pair.alwaysSet)) {
+        finalObject[key.value] = value.value;
+      }
+    }
+    return { status: status.value, value: finalObject };
+  }
+};
+var INVALID2 = Object.freeze({
+  status: "aborted"
+});
+var DIRTY = (value) => ({ status: "dirty", value });
+var OK = (value) => ({ status: "valid", value });
+var isAborted = (x) => x.status === "aborted";
+var isDirty = (x) => x.status === "dirty";
+var isValid = (x) => x.status === "valid";
+var isAsync = (x) => typeof Promise !== "undefined" && x instanceof Promise;
+
+// node_modules/zod/v3/helpers/errorUtil.js
+var errorUtil;
+(function(errorUtil2) {
+  errorUtil2.errToObj = (message) => typeof message === "string" ? { message } : message || {};
+  errorUtil2.toString = (message) => typeof message === "string" ? message : message?.message;
+})(errorUtil || (errorUtil = {}));
+
+// node_modules/zod/v3/types.js
+var ParseInputLazyPath = class {
+  constructor(parent, value, path, key) {
+    this._cachedPath = [];
+    this.parent = parent;
+    this.data = value;
+    this._path = path;
+    this._key = key;
+  }
+  get path() {
+    if (!this._cachedPath.length) {
+      if (Array.isArray(this._key)) {
+        this._cachedPath.push(...this._path, ...this._key);
+      } else {
+        this._cachedPath.push(...this._path, this._key);
+      }
+    }
+    return this._cachedPath;
+  }
+};
+var handleResult = (ctx, result) => {
+  if (isValid(result)) {
+    return { success: true, data: result.value };
+  } else {
+    if (!ctx.common.issues.length) {
+      throw new Error("Validation failed but no issues detected.");
+    }
+    return {
+      success: false,
+      get error() {
+        if (this._error)
+          return this._error;
+        const error62 = new ZodError2(ctx.common.issues);
+        this._error = error62;
+        return this._error;
+      }
+    };
+  }
+};
+function processCreateParams(params) {
+  if (!params)
+    return {};
+  const { errorMap: errorMap2, invalid_type_error, required_error, description } = params;
+  if (errorMap2 && (invalid_type_error || required_error)) {
+    throw new Error(`Can't use "invalid_type_error" or "required_error" in conjunction with custom error map.`);
+  }
+  if (errorMap2)
+    return { errorMap: errorMap2, description };
+  const customMap = (iss, ctx) => {
+    const { message } = params;
+    if (iss.code === "invalid_enum_value") {
+      return { message: message ?? ctx.defaultError };
+    }
+    if (typeof ctx.data === "undefined") {
+      return { message: message ?? required_error ?? ctx.defaultError };
+    }
+    if (iss.code !== "invalid_type")
+      return { message: ctx.defaultError };
+    return { message: message ?? invalid_type_error ?? ctx.defaultError };
+  };
+  return { errorMap: customMap, description };
+}
+var ZodType2 = class {
+  get description() {
+    return this._def.description;
+  }
+  _getType(input2) {
+    return getParsedType2(input2.data);
+  }
+  _getOrReturnCtx(input2, ctx) {
+    return ctx || {
+      common: input2.parent.common,
+      data: input2.data,
+      parsedType: getParsedType2(input2.data),
+      schemaErrorMap: this._def.errorMap,
+      path: input2.path,
+      parent: input2.parent
+    };
+  }
+  _processInputParams(input2) {
+    return {
+      status: new ParseStatus(),
+      ctx: {
+        common: input2.parent.common,
+        data: input2.data,
+        parsedType: getParsedType2(input2.data),
+        schemaErrorMap: this._def.errorMap,
+        path: input2.path,
+        parent: input2.parent
+      }
+    };
+  }
+  _parseSync(input2) {
+    const result = this._parse(input2);
+    if (isAsync(result)) {
+      throw new Error("Synchronous parse encountered promise.");
+    }
+    return result;
+  }
+  _parseAsync(input2) {
+    const result = this._parse(input2);
+    return Promise.resolve(result);
+  }
+  parse(data, params) {
+    const result = this.safeParse(data, params);
+    if (result.success)
+      return result.data;
+    throw result.error;
+  }
+  safeParse(data, params) {
+    const ctx = {
+      common: {
+        issues: [],
+        async: params?.async ?? false,
+        contextualErrorMap: params?.errorMap
+      },
+      path: params?.path || [],
+      schemaErrorMap: this._def.errorMap,
+      parent: null,
+      data,
+      parsedType: getParsedType2(data)
+    };
+    const result = this._parseSync({ data, path: ctx.path, parent: ctx });
+    return handleResult(ctx, result);
+  }
+  "~validate"(data) {
+    const ctx = {
+      common: {
+        issues: [],
+        async: !!this["~standard"].async
+      },
+      path: [],
+      schemaErrorMap: this._def.errorMap,
+      parent: null,
+      data,
+      parsedType: getParsedType2(data)
+    };
+    if (!this["~standard"].async) {
+      try {
+        const result = this._parseSync({ data, path: [], parent: ctx });
+        return isValid(result) ? {
+          value: result.value
+        } : {
+          issues: ctx.common.issues
+        };
+      } catch (err) {
+        if (err?.message?.toLowerCase()?.includes("encountered")) {
+          this["~standard"].async = true;
+        }
+        ctx.common = {
+          issues: [],
+          async: true
+        };
+      }
+    }
+    return this._parseAsync({ data, path: [], parent: ctx }).then((result) => isValid(result) ? {
+      value: result.value
+    } : {
+      issues: ctx.common.issues
+    });
+  }
+  async parseAsync(data, params) {
+    const result = await this.safeParseAsync(data, params);
+    if (result.success)
+      return result.data;
+    throw result.error;
+  }
+  async safeParseAsync(data, params) {
+    const ctx = {
+      common: {
+        issues: [],
+        contextualErrorMap: params?.errorMap,
+        async: true
+      },
+      path: params?.path || [],
+      schemaErrorMap: this._def.errorMap,
+      parent: null,
+      data,
+      parsedType: getParsedType2(data)
+    };
+    const maybeAsyncResult = this._parse({ data, path: ctx.path, parent: ctx });
+    const result = await (isAsync(maybeAsyncResult) ? maybeAsyncResult : Promise.resolve(maybeAsyncResult));
+    return handleResult(ctx, result);
+  }
+  refine(check2, message) {
+    const getIssueProperties = (val) => {
+      if (typeof message === "string" || typeof message === "undefined") {
+        return { message };
+      } else if (typeof message === "function") {
+        return message(val);
+      } else {
+        return message;
+      }
+    };
+    return this._refinement((val, ctx) => {
+      const result = check2(val);
+      const setError = () => ctx.addIssue({
+        code: ZodIssueCode2.custom,
+        ...getIssueProperties(val)
+      });
+      if (typeof Promise !== "undefined" && result instanceof Promise) {
+        return result.then((data) => {
+          if (!data) {
+            setError();
+            return false;
+          } else {
+            return true;
+          }
+        });
+      }
+      if (!result) {
+        setError();
+        return false;
+      } else {
+        return true;
+      }
+    });
+  }
+  refinement(check2, refinementData) {
+    return this._refinement((val, ctx) => {
+      if (!check2(val)) {
+        ctx.addIssue(typeof refinementData === "function" ? refinementData(val, ctx) : refinementData);
+        return false;
+      } else {
+        return true;
+      }
+    });
+  }
+  _refinement(refinement) {
+    return new ZodEffects({
+      schema: this,
+      typeName: ZodFirstPartyTypeKind2.ZodEffects,
+      effect: { type: "refinement", refinement }
+    });
+  }
+  superRefine(refinement) {
+    return this._refinement(refinement);
+  }
+  constructor(def) {
+    this.spa = this.safeParseAsync;
+    this._def = def;
+    this.parse = this.parse.bind(this);
+    this.safeParse = this.safeParse.bind(this);
+    this.parseAsync = this.parseAsync.bind(this);
+    this.safeParseAsync = this.safeParseAsync.bind(this);
+    this.spa = this.spa.bind(this);
+    this.refine = this.refine.bind(this);
+    this.refinement = this.refinement.bind(this);
+    this.superRefine = this.superRefine.bind(this);
+    this.optional = this.optional.bind(this);
+    this.nullable = this.nullable.bind(this);
+    this.nullish = this.nullish.bind(this);
+    this.array = this.array.bind(this);
+    this.promise = this.promise.bind(this);
+    this.or = this.or.bind(this);
+    this.and = this.and.bind(this);
+    this.transform = this.transform.bind(this);
+    this.brand = this.brand.bind(this);
+    this.default = this.default.bind(this);
+    this.catch = this.catch.bind(this);
+    this.describe = this.describe.bind(this);
+    this.pipe = this.pipe.bind(this);
+    this.readonly = this.readonly.bind(this);
+    this.isNullable = this.isNullable.bind(this);
+    this.isOptional = this.isOptional.bind(this);
+    this["~standard"] = {
+      version: 1,
+      vendor: "zod",
+      validate: (data) => this["~validate"](data)
+    };
+  }
+  optional() {
+    return ZodOptional2.create(this, this._def);
+  }
+  nullable() {
+    return ZodNullable2.create(this, this._def);
+  }
+  nullish() {
+    return this.nullable().optional();
+  }
+  array() {
+    return ZodArray2.create(this);
+  }
+  promise() {
+    return ZodPromise2.create(this, this._def);
+  }
+  or(option) {
+    return ZodUnion2.create([this, option], this._def);
+  }
+  and(incoming) {
+    return ZodIntersection2.create(this, incoming, this._def);
+  }
+  transform(transform2) {
+    return new ZodEffects({
+      ...processCreateParams(this._def),
+      schema: this,
+      typeName: ZodFirstPartyTypeKind2.ZodEffects,
+      effect: { type: "transform", transform: transform2 }
+    });
+  }
+  default(def) {
+    const defaultValueFunc = typeof def === "function" ? def : () => def;
+    return new ZodDefault2({
+      ...processCreateParams(this._def),
+      innerType: this,
+      defaultValue: defaultValueFunc,
+      typeName: ZodFirstPartyTypeKind2.ZodDefault
+    });
+  }
+  brand() {
+    return new ZodBranded({
+      typeName: ZodFirstPartyTypeKind2.ZodBranded,
+      type: this,
+      ...processCreateParams(this._def)
+    });
+  }
+  catch(def) {
+    const catchValueFunc = typeof def === "function" ? def : () => def;
+    return new ZodCatch2({
+      ...processCreateParams(this._def),
+      innerType: this,
+      catchValue: catchValueFunc,
+      typeName: ZodFirstPartyTypeKind2.ZodCatch
+    });
+  }
+  describe(description) {
+    const This = this.constructor;
+    return new This({
+      ...this._def,
+      description
+    });
+  }
+  pipe(target) {
+    return ZodPipeline.create(this, target);
+  }
+  readonly() {
+    return ZodReadonly2.create(this);
+  }
+  isOptional() {
+    return this.safeParse(void 0).success;
+  }
+  isNullable() {
+    return this.safeParse(null).success;
+  }
+};
+var cuidRegex = /^c[^\s-]{8,}$/i;
+var cuid2Regex = /^[0-9a-z]+$/;
+var ulidRegex = /^[0-9A-HJKMNP-TV-Z]{26}$/i;
+var uuidRegex = /^[0-9a-fA-F]{8}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{4}\b-[0-9a-fA-F]{12}$/i;
+var nanoidRegex = /^[a-z0-9_-]{21}$/i;
+var jwtRegex = /^[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]*$/;
+var durationRegex = /^[-+]?P(?!$)(?:(?:[-+]?\d+Y)|(?:[-+]?\d+[.,]\d+Y$))?(?:(?:[-+]?\d+M)|(?:[-+]?\d+[.,]\d+M$))?(?:(?:[-+]?\d+W)|(?:[-+]?\d+[.,]\d+W$))?(?:(?:[-+]?\d+D)|(?:[-+]?\d+[.,]\d+D$))?(?:T(?=[\d+-])(?:(?:[-+]?\d+H)|(?:[-+]?\d+[.,]\d+H$))?(?:(?:[-+]?\d+M)|(?:[-+]?\d+[.,]\d+M$))?(?:[-+]?\d+(?:[.,]\d+)?S)?)??$/;
+var emailRegex = /^(?!\.)(?!.*\.\.)([A-Z0-9_'+\-\.]*)[A-Z0-9_+-]@([A-Z0-9][A-Z0-9\-]*\.)+[A-Z]{2,}$/i;
+var _emojiRegex = `^[\\p{Extended_Pictographic}\\p{Emoji_Component}]+$`;
+var emojiRegex;
+var ipv4Regex = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
+var ipv4CidrRegex = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/(3[0-2]|[12]?[0-9])$/;
+var ipv6Regex = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$/;
+var ipv6CidrRegex = /^(([0-9a-fA-F]{1,4}:){7,7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))\/(12[0-8]|1[01][0-9]|[1-9]?[0-9])$/;
+var base64Regex = /^([0-9a-zA-Z+/]{4})*(([0-9a-zA-Z+/]{2}==)|([0-9a-zA-Z+/]{3}=))?$/;
+var base64urlRegex = /^([0-9a-zA-Z-_]{4})*(([0-9a-zA-Z-_]{2}(==)?)|([0-9a-zA-Z-_]{3}(=)?))?$/;
+var dateRegexSource = `((\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-((0[13578]|1[02])-(0[1-9]|[12]\\d|3[01])|(0[469]|11)-(0[1-9]|[12]\\d|30)|(02)-(0[1-9]|1\\d|2[0-8])))`;
+var dateRegex = new RegExp(`^${dateRegexSource}$`);
+function timeRegexSource(args) {
+  let secondsRegexSource = `[0-5]\\d`;
+  if (args.precision) {
+    secondsRegexSource = `${secondsRegexSource}\\.\\d{${args.precision}}`;
+  } else if (args.precision == null) {
+    secondsRegexSource = `${secondsRegexSource}(\\.\\d+)?`;
+  }
+  const secondsQuantifier = args.precision ? "+" : "?";
+  return `([01]\\d|2[0-3]):[0-5]\\d(:${secondsRegexSource})${secondsQuantifier}`;
+}
+function timeRegex(args) {
+  return new RegExp(`^${timeRegexSource(args)}$`);
+}
+function datetimeRegex(args) {
+  let regex = `${dateRegexSource}T${timeRegexSource(args)}`;
+  const opts = [];
+  opts.push(args.local ? `Z?` : `Z`);
+  if (args.offset)
+    opts.push(`([+-]\\d{2}:?\\d{2})`);
+  regex = `${regex}(${opts.join("|")})`;
+  return new RegExp(`^${regex}$`);
+}
+function isValidIP(ip, version2) {
+  if ((version2 === "v4" || !version2) && ipv4Regex.test(ip)) {
+    return true;
+  }
+  if ((version2 === "v6" || !version2) && ipv6Regex.test(ip)) {
+    return true;
+  }
+  return false;
+}
+function isValidJWT2(jwt2, alg) {
+  if (!jwtRegex.test(jwt2))
+    return false;
+  try {
+    const [header] = jwt2.split(".");
+    if (!header)
+      return false;
+    const base643 = header.replace(/-/g, "+").replace(/_/g, "/").padEnd(header.length + (4 - header.length % 4) % 4, "=");
+    const decoded = JSON.parse(atob(base643));
+    if (typeof decoded !== "object" || decoded === null)
+      return false;
+    if ("typ" in decoded && decoded?.typ !== "JWT")
+      return false;
+    if (!decoded.alg)
+      return false;
+    if (alg && decoded.alg !== alg)
+      return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+function isValidCidr(ip, version2) {
+  if ((version2 === "v4" || !version2) && ipv4CidrRegex.test(ip)) {
+    return true;
+  }
+  if ((version2 === "v6" || !version2) && ipv6CidrRegex.test(ip)) {
+    return true;
+  }
+  return false;
+}
+var ZodString2 = class _ZodString2 extends ZodType2 {
+  _parse(input2) {
+    if (this._def.coerce) {
+      input2.data = String(input2.data);
+    }
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 !== ZodParsedType.string) {
+      const ctx2 = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx2, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.string,
+        received: ctx2.parsedType
+      });
+      return INVALID2;
+    }
+    const status = new ParseStatus();
+    let ctx = void 0;
+    for (const check2 of this._def.checks) {
+      if (check2.kind === "min") {
+        if (input2.data.length < check2.value) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.too_small,
+            minimum: check2.value,
+            type: "string",
+            inclusive: true,
+            exact: false,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "max") {
+        if (input2.data.length > check2.value) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.too_big,
+            maximum: check2.value,
+            type: "string",
+            inclusive: true,
+            exact: false,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "length") {
+        const tooBig = input2.data.length > check2.value;
+        const tooSmall = input2.data.length < check2.value;
+        if (tooBig || tooSmall) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          if (tooBig) {
+            addIssueToContext(ctx, {
+              code: ZodIssueCode2.too_big,
+              maximum: check2.value,
+              type: "string",
+              inclusive: true,
+              exact: true,
+              message: check2.message
+            });
+          } else if (tooSmall) {
+            addIssueToContext(ctx, {
+              code: ZodIssueCode2.too_small,
+              minimum: check2.value,
+              type: "string",
+              inclusive: true,
+              exact: true,
+              message: check2.message
+            });
+          }
+          status.dirty();
+        }
+      } else if (check2.kind === "email") {
+        if (!emailRegex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "email",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "emoji") {
+        if (!emojiRegex) {
+          emojiRegex = new RegExp(_emojiRegex, "u");
+        }
+        if (!emojiRegex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "emoji",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "uuid") {
+        if (!uuidRegex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "uuid",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "nanoid") {
+        if (!nanoidRegex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "nanoid",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "cuid") {
+        if (!cuidRegex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "cuid",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "cuid2") {
+        if (!cuid2Regex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "cuid2",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "ulid") {
+        if (!ulidRegex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "ulid",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "url") {
+        try {
+          new URL(input2.data);
+        } catch {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "url",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "regex") {
+        check2.regex.lastIndex = 0;
+        const testResult = check2.regex.test(input2.data);
+        if (!testResult) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "regex",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "trim") {
+        input2.data = input2.data.trim();
+      } else if (check2.kind === "includes") {
+        if (!input2.data.includes(check2.value, check2.position)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.invalid_string,
+            validation: { includes: check2.value, position: check2.position },
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "toLowerCase") {
+        input2.data = input2.data.toLowerCase();
+      } else if (check2.kind === "toUpperCase") {
+        input2.data = input2.data.toUpperCase();
+      } else if (check2.kind === "startsWith") {
+        if (!input2.data.startsWith(check2.value)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.invalid_string,
+            validation: { startsWith: check2.value },
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "endsWith") {
+        if (!input2.data.endsWith(check2.value)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.invalid_string,
+            validation: { endsWith: check2.value },
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "datetime") {
+        const regex = datetimeRegex(check2);
+        if (!regex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.invalid_string,
+            validation: "datetime",
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "date") {
+        const regex = dateRegex;
+        if (!regex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.invalid_string,
+            validation: "date",
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "time") {
+        const regex = timeRegex(check2);
+        if (!regex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.invalid_string,
+            validation: "time",
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "duration") {
+        if (!durationRegex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "duration",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "ip") {
+        if (!isValidIP(input2.data, check2.version)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "ip",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "jwt") {
+        if (!isValidJWT2(input2.data, check2.alg)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "jwt",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "cidr") {
+        if (!isValidCidr(input2.data, check2.version)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "cidr",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "base64") {
+        if (!base64Regex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "base64",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "base64url") {
+        if (!base64urlRegex.test(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            validation: "base64url",
+            code: ZodIssueCode2.invalid_string,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else {
+        util.assertNever(check2);
+      }
+    }
+    return { status: status.value, value: input2.data };
+  }
+  _regex(regex, validation, message) {
+    return this.refinement((data) => regex.test(data), {
+      validation,
+      code: ZodIssueCode2.invalid_string,
+      ...errorUtil.errToObj(message)
+    });
+  }
+  _addCheck(check2) {
+    return new _ZodString2({
+      ...this._def,
+      checks: [...this._def.checks, check2]
+    });
+  }
+  email(message) {
+    return this._addCheck({ kind: "email", ...errorUtil.errToObj(message) });
+  }
+  url(message) {
+    return this._addCheck({ kind: "url", ...errorUtil.errToObj(message) });
+  }
+  emoji(message) {
+    return this._addCheck({ kind: "emoji", ...errorUtil.errToObj(message) });
+  }
+  uuid(message) {
+    return this._addCheck({ kind: "uuid", ...errorUtil.errToObj(message) });
+  }
+  nanoid(message) {
+    return this._addCheck({ kind: "nanoid", ...errorUtil.errToObj(message) });
+  }
+  cuid(message) {
+    return this._addCheck({ kind: "cuid", ...errorUtil.errToObj(message) });
+  }
+  cuid2(message) {
+    return this._addCheck({ kind: "cuid2", ...errorUtil.errToObj(message) });
+  }
+  ulid(message) {
+    return this._addCheck({ kind: "ulid", ...errorUtil.errToObj(message) });
+  }
+  base64(message) {
+    return this._addCheck({ kind: "base64", ...errorUtil.errToObj(message) });
+  }
+  base64url(message) {
+    return this._addCheck({
+      kind: "base64url",
+      ...errorUtil.errToObj(message)
+    });
+  }
+  jwt(options) {
+    return this._addCheck({ kind: "jwt", ...errorUtil.errToObj(options) });
+  }
+  ip(options) {
+    return this._addCheck({ kind: "ip", ...errorUtil.errToObj(options) });
+  }
+  cidr(options) {
+    return this._addCheck({ kind: "cidr", ...errorUtil.errToObj(options) });
+  }
+  datetime(options) {
+    if (typeof options === "string") {
+      return this._addCheck({
+        kind: "datetime",
+        precision: null,
+        offset: false,
+        local: false,
+        message: options
+      });
+    }
+    return this._addCheck({
+      kind: "datetime",
+      precision: typeof options?.precision === "undefined" ? null : options?.precision,
+      offset: options?.offset ?? false,
+      local: options?.local ?? false,
+      ...errorUtil.errToObj(options?.message)
+    });
+  }
+  date(message) {
+    return this._addCheck({ kind: "date", message });
+  }
+  time(options) {
+    if (typeof options === "string") {
+      return this._addCheck({
+        kind: "time",
+        precision: null,
+        message: options
+      });
+    }
+    return this._addCheck({
+      kind: "time",
+      precision: typeof options?.precision === "undefined" ? null : options?.precision,
+      ...errorUtil.errToObj(options?.message)
+    });
+  }
+  duration(message) {
+    return this._addCheck({ kind: "duration", ...errorUtil.errToObj(message) });
+  }
+  regex(regex, message) {
+    return this._addCheck({
+      kind: "regex",
+      regex,
+      ...errorUtil.errToObj(message)
+    });
+  }
+  includes(value, options) {
+    return this._addCheck({
+      kind: "includes",
+      value,
+      position: options?.position,
+      ...errorUtil.errToObj(options?.message)
+    });
+  }
+  startsWith(value, message) {
+    return this._addCheck({
+      kind: "startsWith",
+      value,
+      ...errorUtil.errToObj(message)
+    });
+  }
+  endsWith(value, message) {
+    return this._addCheck({
+      kind: "endsWith",
+      value,
+      ...errorUtil.errToObj(message)
+    });
+  }
+  min(minLength, message) {
+    return this._addCheck({
+      kind: "min",
+      value: minLength,
+      ...errorUtil.errToObj(message)
+    });
+  }
+  max(maxLength, message) {
+    return this._addCheck({
+      kind: "max",
+      value: maxLength,
+      ...errorUtil.errToObj(message)
+    });
+  }
+  length(len, message) {
+    return this._addCheck({
+      kind: "length",
+      value: len,
+      ...errorUtil.errToObj(message)
+    });
+  }
+  /**
+   * Equivalent to `.min(1)`
+   */
+  nonempty(message) {
+    return this.min(1, errorUtil.errToObj(message));
+  }
+  trim() {
+    return new _ZodString2({
+      ...this._def,
+      checks: [...this._def.checks, { kind: "trim" }]
+    });
+  }
+  toLowerCase() {
+    return new _ZodString2({
+      ...this._def,
+      checks: [...this._def.checks, { kind: "toLowerCase" }]
+    });
+  }
+  toUpperCase() {
+    return new _ZodString2({
+      ...this._def,
+      checks: [...this._def.checks, { kind: "toUpperCase" }]
+    });
+  }
+  get isDatetime() {
+    return !!this._def.checks.find((ch) => ch.kind === "datetime");
+  }
+  get isDate() {
+    return !!this._def.checks.find((ch) => ch.kind === "date");
+  }
+  get isTime() {
+    return !!this._def.checks.find((ch) => ch.kind === "time");
+  }
+  get isDuration() {
+    return !!this._def.checks.find((ch) => ch.kind === "duration");
+  }
+  get isEmail() {
+    return !!this._def.checks.find((ch) => ch.kind === "email");
+  }
+  get isURL() {
+    return !!this._def.checks.find((ch) => ch.kind === "url");
+  }
+  get isEmoji() {
+    return !!this._def.checks.find((ch) => ch.kind === "emoji");
+  }
+  get isUUID() {
+    return !!this._def.checks.find((ch) => ch.kind === "uuid");
+  }
+  get isNANOID() {
+    return !!this._def.checks.find((ch) => ch.kind === "nanoid");
+  }
+  get isCUID() {
+    return !!this._def.checks.find((ch) => ch.kind === "cuid");
+  }
+  get isCUID2() {
+    return !!this._def.checks.find((ch) => ch.kind === "cuid2");
+  }
+  get isULID() {
+    return !!this._def.checks.find((ch) => ch.kind === "ulid");
+  }
+  get isIP() {
+    return !!this._def.checks.find((ch) => ch.kind === "ip");
+  }
+  get isCIDR() {
+    return !!this._def.checks.find((ch) => ch.kind === "cidr");
+  }
+  get isBase64() {
+    return !!this._def.checks.find((ch) => ch.kind === "base64");
+  }
+  get isBase64url() {
+    return !!this._def.checks.find((ch) => ch.kind === "base64url");
+  }
+  get minLength() {
+    let min = null;
+    for (const ch of this._def.checks) {
+      if (ch.kind === "min") {
+        if (min === null || ch.value > min)
+          min = ch.value;
+      }
+    }
+    return min;
+  }
+  get maxLength() {
+    let max = null;
+    for (const ch of this._def.checks) {
+      if (ch.kind === "max") {
+        if (max === null || ch.value < max)
+          max = ch.value;
+      }
+    }
+    return max;
+  }
+};
+ZodString2.create = (params) => {
+  return new ZodString2({
+    checks: [],
+    typeName: ZodFirstPartyTypeKind2.ZodString,
+    coerce: params?.coerce ?? false,
+    ...processCreateParams(params)
+  });
+};
+function floatSafeRemainder2(val, step) {
+  const valDecCount = (val.toString().split(".")[1] || "").length;
+  const stepDecCount = (step.toString().split(".")[1] || "").length;
+  const decCount = valDecCount > stepDecCount ? valDecCount : stepDecCount;
+  const valInt = Number.parseInt(val.toFixed(decCount).replace(".", ""));
+  const stepInt = Number.parseInt(step.toFixed(decCount).replace(".", ""));
+  return valInt % stepInt / 10 ** decCount;
+}
+var ZodNumber2 = class _ZodNumber extends ZodType2 {
+  constructor() {
+    super(...arguments);
+    this.min = this.gte;
+    this.max = this.lte;
+    this.step = this.multipleOf;
+  }
+  _parse(input2) {
+    if (this._def.coerce) {
+      input2.data = Number(input2.data);
+    }
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 !== ZodParsedType.number) {
+      const ctx2 = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx2, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.number,
+        received: ctx2.parsedType
+      });
+      return INVALID2;
+    }
+    let ctx = void 0;
+    const status = new ParseStatus();
+    for (const check2 of this._def.checks) {
+      if (check2.kind === "int") {
+        if (!util.isInteger(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.invalid_type,
+            expected: "integer",
+            received: "float",
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "min") {
+        const tooSmall = check2.inclusive ? input2.data < check2.value : input2.data <= check2.value;
+        if (tooSmall) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.too_small,
+            minimum: check2.value,
+            type: "number",
+            inclusive: check2.inclusive,
+            exact: false,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "max") {
+        const tooBig = check2.inclusive ? input2.data > check2.value : input2.data >= check2.value;
+        if (tooBig) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.too_big,
+            maximum: check2.value,
+            type: "number",
+            inclusive: check2.inclusive,
+            exact: false,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "multipleOf") {
+        if (floatSafeRemainder2(input2.data, check2.value) !== 0) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.not_multiple_of,
+            multipleOf: check2.value,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "finite") {
+        if (!Number.isFinite(input2.data)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.not_finite,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else {
+        util.assertNever(check2);
+      }
+    }
+    return { status: status.value, value: input2.data };
+  }
+  gte(value, message) {
+    return this.setLimit("min", value, true, errorUtil.toString(message));
+  }
+  gt(value, message) {
+    return this.setLimit("min", value, false, errorUtil.toString(message));
+  }
+  lte(value, message) {
+    return this.setLimit("max", value, true, errorUtil.toString(message));
+  }
+  lt(value, message) {
+    return this.setLimit("max", value, false, errorUtil.toString(message));
+  }
+  setLimit(kind, value, inclusive, message) {
+    return new _ZodNumber({
+      ...this._def,
+      checks: [
+        ...this._def.checks,
+        {
+          kind,
+          value,
+          inclusive,
+          message: errorUtil.toString(message)
+        }
+      ]
+    });
+  }
+  _addCheck(check2) {
+    return new _ZodNumber({
+      ...this._def,
+      checks: [...this._def.checks, check2]
+    });
+  }
+  int(message) {
+    return this._addCheck({
+      kind: "int",
+      message: errorUtil.toString(message)
+    });
+  }
+  positive(message) {
+    return this._addCheck({
+      kind: "min",
+      value: 0,
+      inclusive: false,
+      message: errorUtil.toString(message)
+    });
+  }
+  negative(message) {
+    return this._addCheck({
+      kind: "max",
+      value: 0,
+      inclusive: false,
+      message: errorUtil.toString(message)
+    });
+  }
+  nonpositive(message) {
+    return this._addCheck({
+      kind: "max",
+      value: 0,
+      inclusive: true,
+      message: errorUtil.toString(message)
+    });
+  }
+  nonnegative(message) {
+    return this._addCheck({
+      kind: "min",
+      value: 0,
+      inclusive: true,
+      message: errorUtil.toString(message)
+    });
+  }
+  multipleOf(value, message) {
+    return this._addCheck({
+      kind: "multipleOf",
+      value,
+      message: errorUtil.toString(message)
+    });
+  }
+  finite(message) {
+    return this._addCheck({
+      kind: "finite",
+      message: errorUtil.toString(message)
+    });
+  }
+  safe(message) {
+    return this._addCheck({
+      kind: "min",
+      inclusive: true,
+      value: Number.MIN_SAFE_INTEGER,
+      message: errorUtil.toString(message)
+    })._addCheck({
+      kind: "max",
+      inclusive: true,
+      value: Number.MAX_SAFE_INTEGER,
+      message: errorUtil.toString(message)
+    });
+  }
+  get minValue() {
+    let min = null;
+    for (const ch of this._def.checks) {
+      if (ch.kind === "min") {
+        if (min === null || ch.value > min)
+          min = ch.value;
+      }
+    }
+    return min;
+  }
+  get maxValue() {
+    let max = null;
+    for (const ch of this._def.checks) {
+      if (ch.kind === "max") {
+        if (max === null || ch.value < max)
+          max = ch.value;
+      }
+    }
+    return max;
+  }
+  get isInt() {
+    return !!this._def.checks.find((ch) => ch.kind === "int" || ch.kind === "multipleOf" && util.isInteger(ch.value));
+  }
+  get isFinite() {
+    let max = null;
+    let min = null;
+    for (const ch of this._def.checks) {
+      if (ch.kind === "finite" || ch.kind === "int" || ch.kind === "multipleOf") {
+        return true;
+      } else if (ch.kind === "min") {
+        if (min === null || ch.value > min)
+          min = ch.value;
+      } else if (ch.kind === "max") {
+        if (max === null || ch.value < max)
+          max = ch.value;
+      }
+    }
+    return Number.isFinite(min) && Number.isFinite(max);
+  }
+};
+ZodNumber2.create = (params) => {
+  return new ZodNumber2({
+    checks: [],
+    typeName: ZodFirstPartyTypeKind2.ZodNumber,
+    coerce: params?.coerce || false,
+    ...processCreateParams(params)
+  });
+};
+var ZodBigInt2 = class _ZodBigInt extends ZodType2 {
+  constructor() {
+    super(...arguments);
+    this.min = this.gte;
+    this.max = this.lte;
+  }
+  _parse(input2) {
+    if (this._def.coerce) {
+      try {
+        input2.data = BigInt(input2.data);
+      } catch {
+        return this._getInvalidInput(input2);
+      }
+    }
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 !== ZodParsedType.bigint) {
+      return this._getInvalidInput(input2);
+    }
+    let ctx = void 0;
+    const status = new ParseStatus();
+    for (const check2 of this._def.checks) {
+      if (check2.kind === "min") {
+        const tooSmall = check2.inclusive ? input2.data < check2.value : input2.data <= check2.value;
+        if (tooSmall) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.too_small,
+            type: "bigint",
+            minimum: check2.value,
+            inclusive: check2.inclusive,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "max") {
+        const tooBig = check2.inclusive ? input2.data > check2.value : input2.data >= check2.value;
+        if (tooBig) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.too_big,
+            type: "bigint",
+            maximum: check2.value,
+            inclusive: check2.inclusive,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "multipleOf") {
+        if (input2.data % check2.value !== BigInt(0)) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.not_multiple_of,
+            multipleOf: check2.value,
+            message: check2.message
+          });
+          status.dirty();
+        }
+      } else {
+        util.assertNever(check2);
+      }
+    }
+    return { status: status.value, value: input2.data };
+  }
+  _getInvalidInput(input2) {
+    const ctx = this._getOrReturnCtx(input2);
+    addIssueToContext(ctx, {
+      code: ZodIssueCode2.invalid_type,
+      expected: ZodParsedType.bigint,
+      received: ctx.parsedType
+    });
+    return INVALID2;
+  }
+  gte(value, message) {
+    return this.setLimit("min", value, true, errorUtil.toString(message));
+  }
+  gt(value, message) {
+    return this.setLimit("min", value, false, errorUtil.toString(message));
+  }
+  lte(value, message) {
+    return this.setLimit("max", value, true, errorUtil.toString(message));
+  }
+  lt(value, message) {
+    return this.setLimit("max", value, false, errorUtil.toString(message));
+  }
+  setLimit(kind, value, inclusive, message) {
+    return new _ZodBigInt({
+      ...this._def,
+      checks: [
+        ...this._def.checks,
+        {
+          kind,
+          value,
+          inclusive,
+          message: errorUtil.toString(message)
+        }
+      ]
+    });
+  }
+  _addCheck(check2) {
+    return new _ZodBigInt({
+      ...this._def,
+      checks: [...this._def.checks, check2]
+    });
+  }
+  positive(message) {
+    return this._addCheck({
+      kind: "min",
+      value: BigInt(0),
+      inclusive: false,
+      message: errorUtil.toString(message)
+    });
+  }
+  negative(message) {
+    return this._addCheck({
+      kind: "max",
+      value: BigInt(0),
+      inclusive: false,
+      message: errorUtil.toString(message)
+    });
+  }
+  nonpositive(message) {
+    return this._addCheck({
+      kind: "max",
+      value: BigInt(0),
+      inclusive: true,
+      message: errorUtil.toString(message)
+    });
+  }
+  nonnegative(message) {
+    return this._addCheck({
+      kind: "min",
+      value: BigInt(0),
+      inclusive: true,
+      message: errorUtil.toString(message)
+    });
+  }
+  multipleOf(value, message) {
+    return this._addCheck({
+      kind: "multipleOf",
+      value,
+      message: errorUtil.toString(message)
+    });
+  }
+  get minValue() {
+    let min = null;
+    for (const ch of this._def.checks) {
+      if (ch.kind === "min") {
+        if (min === null || ch.value > min)
+          min = ch.value;
+      }
+    }
+    return min;
+  }
+  get maxValue() {
+    let max = null;
+    for (const ch of this._def.checks) {
+      if (ch.kind === "max") {
+        if (max === null || ch.value < max)
+          max = ch.value;
+      }
+    }
+    return max;
+  }
+};
+ZodBigInt2.create = (params) => {
+  return new ZodBigInt2({
+    checks: [],
+    typeName: ZodFirstPartyTypeKind2.ZodBigInt,
+    coerce: params?.coerce ?? false,
+    ...processCreateParams(params)
+  });
+};
+var ZodBoolean2 = class extends ZodType2 {
+  _parse(input2) {
+    if (this._def.coerce) {
+      input2.data = Boolean(input2.data);
+    }
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 !== ZodParsedType.boolean) {
+      const ctx = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.boolean,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    return OK(input2.data);
+  }
+};
+ZodBoolean2.create = (params) => {
+  return new ZodBoolean2({
+    typeName: ZodFirstPartyTypeKind2.ZodBoolean,
+    coerce: params?.coerce || false,
+    ...processCreateParams(params)
+  });
+};
+var ZodDate2 = class _ZodDate extends ZodType2 {
+  _parse(input2) {
+    if (this._def.coerce) {
+      input2.data = new Date(input2.data);
+    }
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 !== ZodParsedType.date) {
+      const ctx2 = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx2, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.date,
+        received: ctx2.parsedType
+      });
+      return INVALID2;
+    }
+    if (Number.isNaN(input2.data.getTime())) {
+      const ctx2 = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx2, {
+        code: ZodIssueCode2.invalid_date
+      });
+      return INVALID2;
+    }
+    const status = new ParseStatus();
+    let ctx = void 0;
+    for (const check2 of this._def.checks) {
+      if (check2.kind === "min") {
+        if (input2.data.getTime() < check2.value) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.too_small,
+            message: check2.message,
+            inclusive: true,
+            exact: false,
+            minimum: check2.value,
+            type: "date"
+          });
+          status.dirty();
+        }
+      } else if (check2.kind === "max") {
+        if (input2.data.getTime() > check2.value) {
+          ctx = this._getOrReturnCtx(input2, ctx);
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.too_big,
+            message: check2.message,
+            inclusive: true,
+            exact: false,
+            maximum: check2.value,
+            type: "date"
+          });
+          status.dirty();
+        }
+      } else {
+        util.assertNever(check2);
+      }
+    }
+    return {
+      status: status.value,
+      value: new Date(input2.data.getTime())
+    };
+  }
+  _addCheck(check2) {
+    return new _ZodDate({
+      ...this._def,
+      checks: [...this._def.checks, check2]
+    });
+  }
+  min(minDate, message) {
+    return this._addCheck({
+      kind: "min",
+      value: minDate.getTime(),
+      message: errorUtil.toString(message)
+    });
+  }
+  max(maxDate, message) {
+    return this._addCheck({
+      kind: "max",
+      value: maxDate.getTime(),
+      message: errorUtil.toString(message)
+    });
+  }
+  get minDate() {
+    let min = null;
+    for (const ch of this._def.checks) {
+      if (ch.kind === "min") {
+        if (min === null || ch.value > min)
+          min = ch.value;
+      }
+    }
+    return min != null ? new Date(min) : null;
+  }
+  get maxDate() {
+    let max = null;
+    for (const ch of this._def.checks) {
+      if (ch.kind === "max") {
+        if (max === null || ch.value < max)
+          max = ch.value;
+      }
+    }
+    return max != null ? new Date(max) : null;
+  }
+};
+ZodDate2.create = (params) => {
+  return new ZodDate2({
+    checks: [],
+    coerce: params?.coerce || false,
+    typeName: ZodFirstPartyTypeKind2.ZodDate,
+    ...processCreateParams(params)
+  });
+};
+var ZodSymbol2 = class extends ZodType2 {
+  _parse(input2) {
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 !== ZodParsedType.symbol) {
+      const ctx = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.symbol,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    return OK(input2.data);
+  }
+};
+ZodSymbol2.create = (params) => {
+  return new ZodSymbol2({
+    typeName: ZodFirstPartyTypeKind2.ZodSymbol,
+    ...processCreateParams(params)
+  });
+};
+var ZodUndefined2 = class extends ZodType2 {
+  _parse(input2) {
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 !== ZodParsedType.undefined) {
+      const ctx = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.undefined,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    return OK(input2.data);
+  }
+};
+ZodUndefined2.create = (params) => {
+  return new ZodUndefined2({
+    typeName: ZodFirstPartyTypeKind2.ZodUndefined,
+    ...processCreateParams(params)
+  });
+};
+var ZodNull2 = class extends ZodType2 {
+  _parse(input2) {
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 !== ZodParsedType.null) {
+      const ctx = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.null,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    return OK(input2.data);
+  }
+};
+ZodNull2.create = (params) => {
+  return new ZodNull2({
+    typeName: ZodFirstPartyTypeKind2.ZodNull,
+    ...processCreateParams(params)
+  });
+};
+var ZodAny2 = class extends ZodType2 {
+  constructor() {
+    super(...arguments);
+    this._any = true;
+  }
+  _parse(input2) {
+    return OK(input2.data);
+  }
+};
+ZodAny2.create = (params) => {
+  return new ZodAny2({
+    typeName: ZodFirstPartyTypeKind2.ZodAny,
+    ...processCreateParams(params)
+  });
+};
+var ZodUnknown2 = class extends ZodType2 {
+  constructor() {
+    super(...arguments);
+    this._unknown = true;
+  }
+  _parse(input2) {
+    return OK(input2.data);
+  }
+};
+ZodUnknown2.create = (params) => {
+  return new ZodUnknown2({
+    typeName: ZodFirstPartyTypeKind2.ZodUnknown,
+    ...processCreateParams(params)
+  });
+};
+var ZodNever2 = class extends ZodType2 {
+  _parse(input2) {
+    const ctx = this._getOrReturnCtx(input2);
+    addIssueToContext(ctx, {
+      code: ZodIssueCode2.invalid_type,
+      expected: ZodParsedType.never,
+      received: ctx.parsedType
+    });
+    return INVALID2;
+  }
+};
+ZodNever2.create = (params) => {
+  return new ZodNever2({
+    typeName: ZodFirstPartyTypeKind2.ZodNever,
+    ...processCreateParams(params)
+  });
+};
+var ZodVoid2 = class extends ZodType2 {
+  _parse(input2) {
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 !== ZodParsedType.undefined) {
+      const ctx = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.void,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    return OK(input2.data);
+  }
+};
+ZodVoid2.create = (params) => {
+  return new ZodVoid2({
+    typeName: ZodFirstPartyTypeKind2.ZodVoid,
+    ...processCreateParams(params)
+  });
+};
+var ZodArray2 = class _ZodArray extends ZodType2 {
+  _parse(input2) {
+    const { ctx, status } = this._processInputParams(input2);
+    const def = this._def;
+    if (ctx.parsedType !== ZodParsedType.array) {
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.array,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    if (def.exactLength !== null) {
+      const tooBig = ctx.data.length > def.exactLength.value;
+      const tooSmall = ctx.data.length < def.exactLength.value;
+      if (tooBig || tooSmall) {
+        addIssueToContext(ctx, {
+          code: tooBig ? ZodIssueCode2.too_big : ZodIssueCode2.too_small,
+          minimum: tooSmall ? def.exactLength.value : void 0,
+          maximum: tooBig ? def.exactLength.value : void 0,
+          type: "array",
+          inclusive: true,
+          exact: true,
+          message: def.exactLength.message
+        });
+        status.dirty();
+      }
+    }
+    if (def.minLength !== null) {
+      if (ctx.data.length < def.minLength.value) {
+        addIssueToContext(ctx, {
+          code: ZodIssueCode2.too_small,
+          minimum: def.minLength.value,
+          type: "array",
+          inclusive: true,
+          exact: false,
+          message: def.minLength.message
+        });
+        status.dirty();
+      }
+    }
+    if (def.maxLength !== null) {
+      if (ctx.data.length > def.maxLength.value) {
+        addIssueToContext(ctx, {
+          code: ZodIssueCode2.too_big,
+          maximum: def.maxLength.value,
+          type: "array",
+          inclusive: true,
+          exact: false,
+          message: def.maxLength.message
+        });
+        status.dirty();
+      }
+    }
+    if (ctx.common.async) {
+      return Promise.all([...ctx.data].map((item, i) => {
+        return def.type._parseAsync(new ParseInputLazyPath(ctx, item, ctx.path, i));
+      })).then((result2) => {
+        return ParseStatus.mergeArray(status, result2);
+      });
+    }
+    const result = [...ctx.data].map((item, i) => {
+      return def.type._parseSync(new ParseInputLazyPath(ctx, item, ctx.path, i));
+    });
+    return ParseStatus.mergeArray(status, result);
+  }
+  get element() {
+    return this._def.type;
+  }
+  min(minLength, message) {
+    return new _ZodArray({
+      ...this._def,
+      minLength: { value: minLength, message: errorUtil.toString(message) }
+    });
+  }
+  max(maxLength, message) {
+    return new _ZodArray({
+      ...this._def,
+      maxLength: { value: maxLength, message: errorUtil.toString(message) }
+    });
+  }
+  length(len, message) {
+    return new _ZodArray({
+      ...this._def,
+      exactLength: { value: len, message: errorUtil.toString(message) }
+    });
+  }
+  nonempty(message) {
+    return this.min(1, message);
+  }
+};
+ZodArray2.create = (schema, params) => {
+  return new ZodArray2({
+    type: schema,
+    minLength: null,
+    maxLength: null,
+    exactLength: null,
+    typeName: ZodFirstPartyTypeKind2.ZodArray,
+    ...processCreateParams(params)
+  });
+};
+function deepPartialify(schema) {
+  if (schema instanceof ZodObject2) {
+    const newShape = {};
+    for (const key in schema.shape) {
+      const fieldSchema = schema.shape[key];
+      newShape[key] = ZodOptional2.create(deepPartialify(fieldSchema));
+    }
+    return new ZodObject2({
+      ...schema._def,
+      shape: () => newShape
+    });
+  } else if (schema instanceof ZodArray2) {
+    return new ZodArray2({
+      ...schema._def,
+      type: deepPartialify(schema.element)
+    });
+  } else if (schema instanceof ZodOptional2) {
+    return ZodOptional2.create(deepPartialify(schema.unwrap()));
+  } else if (schema instanceof ZodNullable2) {
+    return ZodNullable2.create(deepPartialify(schema.unwrap()));
+  } else if (schema instanceof ZodTuple2) {
+    return ZodTuple2.create(schema.items.map((item) => deepPartialify(item)));
+  } else {
+    return schema;
+  }
+}
+var ZodObject2 = class _ZodObject extends ZodType2 {
+  constructor() {
+    super(...arguments);
+    this._cached = null;
+    this.nonstrict = this.passthrough;
+    this.augment = this.extend;
+  }
+  _getCached() {
+    if (this._cached !== null)
+      return this._cached;
+    const shape = this._def.shape();
+    const keys = util.objectKeys(shape);
+    this._cached = { shape, keys };
+    return this._cached;
+  }
+  _parse(input2) {
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 !== ZodParsedType.object) {
+      const ctx2 = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx2, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.object,
+        received: ctx2.parsedType
+      });
+      return INVALID2;
+    }
+    const { status, ctx } = this._processInputParams(input2);
+    const { shape, keys: shapeKeys } = this._getCached();
+    const extraKeys = [];
+    if (!(this._def.catchall instanceof ZodNever2 && this._def.unknownKeys === "strip")) {
+      for (const key in ctx.data) {
+        if (!shapeKeys.includes(key)) {
+          extraKeys.push(key);
+        }
+      }
+    }
+    const pairs = [];
+    for (const key of shapeKeys) {
+      const keyValidator = shape[key];
+      const value = ctx.data[key];
+      pairs.push({
+        key: { status: "valid", value: key },
+        value: keyValidator._parse(new ParseInputLazyPath(ctx, value, ctx.path, key)),
+        alwaysSet: key in ctx.data
+      });
+    }
+    if (this._def.catchall instanceof ZodNever2) {
+      const unknownKeys = this._def.unknownKeys;
+      if (unknownKeys === "passthrough") {
+        for (const key of extraKeys) {
+          pairs.push({
+            key: { status: "valid", value: key },
+            value: { status: "valid", value: ctx.data[key] }
+          });
+        }
+      } else if (unknownKeys === "strict") {
+        if (extraKeys.length > 0) {
+          addIssueToContext(ctx, {
+            code: ZodIssueCode2.unrecognized_keys,
+            keys: extraKeys
+          });
+          status.dirty();
+        }
+      } else if (unknownKeys === "strip") {
+      } else {
+        throw new Error(`Internal ZodObject error: invalid unknownKeys value.`);
+      }
+    } else {
+      const catchall = this._def.catchall;
+      for (const key of extraKeys) {
+        const value = ctx.data[key];
+        pairs.push({
+          key: { status: "valid", value: key },
+          value: catchall._parse(
+            new ParseInputLazyPath(ctx, value, ctx.path, key)
+            //, ctx.child(key), value, getParsedType(value)
+          ),
+          alwaysSet: key in ctx.data
+        });
+      }
+    }
+    if (ctx.common.async) {
+      return Promise.resolve().then(async () => {
+        const syncPairs = [];
+        for (const pair of pairs) {
+          const key = await pair.key;
+          const value = await pair.value;
+          syncPairs.push({
+            key,
+            value,
+            alwaysSet: pair.alwaysSet
+          });
+        }
+        return syncPairs;
+      }).then((syncPairs) => {
+        return ParseStatus.mergeObjectSync(status, syncPairs);
+      });
+    } else {
+      return ParseStatus.mergeObjectSync(status, pairs);
+    }
+  }
+  get shape() {
+    return this._def.shape();
+  }
+  strict(message) {
+    errorUtil.errToObj;
+    return new _ZodObject({
+      ...this._def,
+      unknownKeys: "strict",
+      ...message !== void 0 ? {
+        errorMap: (issue2, ctx) => {
+          const defaultError = this._def.errorMap?.(issue2, ctx).message ?? ctx.defaultError;
+          if (issue2.code === "unrecognized_keys")
+            return {
+              message: errorUtil.errToObj(message).message ?? defaultError
+            };
+          return {
+            message: defaultError
+          };
+        }
+      } : {}
+    });
+  }
+  strip() {
+    return new _ZodObject({
+      ...this._def,
+      unknownKeys: "strip"
+    });
+  }
+  passthrough() {
+    return new _ZodObject({
+      ...this._def,
+      unknownKeys: "passthrough"
+    });
+  }
+  // const AugmentFactory =
+  //   <Def extends ZodObjectDef>(def: Def) =>
+  //   <Augmentation extends ZodRawShape>(
+  //     augmentation: Augmentation
+  //   ): ZodObject<
+  //     extendShape<ReturnType<Def["shape"]>, Augmentation>,
+  //     Def["unknownKeys"],
+  //     Def["catchall"]
+  //   > => {
+  //     return new ZodObject({
+  //       ...def,
+  //       shape: () => ({
+  //         ...def.shape(),
+  //         ...augmentation,
+  //       }),
+  //     }) as any;
+  //   };
+  extend(augmentation) {
+    return new _ZodObject({
+      ...this._def,
+      shape: () => ({
+        ...this._def.shape(),
+        ...augmentation
+      })
+    });
+  }
+  /**
+   * Prior to zod@1.0.12 there was a bug in the
+   * inferred type of merged objects. Please
+   * upgrade if you are experiencing issues.
+   */
+  merge(merging) {
+    const merged = new _ZodObject({
+      unknownKeys: merging._def.unknownKeys,
+      catchall: merging._def.catchall,
+      shape: () => ({
+        ...this._def.shape(),
+        ...merging._def.shape()
+      }),
+      typeName: ZodFirstPartyTypeKind2.ZodObject
+    });
+    return merged;
+  }
+  // merge<
+  //   Incoming extends AnyZodObject,
+  //   Augmentation extends Incoming["shape"],
+  //   NewOutput extends {
+  //     [k in keyof Augmentation | keyof Output]: k extends keyof Augmentation
+  //       ? Augmentation[k]["_output"]
+  //       : k extends keyof Output
+  //       ? Output[k]
+  //       : never;
+  //   },
+  //   NewInput extends {
+  //     [k in keyof Augmentation | keyof Input]: k extends keyof Augmentation
+  //       ? Augmentation[k]["_input"]
+  //       : k extends keyof Input
+  //       ? Input[k]
+  //       : never;
+  //   }
+  // >(
+  //   merging: Incoming
+  // ): ZodObject<
+  //   extendShape<T, ReturnType<Incoming["_def"]["shape"]>>,
+  //   Incoming["_def"]["unknownKeys"],
+  //   Incoming["_def"]["catchall"],
+  //   NewOutput,
+  //   NewInput
+  // > {
+  //   const merged: any = new ZodObject({
+  //     unknownKeys: merging._def.unknownKeys,
+  //     catchall: merging._def.catchall,
+  //     shape: () =>
+  //       objectUtil.mergeShapes(this._def.shape(), merging._def.shape()),
+  //     typeName: ZodFirstPartyTypeKind.ZodObject,
+  //   }) as any;
+  //   return merged;
+  // }
+  setKey(key, schema) {
+    return this.augment({ [key]: schema });
+  }
+  // merge<Incoming extends AnyZodObject>(
+  //   merging: Incoming
+  // ): //ZodObject<T & Incoming["_shape"], UnknownKeys, Catchall> = (merging) => {
+  // ZodObject<
+  //   extendShape<T, ReturnType<Incoming["_def"]["shape"]>>,
+  //   Incoming["_def"]["unknownKeys"],
+  //   Incoming["_def"]["catchall"]
+  // > {
+  //   // const mergedShape = objectUtil.mergeShapes(
+  //   //   this._def.shape(),
+  //   //   merging._def.shape()
+  //   // );
+  //   const merged: any = new ZodObject({
+  //     unknownKeys: merging._def.unknownKeys,
+  //     catchall: merging._def.catchall,
+  //     shape: () =>
+  //       objectUtil.mergeShapes(this._def.shape(), merging._def.shape()),
+  //     typeName: ZodFirstPartyTypeKind.ZodObject,
+  //   }) as any;
+  //   return merged;
+  // }
+  catchall(index) {
+    return new _ZodObject({
+      ...this._def,
+      catchall: index
+    });
+  }
+  pick(mask) {
+    const shape = {};
+    for (const key of util.objectKeys(mask)) {
+      if (mask[key] && this.shape[key]) {
+        shape[key] = this.shape[key];
+      }
+    }
+    return new _ZodObject({
+      ...this._def,
+      shape: () => shape
+    });
+  }
+  omit(mask) {
+    const shape = {};
+    for (const key of util.objectKeys(this.shape)) {
+      if (!mask[key]) {
+        shape[key] = this.shape[key];
+      }
+    }
+    return new _ZodObject({
+      ...this._def,
+      shape: () => shape
+    });
+  }
+  /**
+   * @deprecated
+   */
+  deepPartial() {
+    return deepPartialify(this);
+  }
+  partial(mask) {
+    const newShape = {};
+    for (const key of util.objectKeys(this.shape)) {
+      const fieldSchema = this.shape[key];
+      if (mask && !mask[key]) {
+        newShape[key] = fieldSchema;
+      } else {
+        newShape[key] = fieldSchema.optional();
+      }
+    }
+    return new _ZodObject({
+      ...this._def,
+      shape: () => newShape
+    });
+  }
+  required(mask) {
+    const newShape = {};
+    for (const key of util.objectKeys(this.shape)) {
+      if (mask && !mask[key]) {
+        newShape[key] = this.shape[key];
+      } else {
+        const fieldSchema = this.shape[key];
+        let newField = fieldSchema;
+        while (newField instanceof ZodOptional2) {
+          newField = newField._def.innerType;
+        }
+        newShape[key] = newField;
+      }
+    }
+    return new _ZodObject({
+      ...this._def,
+      shape: () => newShape
+    });
+  }
+  keyof() {
+    return createZodEnum(util.objectKeys(this.shape));
+  }
+};
+ZodObject2.create = (shape, params) => {
+  return new ZodObject2({
+    shape: () => shape,
+    unknownKeys: "strip",
+    catchall: ZodNever2.create(),
+    typeName: ZodFirstPartyTypeKind2.ZodObject,
+    ...processCreateParams(params)
+  });
+};
+ZodObject2.strictCreate = (shape, params) => {
+  return new ZodObject2({
+    shape: () => shape,
+    unknownKeys: "strict",
+    catchall: ZodNever2.create(),
+    typeName: ZodFirstPartyTypeKind2.ZodObject,
+    ...processCreateParams(params)
+  });
+};
+ZodObject2.lazycreate = (shape, params) => {
+  return new ZodObject2({
+    shape,
+    unknownKeys: "strip",
+    catchall: ZodNever2.create(),
+    typeName: ZodFirstPartyTypeKind2.ZodObject,
+    ...processCreateParams(params)
+  });
+};
+var ZodUnion2 = class extends ZodType2 {
+  _parse(input2) {
+    const { ctx } = this._processInputParams(input2);
+    const options = this._def.options;
+    function handleResults(results) {
+      for (const result of results) {
+        if (result.result.status === "valid") {
+          return result.result;
+        }
+      }
+      for (const result of results) {
+        if (result.result.status === "dirty") {
+          ctx.common.issues.push(...result.ctx.common.issues);
+          return result.result;
+        }
+      }
+      const unionErrors = results.map((result) => new ZodError2(result.ctx.common.issues));
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_union,
+        unionErrors
+      });
+      return INVALID2;
+    }
+    if (ctx.common.async) {
+      return Promise.all(options.map(async (option) => {
+        const childCtx = {
+          ...ctx,
+          common: {
+            ...ctx.common,
+            issues: []
+          },
+          parent: null
+        };
+        return {
+          result: await option._parseAsync({
+            data: ctx.data,
+            path: ctx.path,
+            parent: childCtx
+          }),
+          ctx: childCtx
+        };
+      })).then(handleResults);
+    } else {
+      let dirty = void 0;
+      const issues = [];
+      for (const option of options) {
+        const childCtx = {
+          ...ctx,
+          common: {
+            ...ctx.common,
+            issues: []
+          },
+          parent: null
+        };
+        const result = option._parseSync({
+          data: ctx.data,
+          path: ctx.path,
+          parent: childCtx
+        });
+        if (result.status === "valid") {
+          return result;
+        } else if (result.status === "dirty" && !dirty) {
+          dirty = { result, ctx: childCtx };
+        }
+        if (childCtx.common.issues.length) {
+          issues.push(childCtx.common.issues);
+        }
+      }
+      if (dirty) {
+        ctx.common.issues.push(...dirty.ctx.common.issues);
+        return dirty.result;
+      }
+      const unionErrors = issues.map((issues2) => new ZodError2(issues2));
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_union,
+        unionErrors
+      });
+      return INVALID2;
+    }
+  }
+  get options() {
+    return this._def.options;
+  }
+};
+ZodUnion2.create = (types, params) => {
+  return new ZodUnion2({
+    options: types,
+    typeName: ZodFirstPartyTypeKind2.ZodUnion,
+    ...processCreateParams(params)
+  });
+};
+var getDiscriminator = (type) => {
+  if (type instanceof ZodLazy2) {
+    return getDiscriminator(type.schema);
+  } else if (type instanceof ZodEffects) {
+    return getDiscriminator(type.innerType());
+  } else if (type instanceof ZodLiteral2) {
+    return [type.value];
+  } else if (type instanceof ZodEnum2) {
+    return type.options;
+  } else if (type instanceof ZodNativeEnum) {
+    return util.objectValues(type.enum);
+  } else if (type instanceof ZodDefault2) {
+    return getDiscriminator(type._def.innerType);
+  } else if (type instanceof ZodUndefined2) {
+    return [void 0];
+  } else if (type instanceof ZodNull2) {
+    return [null];
+  } else if (type instanceof ZodOptional2) {
+    return [void 0, ...getDiscriminator(type.unwrap())];
+  } else if (type instanceof ZodNullable2) {
+    return [null, ...getDiscriminator(type.unwrap())];
+  } else if (type instanceof ZodBranded) {
+    return getDiscriminator(type.unwrap());
+  } else if (type instanceof ZodReadonly2) {
+    return getDiscriminator(type.unwrap());
+  } else if (type instanceof ZodCatch2) {
+    return getDiscriminator(type._def.innerType);
+  } else {
+    return [];
+  }
+};
+var ZodDiscriminatedUnion2 = class _ZodDiscriminatedUnion extends ZodType2 {
+  _parse(input2) {
+    const { ctx } = this._processInputParams(input2);
+    if (ctx.parsedType !== ZodParsedType.object) {
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.object,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    const discriminator = this.discriminator;
+    const discriminatorValue = ctx.data[discriminator];
+    const option = this.optionsMap.get(discriminatorValue);
+    if (!option) {
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_union_discriminator,
+        options: Array.from(this.optionsMap.keys()),
+        path: [discriminator]
+      });
+      return INVALID2;
+    }
+    if (ctx.common.async) {
+      return option._parseAsync({
+        data: ctx.data,
+        path: ctx.path,
+        parent: ctx
+      });
+    } else {
+      return option._parseSync({
+        data: ctx.data,
+        path: ctx.path,
+        parent: ctx
+      });
+    }
+  }
+  get discriminator() {
+    return this._def.discriminator;
+  }
+  get options() {
+    return this._def.options;
+  }
+  get optionsMap() {
+    return this._def.optionsMap;
+  }
+  /**
+   * The constructor of the discriminated union schema. Its behaviour is very similar to that of the normal z.union() constructor.
+   * However, it only allows a union of objects, all of which need to share a discriminator property. This property must
+   * have a different value for each object in the union.
+   * @param discriminator the name of the discriminator property
+   * @param types an array of object schemas
+   * @param params
+   */
+  static create(discriminator, options, params) {
+    const optionsMap = /* @__PURE__ */ new Map();
+    for (const type of options) {
+      const discriminatorValues = getDiscriminator(type.shape[discriminator]);
+      if (!discriminatorValues.length) {
+        throw new Error(`A discriminator value for key \`${discriminator}\` could not be extracted from all schema options`);
+      }
+      for (const value of discriminatorValues) {
+        if (optionsMap.has(value)) {
+          throw new Error(`Discriminator property ${String(discriminator)} has duplicate value ${String(value)}`);
+        }
+        optionsMap.set(value, type);
+      }
+    }
+    return new _ZodDiscriminatedUnion({
+      typeName: ZodFirstPartyTypeKind2.ZodDiscriminatedUnion,
+      discriminator,
+      options,
+      optionsMap,
+      ...processCreateParams(params)
+    });
+  }
+};
+function mergeValues2(a, b) {
+  const aType = getParsedType2(a);
+  const bType = getParsedType2(b);
+  if (a === b) {
+    return { valid: true, data: a };
+  } else if (aType === ZodParsedType.object && bType === ZodParsedType.object) {
+    const bKeys = util.objectKeys(b);
+    const sharedKeys = util.objectKeys(a).filter((key) => bKeys.indexOf(key) !== -1);
+    const newObj = { ...a, ...b };
+    if (Object.prototype.hasOwnProperty.call(newObj, "__proto__"))
+      delete newObj.__proto__;
+    for (const key of sharedKeys) {
+      if (key === "__proto__")
+        continue;
+      const sharedValue = mergeValues2(a[key], b[key]);
+      if (!sharedValue.valid) {
+        return { valid: false };
+      }
+      newObj[key] = sharedValue.data;
+    }
+    return { valid: true, data: newObj };
+  } else if (aType === ZodParsedType.array && bType === ZodParsedType.array) {
+    if (a.length !== b.length) {
+      return { valid: false };
+    }
+    const newArray = [];
+    for (let index = 0; index < a.length; index++) {
+      const itemA = a[index];
+      const itemB = b[index];
+      const sharedValue = mergeValues2(itemA, itemB);
+      if (!sharedValue.valid) {
+        return { valid: false };
+      }
+      newArray.push(sharedValue.data);
+    }
+    return { valid: true, data: newArray };
+  } else if (aType === ZodParsedType.date && bType === ZodParsedType.date && +a === +b) {
+    return { valid: true, data: a };
+  } else {
+    return { valid: false };
+  }
+}
+var ZodIntersection2 = class extends ZodType2 {
+  _parse(input2) {
+    const { status, ctx } = this._processInputParams(input2);
+    const handleParsed = (parsedLeft, parsedRight) => {
+      if (isAborted(parsedLeft) || isAborted(parsedRight)) {
+        return INVALID2;
+      }
+      const merged = mergeValues2(parsedLeft.value, parsedRight.value);
+      if (!merged.valid) {
+        addIssueToContext(ctx, {
+          code: ZodIssueCode2.invalid_intersection_types
+        });
+        return INVALID2;
+      }
+      if (isDirty(parsedLeft) || isDirty(parsedRight)) {
+        status.dirty();
+      }
+      return { status: status.value, value: merged.data };
+    };
+    if (ctx.common.async) {
+      return Promise.all([
+        this._def.left._parseAsync({
+          data: ctx.data,
+          path: ctx.path,
+          parent: ctx
+        }),
+        this._def.right._parseAsync({
+          data: ctx.data,
+          path: ctx.path,
+          parent: ctx
+        })
+      ]).then(([left, right]) => handleParsed(left, right));
+    } else {
+      return handleParsed(this._def.left._parseSync({
+        data: ctx.data,
+        path: ctx.path,
+        parent: ctx
+      }), this._def.right._parseSync({
+        data: ctx.data,
+        path: ctx.path,
+        parent: ctx
+      }));
+    }
+  }
+};
+ZodIntersection2.create = (left, right, params) => {
+  return new ZodIntersection2({
+    left,
+    right,
+    typeName: ZodFirstPartyTypeKind2.ZodIntersection,
+    ...processCreateParams(params)
+  });
+};
+var ZodTuple2 = class _ZodTuple extends ZodType2 {
+  _parse(input2) {
+    const { status, ctx } = this._processInputParams(input2);
+    if (ctx.parsedType !== ZodParsedType.array) {
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.array,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    if (ctx.data.length < this._def.items.length) {
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.too_small,
+        minimum: this._def.items.length,
+        inclusive: true,
+        exact: false,
+        type: "array"
+      });
+      return INVALID2;
+    }
+    const rest = this._def.rest;
+    if (!rest && ctx.data.length > this._def.items.length) {
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.too_big,
+        maximum: this._def.items.length,
+        inclusive: true,
+        exact: false,
+        type: "array"
+      });
+      status.dirty();
+    }
+    const items = [...ctx.data].map((item, itemIndex) => {
+      const schema = this._def.items[itemIndex] || this._def.rest;
+      if (!schema)
+        return null;
+      return schema._parse(new ParseInputLazyPath(ctx, item, ctx.path, itemIndex));
+    }).filter((x) => !!x);
+    if (ctx.common.async) {
+      return Promise.all(items).then((results) => {
+        return ParseStatus.mergeArray(status, results);
+      });
+    } else {
+      return ParseStatus.mergeArray(status, items);
+    }
+  }
+  get items() {
+    return this._def.items;
+  }
+  rest(rest) {
+    return new _ZodTuple({
+      ...this._def,
+      rest
+    });
+  }
+};
+ZodTuple2.create = (schemas, params) => {
+  if (!Array.isArray(schemas)) {
+    throw new Error("You must pass an array of schemas to z.tuple([ ... ])");
+  }
+  return new ZodTuple2({
+    items: schemas,
+    typeName: ZodFirstPartyTypeKind2.ZodTuple,
+    rest: null,
+    ...processCreateParams(params)
+  });
+};
+var ZodRecord2 = class _ZodRecord extends ZodType2 {
+  get keySchema() {
+    return this._def.keyType;
+  }
+  get valueSchema() {
+    return this._def.valueType;
+  }
+  _parse(input2) {
+    const { status, ctx } = this._processInputParams(input2);
+    if (ctx.parsedType !== ZodParsedType.object) {
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.object,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    const pairs = [];
+    const keyType = this._def.keyType;
+    const valueType = this._def.valueType;
+    for (const key in ctx.data) {
+      pairs.push({
+        key: keyType._parse(new ParseInputLazyPath(ctx, key, ctx.path, key)),
+        value: valueType._parse(new ParseInputLazyPath(ctx, ctx.data[key], ctx.path, key)),
+        alwaysSet: key in ctx.data
+      });
+    }
+    if (ctx.common.async) {
+      return ParseStatus.mergeObjectAsync(status, pairs);
+    } else {
+      return ParseStatus.mergeObjectSync(status, pairs);
+    }
+  }
+  get element() {
+    return this._def.valueType;
+  }
+  static create(first, second, third) {
+    if (second instanceof ZodType2) {
+      return new _ZodRecord({
+        keyType: first,
+        valueType: second,
+        typeName: ZodFirstPartyTypeKind2.ZodRecord,
+        ...processCreateParams(third)
+      });
+    }
+    return new _ZodRecord({
+      keyType: ZodString2.create(),
+      valueType: first,
+      typeName: ZodFirstPartyTypeKind2.ZodRecord,
+      ...processCreateParams(second)
+    });
+  }
+};
+var ZodMap2 = class extends ZodType2 {
+  get keySchema() {
+    return this._def.keyType;
+  }
+  get valueSchema() {
+    return this._def.valueType;
+  }
+  _parse(input2) {
+    const { status, ctx } = this._processInputParams(input2);
+    if (ctx.parsedType !== ZodParsedType.map) {
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.map,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    const keyType = this._def.keyType;
+    const valueType = this._def.valueType;
+    const pairs = [...ctx.data.entries()].map(([key, value], index) => {
+      return {
+        key: keyType._parse(new ParseInputLazyPath(ctx, key, ctx.path, [index, "key"])),
+        value: valueType._parse(new ParseInputLazyPath(ctx, value, ctx.path, [index, "value"]))
+      };
+    });
+    if (ctx.common.async) {
+      const finalMap = /* @__PURE__ */ new Map();
+      return Promise.resolve().then(async () => {
+        for (const pair of pairs) {
+          const key = await pair.key;
+          const value = await pair.value;
+          if (key.status === "aborted" || value.status === "aborted") {
+            return INVALID2;
+          }
+          if (key.status === "dirty" || value.status === "dirty") {
+            status.dirty();
+          }
+          finalMap.set(key.value, value.value);
+        }
+        return { status: status.value, value: finalMap };
+      });
+    } else {
+      const finalMap = /* @__PURE__ */ new Map();
+      for (const pair of pairs) {
+        const key = pair.key;
+        const value = pair.value;
+        if (key.status === "aborted" || value.status === "aborted") {
+          return INVALID2;
+        }
+        if (key.status === "dirty" || value.status === "dirty") {
+          status.dirty();
+        }
+        finalMap.set(key.value, value.value);
+      }
+      return { status: status.value, value: finalMap };
+    }
+  }
+};
+ZodMap2.create = (keyType, valueType, params) => {
+  return new ZodMap2({
+    valueType,
+    keyType,
+    typeName: ZodFirstPartyTypeKind2.ZodMap,
+    ...processCreateParams(params)
+  });
+};
+var ZodSet2 = class _ZodSet extends ZodType2 {
+  _parse(input2) {
+    const { status, ctx } = this._processInputParams(input2);
+    if (ctx.parsedType !== ZodParsedType.set) {
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.set,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    const def = this._def;
+    if (def.minSize !== null) {
+      if (ctx.data.size < def.minSize.value) {
+        addIssueToContext(ctx, {
+          code: ZodIssueCode2.too_small,
+          minimum: def.minSize.value,
+          type: "set",
+          inclusive: true,
+          exact: false,
+          message: def.minSize.message
+        });
+        status.dirty();
+      }
+    }
+    if (def.maxSize !== null) {
+      if (ctx.data.size > def.maxSize.value) {
+        addIssueToContext(ctx, {
+          code: ZodIssueCode2.too_big,
+          maximum: def.maxSize.value,
+          type: "set",
+          inclusive: true,
+          exact: false,
+          message: def.maxSize.message
+        });
+        status.dirty();
+      }
+    }
+    const valueType = this._def.valueType;
+    function finalizeSet(elements2) {
+      const parsedSet = /* @__PURE__ */ new Set();
+      for (const element of elements2) {
+        if (element.status === "aborted")
+          return INVALID2;
+        if (element.status === "dirty")
+          status.dirty();
+        parsedSet.add(element.value);
+      }
+      return { status: status.value, value: parsedSet };
+    }
+    const elements = [...ctx.data.values()].map((item, i) => valueType._parse(new ParseInputLazyPath(ctx, item, ctx.path, i)));
+    if (ctx.common.async) {
+      return Promise.all(elements).then((elements2) => finalizeSet(elements2));
+    } else {
+      return finalizeSet(elements);
+    }
+  }
+  min(minSize, message) {
+    return new _ZodSet({
+      ...this._def,
+      minSize: { value: minSize, message: errorUtil.toString(message) }
+    });
+  }
+  max(maxSize, message) {
+    return new _ZodSet({
+      ...this._def,
+      maxSize: { value: maxSize, message: errorUtil.toString(message) }
+    });
+  }
+  size(size, message) {
+    return this.min(size, message).max(size, message);
+  }
+  nonempty(message) {
+    return this.min(1, message);
+  }
+};
+ZodSet2.create = (valueType, params) => {
+  return new ZodSet2({
+    valueType,
+    minSize: null,
+    maxSize: null,
+    typeName: ZodFirstPartyTypeKind2.ZodSet,
+    ...processCreateParams(params)
+  });
+};
+var ZodFunction2 = class _ZodFunction extends ZodType2 {
+  constructor() {
+    super(...arguments);
+    this.validate = this.implement;
+  }
+  _parse(input2) {
+    const { ctx } = this._processInputParams(input2);
+    if (ctx.parsedType !== ZodParsedType.function) {
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.function,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    function makeArgsIssue(args, error62) {
+      return makeIssue({
+        data: args,
+        path: ctx.path,
+        errorMaps: [ctx.common.contextualErrorMap, ctx.schemaErrorMap, getErrorMap2(), en_default2].filter((x) => !!x),
+        issueData: {
+          code: ZodIssueCode2.invalid_arguments,
+          argumentsError: error62
+        }
+      });
+    }
+    function makeReturnsIssue(returns, error62) {
+      return makeIssue({
+        data: returns,
+        path: ctx.path,
+        errorMaps: [ctx.common.contextualErrorMap, ctx.schemaErrorMap, getErrorMap2(), en_default2].filter((x) => !!x),
+        issueData: {
+          code: ZodIssueCode2.invalid_return_type,
+          returnTypeError: error62
+        }
+      });
+    }
+    const params = { errorMap: ctx.common.contextualErrorMap };
+    const fn = ctx.data;
+    if (this._def.returns instanceof ZodPromise2) {
+      const me = this;
+      return OK(async function(...args) {
+        const error62 = new ZodError2([]);
+        const parsedArgs = await me._def.args.parseAsync(args, params).catch((e) => {
+          error62.addIssue(makeArgsIssue(args, e));
+          throw error62;
+        });
+        const result = await Reflect.apply(fn, this, parsedArgs);
+        const parsedReturns = await me._def.returns._def.type.parseAsync(result, params).catch((e) => {
+          error62.addIssue(makeReturnsIssue(result, e));
+          throw error62;
+        });
+        return parsedReturns;
+      });
+    } else {
+      const me = this;
+      return OK(function(...args) {
+        const parsedArgs = me._def.args.safeParse(args, params);
+        if (!parsedArgs.success) {
+          throw new ZodError2([makeArgsIssue(args, parsedArgs.error)]);
+        }
+        const result = Reflect.apply(fn, this, parsedArgs.data);
+        const parsedReturns = me._def.returns.safeParse(result, params);
+        if (!parsedReturns.success) {
+          throw new ZodError2([makeReturnsIssue(result, parsedReturns.error)]);
+        }
+        return parsedReturns.data;
+      });
+    }
+  }
+  parameters() {
+    return this._def.args;
+  }
+  returnType() {
+    return this._def.returns;
+  }
+  args(...items) {
+    return new _ZodFunction({
+      ...this._def,
+      args: ZodTuple2.create(items).rest(ZodUnknown2.create())
+    });
+  }
+  returns(returnType) {
+    return new _ZodFunction({
+      ...this._def,
+      returns: returnType
+    });
+  }
+  implement(func) {
+    const validatedFunc = this.parse(func);
+    return validatedFunc;
+  }
+  strictImplement(func) {
+    const validatedFunc = this.parse(func);
+    return validatedFunc;
+  }
+  static create(args, returns, params) {
+    return new _ZodFunction({
+      args: args ? args : ZodTuple2.create([]).rest(ZodUnknown2.create()),
+      returns: returns || ZodUnknown2.create(),
+      typeName: ZodFirstPartyTypeKind2.ZodFunction,
+      ...processCreateParams(params)
+    });
+  }
+};
+var ZodLazy2 = class extends ZodType2 {
+  get schema() {
+    return this._def.getter();
+  }
+  _parse(input2) {
+    const { ctx } = this._processInputParams(input2);
+    const lazySchema = this._def.getter();
+    return lazySchema._parse({ data: ctx.data, path: ctx.path, parent: ctx });
+  }
+};
+ZodLazy2.create = (getter, params) => {
+  return new ZodLazy2({
+    getter,
+    typeName: ZodFirstPartyTypeKind2.ZodLazy,
+    ...processCreateParams(params)
+  });
+};
+var ZodLiteral2 = class extends ZodType2 {
+  _parse(input2) {
+    if (input2.data !== this._def.value) {
+      const ctx = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx, {
+        received: ctx.data,
+        code: ZodIssueCode2.invalid_literal,
+        expected: this._def.value
+      });
+      return INVALID2;
+    }
+    return { status: "valid", value: input2.data };
+  }
+  get value() {
+    return this._def.value;
+  }
+};
+ZodLiteral2.create = (value, params) => {
+  return new ZodLiteral2({
+    value,
+    typeName: ZodFirstPartyTypeKind2.ZodLiteral,
+    ...processCreateParams(params)
+  });
+};
+function createZodEnum(values, params) {
+  return new ZodEnum2({
+    values,
+    typeName: ZodFirstPartyTypeKind2.ZodEnum,
+    ...processCreateParams(params)
+  });
+}
+var ZodEnum2 = class _ZodEnum extends ZodType2 {
+  _parse(input2) {
+    if (typeof input2.data !== "string") {
+      const ctx = this._getOrReturnCtx(input2);
+      const expectedValues = this._def.values;
+      addIssueToContext(ctx, {
+        expected: util.joinValues(expectedValues),
+        received: ctx.parsedType,
+        code: ZodIssueCode2.invalid_type
+      });
+      return INVALID2;
+    }
+    if (!this._cache) {
+      this._cache = new Set(this._def.values);
+    }
+    if (!this._cache.has(input2.data)) {
+      const ctx = this._getOrReturnCtx(input2);
+      const expectedValues = this._def.values;
+      addIssueToContext(ctx, {
+        received: ctx.data,
+        code: ZodIssueCode2.invalid_enum_value,
+        options: expectedValues
+      });
+      return INVALID2;
+    }
+    return OK(input2.data);
+  }
+  get options() {
+    return this._def.values;
+  }
+  get enum() {
+    const enumValues = {};
+    for (const val of this._def.values) {
+      enumValues[val] = val;
+    }
+    return enumValues;
+  }
+  get Values() {
+    const enumValues = {};
+    for (const val of this._def.values) {
+      enumValues[val] = val;
+    }
+    return enumValues;
+  }
+  get Enum() {
+    const enumValues = {};
+    for (const val of this._def.values) {
+      enumValues[val] = val;
+    }
+    return enumValues;
+  }
+  extract(values, newDef = this._def) {
+    return _ZodEnum.create(values, {
+      ...this._def,
+      ...newDef
+    });
+  }
+  exclude(values, newDef = this._def) {
+    return _ZodEnum.create(this.options.filter((opt) => !values.includes(opt)), {
+      ...this._def,
+      ...newDef
+    });
+  }
+};
+ZodEnum2.create = createZodEnum;
+var ZodNativeEnum = class extends ZodType2 {
+  _parse(input2) {
+    const nativeEnumValues = util.getValidEnumValues(this._def.values);
+    const ctx = this._getOrReturnCtx(input2);
+    if (ctx.parsedType !== ZodParsedType.string && ctx.parsedType !== ZodParsedType.number) {
+      const expectedValues = util.objectValues(nativeEnumValues);
+      addIssueToContext(ctx, {
+        expected: util.joinValues(expectedValues),
+        received: ctx.parsedType,
+        code: ZodIssueCode2.invalid_type
+      });
+      return INVALID2;
+    }
+    if (!this._cache) {
+      this._cache = new Set(util.getValidEnumValues(this._def.values));
+    }
+    if (!this._cache.has(input2.data)) {
+      const expectedValues = util.objectValues(nativeEnumValues);
+      addIssueToContext(ctx, {
+        received: ctx.data,
+        code: ZodIssueCode2.invalid_enum_value,
+        options: expectedValues
+      });
+      return INVALID2;
+    }
+    return OK(input2.data);
+  }
+  get enum() {
+    return this._def.values;
+  }
+};
+ZodNativeEnum.create = (values, params) => {
+  return new ZodNativeEnum({
+    values,
+    typeName: ZodFirstPartyTypeKind2.ZodNativeEnum,
+    ...processCreateParams(params)
+  });
+};
+var ZodPromise2 = class extends ZodType2 {
+  unwrap() {
+    return this._def.type;
+  }
+  _parse(input2) {
+    const { ctx } = this._processInputParams(input2);
+    if (ctx.parsedType !== ZodParsedType.promise && ctx.common.async === false) {
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.promise,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    const promisified = ctx.parsedType === ZodParsedType.promise ? ctx.data : Promise.resolve(ctx.data);
+    return OK(promisified.then((data) => {
+      return this._def.type.parseAsync(data, {
+        path: ctx.path,
+        errorMap: ctx.common.contextualErrorMap
+      });
+    }));
+  }
+};
+ZodPromise2.create = (schema, params) => {
+  return new ZodPromise2({
+    type: schema,
+    typeName: ZodFirstPartyTypeKind2.ZodPromise,
+    ...processCreateParams(params)
+  });
+};
+var ZodEffects = class extends ZodType2 {
+  innerType() {
+    return this._def.schema;
+  }
+  sourceType() {
+    return this._def.schema._def.typeName === ZodFirstPartyTypeKind2.ZodEffects ? this._def.schema.sourceType() : this._def.schema;
+  }
+  _parse(input2) {
+    const { status, ctx } = this._processInputParams(input2);
+    const effect = this._def.effect || null;
+    const checkCtx = {
+      addIssue: (arg) => {
+        addIssueToContext(ctx, arg);
+        if (arg.fatal) {
+          status.abort();
+        } else {
+          status.dirty();
+        }
+      },
+      get path() {
+        return ctx.path;
+      }
+    };
+    checkCtx.addIssue = checkCtx.addIssue.bind(checkCtx);
+    if (effect.type === "preprocess") {
+      const processed = effect.transform(ctx.data, checkCtx);
+      if (ctx.common.async) {
+        return Promise.resolve(processed).then(async (processed2) => {
+          if (status.value === "aborted")
+            return INVALID2;
+          const result = await this._def.schema._parseAsync({
+            data: processed2,
+            path: ctx.path,
+            parent: ctx
+          });
+          if (result.status === "aborted")
+            return INVALID2;
+          if (result.status === "dirty")
+            return DIRTY(result.value);
+          if (status.value === "dirty")
+            return DIRTY(result.value);
+          return result;
+        });
+      } else {
+        if (status.value === "aborted")
+          return INVALID2;
+        const result = this._def.schema._parseSync({
+          data: processed,
+          path: ctx.path,
+          parent: ctx
+        });
+        if (result.status === "aborted")
+          return INVALID2;
+        if (result.status === "dirty")
+          return DIRTY(result.value);
+        if (status.value === "dirty")
+          return DIRTY(result.value);
+        return result;
+      }
+    }
+    if (effect.type === "refinement") {
+      const executeRefinement = (acc) => {
+        const result = effect.refinement(acc, checkCtx);
+        if (ctx.common.async) {
+          return Promise.resolve(result);
+        }
+        if (result instanceof Promise) {
+          throw new Error("Async refinement encountered during synchronous parse operation. Use .parseAsync instead.");
+        }
+        return acc;
+      };
+      if (ctx.common.async === false) {
+        const inner = this._def.schema._parseSync({
+          data: ctx.data,
+          path: ctx.path,
+          parent: ctx
+        });
+        if (inner.status === "aborted")
+          return INVALID2;
+        if (inner.status === "dirty")
+          status.dirty();
+        executeRefinement(inner.value);
+        return { status: status.value, value: inner.value };
+      } else {
+        return this._def.schema._parseAsync({ data: ctx.data, path: ctx.path, parent: ctx }).then((inner) => {
+          if (inner.status === "aborted")
+            return INVALID2;
+          if (inner.status === "dirty")
+            status.dirty();
+          return executeRefinement(inner.value).then(() => {
+            return { status: status.value, value: inner.value };
+          });
+        });
+      }
+    }
+    if (effect.type === "transform") {
+      if (ctx.common.async === false) {
+        const base = this._def.schema._parseSync({
+          data: ctx.data,
+          path: ctx.path,
+          parent: ctx
+        });
+        if (!isValid(base))
+          return INVALID2;
+        const result = effect.transform(base.value, checkCtx);
+        if (result instanceof Promise) {
+          throw new Error(`Asynchronous transform encountered during synchronous parse operation. Use .parseAsync instead.`);
+        }
+        return { status: status.value, value: result };
+      } else {
+        return this._def.schema._parseAsync({ data: ctx.data, path: ctx.path, parent: ctx }).then((base) => {
+          if (!isValid(base))
+            return INVALID2;
+          return Promise.resolve(effect.transform(base.value, checkCtx)).then((result) => ({
+            status: status.value,
+            value: result
+          }));
+        });
+      }
+    }
+    util.assertNever(effect);
+  }
+};
+ZodEffects.create = (schema, effect, params) => {
+  return new ZodEffects({
+    schema,
+    typeName: ZodFirstPartyTypeKind2.ZodEffects,
+    effect,
+    ...processCreateParams(params)
+  });
+};
+ZodEffects.createWithPreprocess = (preprocess2, schema, params) => {
+  return new ZodEffects({
+    schema,
+    effect: { type: "preprocess", transform: preprocess2 },
+    typeName: ZodFirstPartyTypeKind2.ZodEffects,
+    ...processCreateParams(params)
+  });
+};
+var ZodOptional2 = class extends ZodType2 {
+  _parse(input2) {
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 === ZodParsedType.undefined) {
+      return OK(void 0);
+    }
+    return this._def.innerType._parse(input2);
+  }
+  unwrap() {
+    return this._def.innerType;
+  }
+};
+ZodOptional2.create = (type, params) => {
+  return new ZodOptional2({
+    innerType: type,
+    typeName: ZodFirstPartyTypeKind2.ZodOptional,
+    ...processCreateParams(params)
+  });
+};
+var ZodNullable2 = class extends ZodType2 {
+  _parse(input2) {
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 === ZodParsedType.null) {
+      return OK(null);
+    }
+    return this._def.innerType._parse(input2);
+  }
+  unwrap() {
+    return this._def.innerType;
+  }
+};
+ZodNullable2.create = (type, params) => {
+  return new ZodNullable2({
+    innerType: type,
+    typeName: ZodFirstPartyTypeKind2.ZodNullable,
+    ...processCreateParams(params)
+  });
+};
+var ZodDefault2 = class extends ZodType2 {
+  _parse(input2) {
+    const { ctx } = this._processInputParams(input2);
+    let data = ctx.data;
+    if (ctx.parsedType === ZodParsedType.undefined) {
+      data = this._def.defaultValue();
+    }
+    return this._def.innerType._parse({
+      data,
+      path: ctx.path,
+      parent: ctx
+    });
+  }
+  removeDefault() {
+    return this._def.innerType;
+  }
+};
+ZodDefault2.create = (type, params) => {
+  return new ZodDefault2({
+    innerType: type,
+    typeName: ZodFirstPartyTypeKind2.ZodDefault,
+    defaultValue: typeof params.default === "function" ? params.default : () => params.default,
+    ...processCreateParams(params)
+  });
+};
+var ZodCatch2 = class extends ZodType2 {
+  _parse(input2) {
+    const { ctx } = this._processInputParams(input2);
+    const newCtx = {
+      ...ctx,
+      common: {
+        ...ctx.common,
+        issues: []
+      }
+    };
+    const result = this._def.innerType._parse({
+      data: newCtx.data,
+      path: newCtx.path,
+      parent: {
+        ...newCtx
+      }
+    });
+    if (isAsync(result)) {
+      return result.then((result2) => {
+        return {
+          status: "valid",
+          value: result2.status === "valid" ? result2.value : this._def.catchValue({
+            get error() {
+              return new ZodError2(newCtx.common.issues);
+            },
+            input: newCtx.data
+          })
+        };
+      });
+    } else {
+      return {
+        status: "valid",
+        value: result.status === "valid" ? result.value : this._def.catchValue({
+          get error() {
+            return new ZodError2(newCtx.common.issues);
+          },
+          input: newCtx.data
+        })
+      };
+    }
+  }
+  removeCatch() {
+    return this._def.innerType;
+  }
+};
+ZodCatch2.create = (type, params) => {
+  return new ZodCatch2({
+    innerType: type,
+    typeName: ZodFirstPartyTypeKind2.ZodCatch,
+    catchValue: typeof params.catch === "function" ? params.catch : () => params.catch,
+    ...processCreateParams(params)
+  });
+};
+var ZodNaN2 = class extends ZodType2 {
+  _parse(input2) {
+    const parsedType2 = this._getType(input2);
+    if (parsedType2 !== ZodParsedType.nan) {
+      const ctx = this._getOrReturnCtx(input2);
+      addIssueToContext(ctx, {
+        code: ZodIssueCode2.invalid_type,
+        expected: ZodParsedType.nan,
+        received: ctx.parsedType
+      });
+      return INVALID2;
+    }
+    return { status: "valid", value: input2.data };
+  }
+};
+ZodNaN2.create = (params) => {
+  return new ZodNaN2({
+    typeName: ZodFirstPartyTypeKind2.ZodNaN,
+    ...processCreateParams(params)
+  });
+};
+var ZodBranded = class extends ZodType2 {
+  _parse(input2) {
+    const { ctx } = this._processInputParams(input2);
+    const data = ctx.data;
+    return this._def.type._parse({
+      data,
+      path: ctx.path,
+      parent: ctx
+    });
+  }
+  unwrap() {
+    return this._def.type;
+  }
+};
+var ZodPipeline = class _ZodPipeline extends ZodType2 {
+  _parse(input2) {
+    const { status, ctx } = this._processInputParams(input2);
+    if (ctx.common.async) {
+      const handleAsync = async () => {
+        const inResult = await this._def.in._parseAsync({
+          data: ctx.data,
+          path: ctx.path,
+          parent: ctx
+        });
+        if (inResult.status === "aborted")
+          return INVALID2;
+        if (inResult.status === "dirty") {
+          status.dirty();
+          return DIRTY(inResult.value);
+        } else {
+          return this._def.out._parseAsync({
+            data: inResult.value,
+            path: ctx.path,
+            parent: ctx
+          });
+        }
+      };
+      return handleAsync();
+    } else {
+      const inResult = this._def.in._parseSync({
+        data: ctx.data,
+        path: ctx.path,
+        parent: ctx
+      });
+      if (inResult.status === "aborted")
+        return INVALID2;
+      if (inResult.status === "dirty") {
+        status.dirty();
+        return {
+          status: "dirty",
+          value: inResult.value
+        };
+      } else {
+        return this._def.out._parseSync({
+          data: inResult.value,
+          path: ctx.path,
+          parent: ctx
+        });
+      }
+    }
+  }
+  static create(a, b) {
+    return new _ZodPipeline({
+      in: a,
+      out: b,
+      typeName: ZodFirstPartyTypeKind2.ZodPipeline
+    });
+  }
+};
+var ZodReadonly2 = class extends ZodType2 {
+  _parse(input2) {
+    const result = this._def.innerType._parse(input2);
+    const freeze = (data) => {
+      if (isValid(data)) {
+        data.value = Object.freeze(data.value);
+      }
+      return data;
+    };
+    return isAsync(result) ? result.then((data) => freeze(data)) : freeze(result);
+  }
+  unwrap() {
+    return this._def.innerType;
+  }
+};
+ZodReadonly2.create = (type, params) => {
+  return new ZodReadonly2({
+    innerType: type,
+    typeName: ZodFirstPartyTypeKind2.ZodReadonly,
+    ...processCreateParams(params)
+  });
+};
+var late = {
+  object: ZodObject2.lazycreate
+};
+var ZodFirstPartyTypeKind2;
+(function(ZodFirstPartyTypeKind3) {
+  ZodFirstPartyTypeKind3["ZodString"] = "ZodString";
+  ZodFirstPartyTypeKind3["ZodNumber"] = "ZodNumber";
+  ZodFirstPartyTypeKind3["ZodNaN"] = "ZodNaN";
+  ZodFirstPartyTypeKind3["ZodBigInt"] = "ZodBigInt";
+  ZodFirstPartyTypeKind3["ZodBoolean"] = "ZodBoolean";
+  ZodFirstPartyTypeKind3["ZodDate"] = "ZodDate";
+  ZodFirstPartyTypeKind3["ZodSymbol"] = "ZodSymbol";
+  ZodFirstPartyTypeKind3["ZodUndefined"] = "ZodUndefined";
+  ZodFirstPartyTypeKind3["ZodNull"] = "ZodNull";
+  ZodFirstPartyTypeKind3["ZodAny"] = "ZodAny";
+  ZodFirstPartyTypeKind3["ZodUnknown"] = "ZodUnknown";
+  ZodFirstPartyTypeKind3["ZodNever"] = "ZodNever";
+  ZodFirstPartyTypeKind3["ZodVoid"] = "ZodVoid";
+  ZodFirstPartyTypeKind3["ZodArray"] = "ZodArray";
+  ZodFirstPartyTypeKind3["ZodObject"] = "ZodObject";
+  ZodFirstPartyTypeKind3["ZodUnion"] = "ZodUnion";
+  ZodFirstPartyTypeKind3["ZodDiscriminatedUnion"] = "ZodDiscriminatedUnion";
+  ZodFirstPartyTypeKind3["ZodIntersection"] = "ZodIntersection";
+  ZodFirstPartyTypeKind3["ZodTuple"] = "ZodTuple";
+  ZodFirstPartyTypeKind3["ZodRecord"] = "ZodRecord";
+  ZodFirstPartyTypeKind3["ZodMap"] = "ZodMap";
+  ZodFirstPartyTypeKind3["ZodSet"] = "ZodSet";
+  ZodFirstPartyTypeKind3["ZodFunction"] = "ZodFunction";
+  ZodFirstPartyTypeKind3["ZodLazy"] = "ZodLazy";
+  ZodFirstPartyTypeKind3["ZodLiteral"] = "ZodLiteral";
+  ZodFirstPartyTypeKind3["ZodEnum"] = "ZodEnum";
+  ZodFirstPartyTypeKind3["ZodEffects"] = "ZodEffects";
+  ZodFirstPartyTypeKind3["ZodNativeEnum"] = "ZodNativeEnum";
+  ZodFirstPartyTypeKind3["ZodOptional"] = "ZodOptional";
+  ZodFirstPartyTypeKind3["ZodNullable"] = "ZodNullable";
+  ZodFirstPartyTypeKind3["ZodDefault"] = "ZodDefault";
+  ZodFirstPartyTypeKind3["ZodCatch"] = "ZodCatch";
+  ZodFirstPartyTypeKind3["ZodPromise"] = "ZodPromise";
+  ZodFirstPartyTypeKind3["ZodBranded"] = "ZodBranded";
+  ZodFirstPartyTypeKind3["ZodPipeline"] = "ZodPipeline";
+  ZodFirstPartyTypeKind3["ZodReadonly"] = "ZodReadonly";
+})(ZodFirstPartyTypeKind2 || (ZodFirstPartyTypeKind2 = {}));
+var stringType = ZodString2.create;
+var numberType = ZodNumber2.create;
+var nanType = ZodNaN2.create;
+var bigIntType = ZodBigInt2.create;
+var booleanType = ZodBoolean2.create;
+var dateType = ZodDate2.create;
+var symbolType = ZodSymbol2.create;
+var undefinedType = ZodUndefined2.create;
+var nullType = ZodNull2.create;
+var anyType = ZodAny2.create;
+var unknownType = ZodUnknown2.create;
+var neverType = ZodNever2.create;
+var voidType = ZodVoid2.create;
+var arrayType = ZodArray2.create;
+var objectType = ZodObject2.create;
+var strictObjectType = ZodObject2.strictCreate;
+var unionType = ZodUnion2.create;
+var discriminatedUnionType = ZodDiscriminatedUnion2.create;
+var intersectionType = ZodIntersection2.create;
+var tupleType = ZodTuple2.create;
+var recordType = ZodRecord2.create;
+var mapType = ZodMap2.create;
+var setType = ZodSet2.create;
+var functionType = ZodFunction2.create;
+var lazyType = ZodLazy2.create;
+var literalType = ZodLiteral2.create;
+var enumType = ZodEnum2.create;
+var nativeEnumType = ZodNativeEnum.create;
+var promiseType = ZodPromise2.create;
+var effectsType = ZodEffects.create;
+var optionalType = ZodOptional2.create;
+var nullableType = ZodNullable2.create;
+var preprocessType = ZodEffects.createWithPreprocess;
+var pipelineType = ZodPipeline.create;
+
+// node_modules/zod/v4/mini/schemas.js
+var ZodMiniType = /* @__PURE__ */ $constructor("ZodMiniType", (inst, def) => {
+  if (!inst._zod)
+    throw new Error("Uninitialized schema in ZodMiniType.");
+  $ZodType.init(inst, def);
+  inst.def = def;
+  inst.type = def.type;
+}, {
+  // `with` is an alias for `check`: the same function object, not a wrapper.
+  get with() {
+    return this.check;
+  },
+  set with(value) {
+    own(this, "with", value);
+  },
+  parse(data, params) {
+    return parse(this, data, params, { callee: this.parse });
+  },
+  parseAsync(data, params) {
+    return parseAsync(this, data, params, { callee: this.parseAsync });
+  },
+  safeParse(data, params) {
+    return safeParse(this, data, params);
+  },
+  safeParseAsync(data, params) {
+    return safeParseAsync(this, data, params);
+  },
+  check(...checks) {
+    const def = this.def;
+    return this.clone({
+      ...def,
+      checks: [
+        ...def.checks ?? [],
+        ...checks.map((ch) => typeof ch === "function" ? { _zod: { check: ch, def: { check: "custom" }, onattach: [] } } : ch)
+      ]
+    }, { parent: true });
+  },
+  clone(_def, params) {
+    return clone(this, _def, params);
+  },
+  brand() {
+    return this;
+  },
+  register(reg, meta3) {
+    reg.add(this, meta3);
+    return this;
+  },
+  apply(fn, ...args) {
+    return args.length === 0 ? fn(this) : fn(this, ...args);
+  }
+});
+var ZodMiniObject = /* @__PURE__ */ $constructor("ZodMiniObject", (inst, def) => {
+  $ZodObject.init(inst, def);
+  ZodMiniType.init(inst, def);
+  installLazyProp(inst, "shape", (self) => self._zod.def.shape, false);
+});
+// @__NO_SIDE_EFFECTS__
+function object2(shape, params) {
+  const def = {
+    type: "object",
+    shape: shape ?? {},
+    ...normalizeParams(params)
+  };
+  return new ZodMiniObject(def);
+}
+
+// node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js
+function isZ4Schema(s) {
+  const schema = s;
+  return !!schema._zod;
+}
+function objectFromShape(shape) {
+  const values = Object.values(shape);
+  if (values.length === 0)
+    return object2({});
+  const allV4 = values.every(isZ4Schema);
+  const allV3 = values.every((s) => !isZ4Schema(s));
+  if (allV4)
+    return object2(shape);
+  if (allV3)
+    return objectType(shape);
+  throw new Error("Mixed Zod versions detected in object shape.");
+}
+function safeParse3(schema, data) {
+  if (isZ4Schema(schema)) {
+    const result2 = safeParse(schema, data);
+    return result2;
+  }
+  const v3Schema = schema;
+  const result = v3Schema.safeParse(data);
+  return result;
+}
+async function safeParseAsync3(schema, data) {
+  if (isZ4Schema(schema)) {
+    const result2 = await safeParseAsync(schema, data);
+    return result2;
+  }
+  const v3Schema = schema;
+  const result = await v3Schema.safeParseAsync(data);
+  return result;
+}
+function getObjectShape(schema) {
+  if (!schema)
+    return void 0;
+  let rawShape2;
+  if (isZ4Schema(schema)) {
+    const v4Schema = schema;
+    rawShape2 = v4Schema._zod?.def?.shape;
+  } else {
+    const v3Schema = schema;
+    rawShape2 = v3Schema.shape;
+  }
+  if (!rawShape2)
+    return void 0;
+  if (typeof rawShape2 === "function") {
+    try {
+      return rawShape2();
+    } catch {
+      return void 0;
+    }
+  }
+  return rawShape2;
+}
+function normalizeObjectSchema(schema) {
+  if (!schema)
+    return void 0;
+  if (typeof schema === "object") {
+    const asV3 = schema;
+    const asV4 = schema;
+    if (!asV3._def && !asV4._zod) {
+      const values = Object.values(schema);
+      if (values.length > 0 && values.every((v) => typeof v === "object" && v !== null && (v._def !== void 0 || v._zod !== void 0 || typeof v.parse === "function"))) {
+        return objectFromShape(schema);
+      }
+    }
+  }
+  if (isZ4Schema(schema)) {
+    const v4Schema = schema;
+    const def = v4Schema._zod?.def;
+    if (def && (def.type === "object" || def.shape !== void 0)) {
+      return schema;
+    }
+  } else {
+    const v3Schema = schema;
+    if (v3Schema.shape !== void 0) {
+      return schema;
+    }
+  }
+  return void 0;
+}
+function getDotPath(path) {
+  if (path.length === 0) {
+    return "object root";
+  }
+  return path.reduce((acc, seg, index) => {
+    if (index === 0) {
+      return String(seg);
+    }
+    if (typeof seg === "number") {
+      return `${acc}[${seg}]`;
+    }
+    return `${acc}.${seg}`;
+  }, "");
+}
+function getParseErrorMessage(error62) {
+  if (error62 && typeof error62 === "object") {
+    if ("issues" in error62 && Array.isArray(error62.issues) && error62.issues.length > 0) {
+      return error62.issues.map((i) => {
+        if (!i.path?.length) {
+          return i.message;
+        }
+        return `${i.message} at ${getDotPath(i.path)}`;
+      }).join("\n");
+    }
+    if ("message" in error62 && typeof error62.message === "string") {
+      return error62.message;
+    }
+    try {
+      return JSON.stringify(error62);
+    } catch {
+      return String(error62);
+    }
+  }
+  return String(error62);
+}
+function getSchemaDescription(schema) {
+  return schema.description;
+}
+function isSchemaOptional(schema) {
+  if (isZ4Schema(schema)) {
+    const v4Schema = schema;
+    return v4Schema._zod?.def?.type === "optional";
+  }
+  const v3Schema = schema;
+  if (typeof schema.isOptional === "function") {
+    return schema.isOptional();
+  }
+  return v3Schema._def?.typeName === "ZodOptional";
+}
+function getLiteralValue(schema) {
+  if (isZ4Schema(schema)) {
+    const v4Schema = schema;
+    const def2 = v4Schema._zod?.def;
+    if (def2) {
+      if (def2.value !== void 0)
+        return def2.value;
+      if (Array.isArray(def2.values) && def2.values.length > 0) {
+        return def2.values[0];
+      }
+    }
+  }
+  const v3Schema = schema;
+  const def = v3Schema._def;
+  if (def) {
+    if (def.value !== void 0)
+      return def.value;
+    if (Array.isArray(def.values) && def.values.length > 0) {
+      return def.values[0];
+    }
+  }
+  const directValue = schema.value;
+  if (directValue !== void 0)
+    return directValue;
+  return void 0;
 }
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/types.js
@@ -35563,10 +37062,10 @@ var TaskCreationParamsSchema = looseObject({
    */
   pollInterval: number2().optional()
 });
-var TaskMetadataSchema = object2({
+var TaskMetadataSchema = object({
   ttl: number2().optional()
 });
-var RelatedTaskMetadataSchema = object2({
+var RelatedTaskMetadataSchema = object({
   taskId: string2()
 });
 var RequestMetaSchema = looseObject({
@@ -35579,7 +37078,7 @@ var RequestMetaSchema = looseObject({
    */
   [RELATED_TASK_META_KEY]: RelatedTaskMetadataSchema.optional()
 });
-var BaseRequestParamsSchema = object2({
+var BaseRequestParamsSchema = object({
   /**
    * See [General fields: `_meta`](/specification/draft/basic/index#meta) for notes on `_meta` usage.
    */
@@ -35597,18 +37096,18 @@ var TaskAugmentedRequestParamsSchema = BaseRequestParamsSchema.extend({
   task: TaskMetadataSchema.optional()
 });
 var isTaskAugmentedRequestParams = (value) => TaskAugmentedRequestParamsSchema.safeParse(value).success;
-var RequestSchema = object2({
+var RequestSchema = object({
   method: string2(),
   params: BaseRequestParamsSchema.loose().optional()
 });
-var NotificationsParamsSchema = object2({
+var NotificationsParamsSchema = object({
   /**
    * See [MCP specification](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/47339c03c143bb4ec01a26e721a1b8fe66634ebe/docs/specification/draft/basic/index.mdx#general-fields)
    * for notes on _meta usage.
    */
   _meta: RequestMetaSchema.optional()
 });
-var NotificationSchema = object2({
+var NotificationSchema = object({
   method: string2(),
   params: NotificationsParamsSchema.loose().optional()
 });
@@ -35620,18 +37119,18 @@ var ResultSchema = looseObject({
   _meta: RequestMetaSchema.optional()
 });
 var RequestIdSchema = union([string2(), number2().int()]);
-var JSONRPCRequestSchema = object2({
+var JSONRPCRequestSchema = object({
   jsonrpc: literal(JSONRPC_VERSION),
   id: RequestIdSchema,
   ...RequestSchema.shape
 }).strict();
 var isJSONRPCRequest = (value) => JSONRPCRequestSchema.safeParse(value).success;
-var JSONRPCNotificationSchema = object2({
+var JSONRPCNotificationSchema = object({
   jsonrpc: literal(JSONRPC_VERSION),
   ...NotificationSchema.shape
 }).strict();
 var isJSONRPCNotification = (value) => JSONRPCNotificationSchema.safeParse(value).success;
-var JSONRPCResultResponseSchema = object2({
+var JSONRPCResultResponseSchema = object({
   jsonrpc: literal(JSONRPC_VERSION),
   id: RequestIdSchema,
   result: ResultSchema
@@ -35648,10 +37147,10 @@ var ErrorCode;
   ErrorCode2[ErrorCode2["InternalError"] = -32603] = "InternalError";
   ErrorCode2[ErrorCode2["UrlElicitationRequired"] = -32042] = "UrlElicitationRequired";
 })(ErrorCode || (ErrorCode = {}));
-var JSONRPCErrorResponseSchema = object2({
+var JSONRPCErrorResponseSchema = object({
   jsonrpc: literal(JSONRPC_VERSION),
   id: RequestIdSchema.optional(),
-  error: object2({
+  error: object({
     /**
      * The error type that occurred.
      */
@@ -35691,7 +37190,7 @@ var CancelledNotificationSchema = NotificationSchema.extend({
   method: literal("notifications/cancelled"),
   params: CancelledNotificationParamsSchema
 });
-var IconSchema = object2({
+var IconSchema = object({
   /**
    * URL or data URI for the icon.
    */
@@ -35716,7 +37215,7 @@ var IconSchema = object2({
    */
   theme: _enum2(["light", "dark"]).optional()
 });
-var IconsSchema = object2({
+var IconsSchema = object({
   /**
    * Optional set of sized icons that the client can display in a user interface.
    *
@@ -35730,7 +37229,7 @@ var IconsSchema = object2({
    */
   icons: array(IconSchema).optional()
 });
-var BaseMetadataSchema = object2({
+var BaseMetadataSchema = object({
   /** Intended for programmatic or logical use, but used as a display name in past specs or fallback */
   name: string2(),
   /**
@@ -35760,7 +37259,7 @@ var ImplementationSchema = BaseMetadataSchema.extend({
    */
   description: string2().optional()
 });
-var FormElicitationCapabilitySchema = intersection(object2({
+var FormElicitationCapabilitySchema = intersection(object({
   applyDefaults: boolean2().optional()
 }), record(string2(), unknown()));
 var ElicitationCapabilitySchema = preprocess((value) => {
@@ -35770,7 +37269,7 @@ var ElicitationCapabilitySchema = preprocess((value) => {
     }
   }
   return value;
-}, intersection(object2({
+}, intersection(object({
   form: FormElicitationCapabilitySchema.optional(),
   url: AssertObjectSchema.optional()
 }), record(string2(), unknown()).optional()));
@@ -35822,7 +37321,7 @@ var ServerTasksCapabilitySchema = looseObject({
     }).optional()
   }).optional()
 });
-var ClientCapabilitiesSchema = object2({
+var ClientCapabilitiesSchema = object({
   /**
    * Experimental, non-standard capabilities that the client supports.
    */
@@ -35830,7 +37329,7 @@ var ClientCapabilitiesSchema = object2({
   /**
    * Present if the client supports sampling from an LLM.
    */
-  sampling: object2({
+  sampling: object({
     /**
      * Present if the client supports context inclusion via includeContext parameter.
      * If not declared, servers SHOULD only use `includeContext: "none"` (or omit it).
@@ -35848,7 +37347,7 @@ var ClientCapabilitiesSchema = object2({
   /**
    * Present if the client supports listing roots.
    */
-  roots: object2({
+  roots: object({
     /**
      * Whether the client supports issuing notifications for changes to the roots list.
      */
@@ -35875,7 +37374,7 @@ var InitializeRequestSchema = RequestSchema.extend({
   method: literal("initialize"),
   params: InitializeRequestParamsSchema
 });
-var ServerCapabilitiesSchema = object2({
+var ServerCapabilitiesSchema = object({
   /**
    * Experimental, non-standard capabilities that the server supports.
    */
@@ -35891,7 +37390,7 @@ var ServerCapabilitiesSchema = object2({
   /**
    * Present if the server offers any prompt templates.
    */
-  prompts: object2({
+  prompts: object({
     /**
      * Whether this server supports issuing notifications for changes to the prompt list.
      */
@@ -35900,7 +37399,7 @@ var ServerCapabilitiesSchema = object2({
   /**
    * Present if the server offers any resources to read.
    */
-  resources: object2({
+  resources: object({
     /**
      * Whether this server supports clients subscribing to resource updates.
      */
@@ -35913,7 +37412,7 @@ var ServerCapabilitiesSchema = object2({
   /**
    * Present if the server offers any tools to call.
    */
-  tools: object2({
+  tools: object({
     /**
      * Whether this server supports issuing notifications for changes to the tool list.
      */
@@ -35950,7 +37449,7 @@ var PingRequestSchema = RequestSchema.extend({
   method: literal("ping"),
   params: BaseRequestParamsSchema.optional()
 });
-var ProgressSchema = object2({
+var ProgressSchema = object({
   /**
    * The progress thus far. This should increase every time progress is made, even if the total is unknown.
    */
@@ -35964,7 +37463,7 @@ var ProgressSchema = object2({
    */
   message: optional(string2())
 });
-var ProgressNotificationParamsSchema = object2({
+var ProgressNotificationParamsSchema = object({
   ...NotificationsParamsSchema.shape,
   ...ProgressSchema.shape,
   /**
@@ -35994,7 +37493,7 @@ var PaginatedResultSchema = ResultSchema.extend({
   nextCursor: CursorSchema.optional()
 });
 var TaskStatusSchema = _enum2(["working", "input_required", "completed", "failed", "cancelled"]);
-var TaskSchema = object2({
+var TaskSchema = object({
   taskId: string2(),
   status: TaskStatusSchema,
   /**
@@ -36051,7 +37550,7 @@ var CancelTaskRequestSchema = RequestSchema.extend({
   })
 });
 var CancelTaskResultSchema = ResultSchema.merge(TaskSchema);
-var ResourceContentsSchema = object2({
+var ResourceContentsSchema = object({
   /**
    * The URI of this resource.
    */
@@ -36087,7 +37586,7 @@ var BlobResourceContentsSchema = ResourceContentsSchema.extend({
   blob: Base64Schema
 });
 var RoleSchema = _enum2(["user", "assistant"]);
-var AnnotationsSchema = object2({
+var AnnotationsSchema = object({
   /**
    * Intended audience(s) for the resource.
    */
@@ -36099,9 +37598,9 @@ var AnnotationsSchema = object2({
   /**
    * ISO 8601 timestamp for the most recent modification.
    */
-  lastModified: iso_exports2.datetime({ offset: true }).optional()
+  lastModified: iso_exports.datetime({ offset: true }).optional()
 });
-var ResourceSchema = object2({
+var ResourceSchema = object({
   ...BaseMetadataSchema.shape,
   ...IconsSchema.shape,
   /**
@@ -36134,7 +37633,7 @@ var ResourceSchema = object2({
    */
   _meta: optional(looseObject({}))
 });
-var ResourceTemplateSchema = object2({
+var ResourceTemplateSchema = object({
   ...BaseMetadataSchema.shape,
   ...IconsSchema.shape,
   /**
@@ -36213,7 +37712,7 @@ var ResourceUpdatedNotificationSchema = NotificationSchema.extend({
   method: literal("notifications/resources/updated"),
   params: ResourceUpdatedNotificationParamsSchema
 });
-var PromptArgumentSchema = object2({
+var PromptArgumentSchema = object({
   /**
    * The name of the argument.
    */
@@ -36227,7 +37726,7 @@ var PromptArgumentSchema = object2({
    */
   required: optional(boolean2())
 });
-var PromptSchema = object2({
+var PromptSchema = object({
   ...BaseMetadataSchema.shape,
   ...IconsSchema.shape,
   /**
@@ -36264,7 +37763,7 @@ var GetPromptRequestSchema = RequestSchema.extend({
   method: literal("prompts/get"),
   params: GetPromptRequestParamsSchema
 });
-var TextContentSchema = object2({
+var TextContentSchema = object({
   type: literal("text"),
   /**
    * The text content of the message.
@@ -36280,7 +37779,7 @@ var TextContentSchema = object2({
    */
   _meta: record(string2(), unknown()).optional()
 });
-var ImageContentSchema = object2({
+var ImageContentSchema = object({
   type: literal("image"),
   /**
    * The base64-encoded image data.
@@ -36300,7 +37799,7 @@ var ImageContentSchema = object2({
    */
   _meta: record(string2(), unknown()).optional()
 });
-var AudioContentSchema = object2({
+var AudioContentSchema = object({
   type: literal("audio"),
   /**
    * The base64-encoded audio data.
@@ -36320,7 +37819,7 @@ var AudioContentSchema = object2({
    */
   _meta: record(string2(), unknown()).optional()
 });
-var ToolUseContentSchema = object2({
+var ToolUseContentSchema = object({
   type: literal("tool_use"),
   /**
    * The name of the tool to invoke.
@@ -36343,7 +37842,7 @@ var ToolUseContentSchema = object2({
    */
   _meta: record(string2(), unknown()).optional()
 });
-var EmbeddedResourceSchema = object2({
+var EmbeddedResourceSchema = object({
   type: literal("resource"),
   resource: union([TextResourceContentsSchema, BlobResourceContentsSchema]),
   /**
@@ -36366,7 +37865,7 @@ var ContentBlockSchema = union([
   ResourceLinkSchema,
   EmbeddedResourceSchema
 ]);
-var PromptMessageSchema = object2({
+var PromptMessageSchema = object({
   role: RoleSchema,
   content: ContentBlockSchema
 });
@@ -36381,7 +37880,7 @@ var PromptListChangedNotificationSchema = NotificationSchema.extend({
   method: literal("notifications/prompts/list_changed"),
   params: NotificationsParamsSchema.optional()
 });
-var ToolAnnotationsSchema = object2({
+var ToolAnnotationsSchema = object({
   /**
    * A human-readable title for the tool.
    */
@@ -36420,7 +37919,7 @@ var ToolAnnotationsSchema = object2({
    */
   openWorldHint: boolean2().optional()
 });
-var ToolExecutionSchema = object2({
+var ToolExecutionSchema = object({
   /**
    * Indicates the tool's preference for task-augmented execution.
    * - "required": Clients MUST invoke the tool as a task
@@ -36431,7 +37930,7 @@ var ToolExecutionSchema = object2({
    */
   taskSupport: _enum2(["required", "optional", "forbidden"]).optional()
 });
-var ToolSchema = object2({
+var ToolSchema = object({
   ...BaseMetadataSchema.shape,
   ...IconsSchema.shape,
   /**
@@ -36442,7 +37941,7 @@ var ToolSchema = object2({
    * A JSON Schema 2020-12 object defining the expected parameters for the tool.
    * Must have type: 'object' at the root level per MCP spec.
    */
-  inputSchema: object2({
+  inputSchema: object({
     type: literal("object"),
     properties: record(string2(), AssertObjectSchema).optional(),
     required: array(string2()).optional()
@@ -36452,7 +37951,7 @@ var ToolSchema = object2({
    * returned in the structuredContent field of a CallToolResult.
    * Must have type: 'object' at the root level per MCP spec.
    */
-  outputSchema: object2({
+  outputSchema: object({
     type: literal("object"),
     properties: record(string2(), AssertObjectSchema).optional(),
     required: array(string2()).optional()
@@ -36528,7 +38027,7 @@ var ToolListChangedNotificationSchema = NotificationSchema.extend({
   method: literal("notifications/tools/list_changed"),
   params: NotificationsParamsSchema.optional()
 });
-var ListChangedOptionsBaseSchema = object2({
+var ListChangedOptionsBaseSchema = object({
   /**
    * If true, the list will be refreshed automatically when a list changed notification is received.
    * The callback will be called with the updated list.
@@ -36577,13 +38076,13 @@ var LoggingMessageNotificationSchema = NotificationSchema.extend({
   method: literal("notifications/message"),
   params: LoggingMessageNotificationParamsSchema
 });
-var ModelHintSchema = object2({
+var ModelHintSchema = object({
   /**
    * A hint for a model name.
    */
   name: string2().optional()
 });
-var ModelPreferencesSchema = object2({
+var ModelPreferencesSchema = object({
   /**
    * Optional hints to use for model selection.
    */
@@ -36601,7 +38100,7 @@ var ModelPreferencesSchema = object2({
    */
   intelligencePriority: number2().min(0).max(1).optional()
 });
-var ToolChoiceSchema = object2({
+var ToolChoiceSchema = object({
   /**
    * Controls when tools are used:
    * - "auto": Model decides whether to use tools (default)
@@ -36610,11 +38109,11 @@ var ToolChoiceSchema = object2({
    */
   mode: _enum2(["auto", "required", "none"]).optional()
 });
-var ToolResultContentSchema = object2({
+var ToolResultContentSchema = object({
   type: literal("tool_result"),
   toolUseId: string2().describe("The unique identifier for the corresponding tool call."),
   content: array(ContentBlockSchema).default([]),
-  structuredContent: object2({}).loose().optional(),
+  structuredContent: object({}).loose().optional(),
   isError: boolean2().optional(),
   /**
    * See [MCP specification](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/47339c03c143bb4ec01a26e721a1b8fe66634ebe/docs/specification/draft/basic/index.mdx#general-fields)
@@ -36630,7 +38129,7 @@ var SamplingMessageContentBlockSchema = discriminatedUnion("type", [
   ToolUseContentSchema,
   ToolResultContentSchema
 ]);
-var SamplingMessageSchema = object2({
+var SamplingMessageSchema = object({
   role: RoleSchema,
   content: union([SamplingMessageContentBlockSchema, array(SamplingMessageContentBlockSchema)]),
   /**
@@ -36730,13 +38229,13 @@ var CreateMessageResultWithToolsSchema = ResultSchema.extend({
    */
   content: union([SamplingMessageContentBlockSchema, array(SamplingMessageContentBlockSchema)])
 });
-var BooleanSchemaSchema = object2({
+var BooleanSchemaSchema = object({
   type: literal("boolean"),
   title: string2().optional(),
   description: string2().optional(),
   default: boolean2().optional()
 });
-var StringSchemaSchema = object2({
+var StringSchemaSchema = object({
   type: literal("string"),
   title: string2().optional(),
   description: string2().optional(),
@@ -36745,7 +38244,7 @@ var StringSchemaSchema = object2({
   format: _enum2(["email", "uri", "date", "date-time"]).optional(),
   default: string2().optional()
 });
-var NumberSchemaSchema = object2({
+var NumberSchemaSchema = object({
   type: _enum2(["number", "integer"]),
   title: string2().optional(),
   description: string2().optional(),
@@ -36753,24 +38252,24 @@ var NumberSchemaSchema = object2({
   maximum: number2().optional(),
   default: number2().optional()
 });
-var UntitledSingleSelectEnumSchemaSchema = object2({
+var UntitledSingleSelectEnumSchemaSchema = object({
   type: literal("string"),
   title: string2().optional(),
   description: string2().optional(),
   enum: array(string2()),
   default: string2().optional()
 });
-var TitledSingleSelectEnumSchemaSchema = object2({
+var TitledSingleSelectEnumSchemaSchema = object({
   type: literal("string"),
   title: string2().optional(),
   description: string2().optional(),
-  oneOf: array(object2({
+  oneOf: array(object({
     const: string2(),
     title: string2()
   })),
   default: string2().optional()
 });
-var LegacyTitledEnumSchemaSchema = object2({
+var LegacyTitledEnumSchemaSchema = object({
   type: literal("string"),
   title: string2().optional(),
   description: string2().optional(),
@@ -36779,26 +38278,26 @@ var LegacyTitledEnumSchemaSchema = object2({
   default: string2().optional()
 });
 var SingleSelectEnumSchemaSchema = union([UntitledSingleSelectEnumSchemaSchema, TitledSingleSelectEnumSchemaSchema]);
-var UntitledMultiSelectEnumSchemaSchema = object2({
+var UntitledMultiSelectEnumSchemaSchema = object({
   type: literal("array"),
   title: string2().optional(),
   description: string2().optional(),
   minItems: number2().optional(),
   maxItems: number2().optional(),
-  items: object2({
+  items: object({
     type: literal("string"),
     enum: array(string2())
   }),
   default: array(string2()).optional()
 });
-var TitledMultiSelectEnumSchemaSchema = object2({
+var TitledMultiSelectEnumSchemaSchema = object({
   type: literal("array"),
   title: string2().optional(),
   description: string2().optional(),
   minItems: number2().optional(),
   maxItems: number2().optional(),
-  items: object2({
-    anyOf: array(object2({
+  items: object({
+    anyOf: array(object({
       const: string2(),
       title: string2()
     }))
@@ -36823,7 +38322,7 @@ var ElicitRequestFormParamsSchema = TaskAugmentedRequestParamsSchema.extend({
    * A restricted subset of JSON Schema.
    * Only top-level properties are allowed, without nesting.
    */
-  requestedSchema: object2({
+  requestedSchema: object({
     type: literal("object"),
     properties: record(string2(), PrimitiveSchemaDefinitionSchema),
     required: array(string2()).optional()
@@ -36879,14 +38378,14 @@ var ElicitResultSchema = ResultSchema.extend({
    */
   content: preprocess((val) => val === null ? void 0 : val, record(string2(), union([string2(), number2(), boolean2(), array(string2())])).optional())
 });
-var ResourceTemplateReferenceSchema = object2({
+var ResourceTemplateReferenceSchema = object({
   type: literal("ref/resource"),
   /**
    * The URI or URI template of the resource.
    */
   uri: string2()
 });
-var PromptReferenceSchema = object2({
+var PromptReferenceSchema = object({
   type: literal("ref/prompt"),
   /**
    * The name of the prompt or prompt template
@@ -36898,7 +38397,7 @@ var CompleteRequestParamsSchema = BaseRequestParamsSchema.extend({
   /**
    * The argument's information
    */
-  argument: object2({
+  argument: object({
     /**
      * The name of the argument
      */
@@ -36908,7 +38407,7 @@ var CompleteRequestParamsSchema = BaseRequestParamsSchema.extend({
      */
     value: string2()
   }),
-  context: object2({
+  context: object({
     /**
      * Previously-resolved variables in a URI template or prompt.
      */
@@ -36947,7 +38446,7 @@ var CompleteResultSchema = ResultSchema.extend({
     hasMore: optional(boolean2())
   })
 });
-var RootSchema = object2({
+var RootSchema = object({
   /**
    * The URI identifying the root. This *must* start with file:// for now.
    */
@@ -37183,7 +38682,7 @@ function parseArrayDef(def, refs) {
   const res = {
     type: "array"
   };
-  if (def.type?._def && def.type?._def?.typeName !== ZodFirstPartyTypeKind.ZodAny) {
+  if (def.type?._def && def.type?._def?.typeName !== ZodFirstPartyTypeKind2.ZodAny) {
     res.items = parseDef(def.type._def, {
       ...refs,
       currentPath: [...refs.currentPath, "items"]
@@ -37737,7 +39236,7 @@ function parseRecordDef(def, refs) {
   if (refs.target === "openAi") {
     console.warn("Warning: OpenAI may not support records in schemas! Try an array of key-value pairs instead.");
   }
-  if (refs.target === "openApi3" && def.keyType?._def.typeName === ZodFirstPartyTypeKind.ZodEnum) {
+  if (refs.target === "openApi3" && def.keyType?._def.typeName === ZodFirstPartyTypeKind2.ZodEnum) {
     return {
       type: "object",
       required: def.keyType._def.values,
@@ -37761,20 +39260,20 @@ function parseRecordDef(def, refs) {
   if (refs.target === "openApi3") {
     return schema;
   }
-  if (def.keyType?._def.typeName === ZodFirstPartyTypeKind.ZodString && def.keyType._def.checks?.length) {
+  if (def.keyType?._def.typeName === ZodFirstPartyTypeKind2.ZodString && def.keyType._def.checks?.length) {
     const { type, ...keyType } = parseStringDef(def.keyType._def, refs);
     return {
       ...schema,
       propertyNames: keyType
     };
-  } else if (def.keyType?._def.typeName === ZodFirstPartyTypeKind.ZodEnum) {
+  } else if (def.keyType?._def.typeName === ZodFirstPartyTypeKind2.ZodEnum) {
     return {
       ...schema,
       propertyNames: {
         enum: def.keyType._def.values
       }
     };
-  } else if (def.keyType?._def.typeName === ZodFirstPartyTypeKind.ZodBranded && def.keyType._def.type._def.typeName === ZodFirstPartyTypeKind.ZodString && def.keyType._def.type._def.checks?.length) {
+  } else if (def.keyType?._def.typeName === ZodFirstPartyTypeKind2.ZodBranded && def.keyType._def.type._def.typeName === ZodFirstPartyTypeKind2.ZodString && def.keyType._def.type._def.checks?.length) {
     const { type, ...keyType } = parseBrandedDef(def.keyType._def, refs);
     return {
       ...schema,
@@ -38174,73 +39673,73 @@ var parseReadonlyDef = (def, refs) => {
 // node_modules/zod-to-json-schema/dist/esm/selectParser.js
 var selectParser = (def, typeName, refs) => {
   switch (typeName) {
-    case ZodFirstPartyTypeKind.ZodString:
+    case ZodFirstPartyTypeKind2.ZodString:
       return parseStringDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodNumber:
+    case ZodFirstPartyTypeKind2.ZodNumber:
       return parseNumberDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodObject:
+    case ZodFirstPartyTypeKind2.ZodObject:
       return parseObjectDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodBigInt:
+    case ZodFirstPartyTypeKind2.ZodBigInt:
       return parseBigintDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodBoolean:
+    case ZodFirstPartyTypeKind2.ZodBoolean:
       return parseBooleanDef();
-    case ZodFirstPartyTypeKind.ZodDate:
+    case ZodFirstPartyTypeKind2.ZodDate:
       return parseDateDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodUndefined:
+    case ZodFirstPartyTypeKind2.ZodUndefined:
       return parseUndefinedDef(refs);
-    case ZodFirstPartyTypeKind.ZodNull:
+    case ZodFirstPartyTypeKind2.ZodNull:
       return parseNullDef(refs);
-    case ZodFirstPartyTypeKind.ZodArray:
+    case ZodFirstPartyTypeKind2.ZodArray:
       return parseArrayDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodUnion:
-    case ZodFirstPartyTypeKind.ZodDiscriminatedUnion:
+    case ZodFirstPartyTypeKind2.ZodUnion:
+    case ZodFirstPartyTypeKind2.ZodDiscriminatedUnion:
       return parseUnionDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodIntersection:
+    case ZodFirstPartyTypeKind2.ZodIntersection:
       return parseIntersectionDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodTuple:
+    case ZodFirstPartyTypeKind2.ZodTuple:
       return parseTupleDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodRecord:
+    case ZodFirstPartyTypeKind2.ZodRecord:
       return parseRecordDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodLiteral:
+    case ZodFirstPartyTypeKind2.ZodLiteral:
       return parseLiteralDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodEnum:
+    case ZodFirstPartyTypeKind2.ZodEnum:
       return parseEnumDef(def);
-    case ZodFirstPartyTypeKind.ZodNativeEnum:
+    case ZodFirstPartyTypeKind2.ZodNativeEnum:
       return parseNativeEnumDef(def);
-    case ZodFirstPartyTypeKind.ZodNullable:
+    case ZodFirstPartyTypeKind2.ZodNullable:
       return parseNullableDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodOptional:
+    case ZodFirstPartyTypeKind2.ZodOptional:
       return parseOptionalDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodMap:
+    case ZodFirstPartyTypeKind2.ZodMap:
       return parseMapDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodSet:
+    case ZodFirstPartyTypeKind2.ZodSet:
       return parseSetDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodLazy:
+    case ZodFirstPartyTypeKind2.ZodLazy:
       return () => def.getter()._def;
-    case ZodFirstPartyTypeKind.ZodPromise:
+    case ZodFirstPartyTypeKind2.ZodPromise:
       return parsePromiseDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodNaN:
-    case ZodFirstPartyTypeKind.ZodNever:
+    case ZodFirstPartyTypeKind2.ZodNaN:
+    case ZodFirstPartyTypeKind2.ZodNever:
       return parseNeverDef(refs);
-    case ZodFirstPartyTypeKind.ZodEffects:
+    case ZodFirstPartyTypeKind2.ZodEffects:
       return parseEffectsDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodAny:
+    case ZodFirstPartyTypeKind2.ZodAny:
       return parseAnyDef(refs);
-    case ZodFirstPartyTypeKind.ZodUnknown:
+    case ZodFirstPartyTypeKind2.ZodUnknown:
       return parseUnknownDef(refs);
-    case ZodFirstPartyTypeKind.ZodDefault:
+    case ZodFirstPartyTypeKind2.ZodDefault:
       return parseDefaultDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodBranded:
+    case ZodFirstPartyTypeKind2.ZodBranded:
       return parseBrandedDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodReadonly:
+    case ZodFirstPartyTypeKind2.ZodReadonly:
       return parseReadonlyDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodCatch:
+    case ZodFirstPartyTypeKind2.ZodCatch:
       return parseCatchDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodPipeline:
+    case ZodFirstPartyTypeKind2.ZodPipeline:
       return parsePipelineDef(def, refs);
-    case ZodFirstPartyTypeKind.ZodFunction:
-    case ZodFirstPartyTypeKind.ZodVoid:
-    case ZodFirstPartyTypeKind.ZodSymbol:
+    case ZodFirstPartyTypeKind2.ZodFunction:
+    case ZodFirstPartyTypeKind2.ZodVoid:
+    case ZodFirstPartyTypeKind2.ZodSymbol:
       return void 0;
     default:
       return /* @__PURE__ */ ((_) => void 0)(typeName);
@@ -38400,7 +39899,7 @@ function getMethodLiteral(schema) {
   return value;
 }
 function parseWithCompat(schema, data) {
-  const result = safeParse2(schema, data);
+  const result = safeParse3(schema, data);
   if (!result.success) {
     throw result.error;
   }
@@ -39020,7 +40519,7 @@ var Protocol = class {
           return reject(response);
         }
         try {
-          const parseResult = safeParse2(resultSchema, response.result);
+          const parseResult = safeParse3(resultSchema, response.result);
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
@@ -39773,7 +41272,7 @@ var Server = class extends Protocol {
     const method = methodValue;
     if (method === "tools/call") {
       const wrappedHandler = async (request, extra) => {
-        const validatedRequest = safeParse2(CallToolRequestSchema, request);
+        const validatedRequest = safeParse3(CallToolRequestSchema, request);
         if (!validatedRequest.success) {
           const errorMessage = validatedRequest.error instanceof Error ? validatedRequest.error.message : String(validatedRequest.error);
           throw new McpError(ErrorCode.InvalidParams, `Invalid tools/call request: ${errorMessage}`);
@@ -39781,14 +41280,14 @@ var Server = class extends Protocol {
         const { params } = validatedRequest.data;
         const result = await Promise.resolve(handler(request, extra));
         if (params.task) {
-          const taskValidationResult = safeParse2(CreateTaskResultSchema, result);
+          const taskValidationResult = safeParse3(CreateTaskResultSchema, result);
           if (!taskValidationResult.success) {
             const errorMessage = taskValidationResult.error instanceof Error ? taskValidationResult.error.message : String(taskValidationResult.error);
             throw new McpError(ErrorCode.InvalidParams, `Invalid task creation result: ${errorMessage}`);
           }
           return taskValidationResult.data;
         }
-        const validationResult = safeParse2(CallToolResultSchema, result);
+        const validationResult = safeParse3(CallToolResultSchema, result);
         if (!validationResult.success) {
           const errorMessage = validationResult.error instanceof Error ? validationResult.error.message : String(validationResult.error);
           throw new McpError(ErrorCode.InvalidParams, `Invalid tools/call result: ${errorMessage}`);
@@ -40354,7 +41853,7 @@ var McpServer = class {
     }
     const inputObj = normalizeObjectSchema(tool.inputSchema);
     const schemaToParse = inputObj ?? tool.inputSchema;
-    const parseResult = await safeParseAsync2(schemaToParse, args ?? {});
+    const parseResult = await safeParseAsync3(schemaToParse, args ?? {});
     if (!parseResult.success) {
       const error62 = "error" in parseResult ? parseResult.error : "Unknown error";
       const errorMessage = getParseErrorMessage(error62);
@@ -40379,7 +41878,7 @@ var McpServer = class {
       throw new McpError(ErrorCode.InvalidParams, `Output validation error: Tool ${toolName} has an output schema but no structured content was provided`);
     }
     const outputObj = normalizeObjectSchema(tool.outputSchema);
-    const parseResult = await safeParseAsync2(outputObj, result.structuredContent);
+    const parseResult = await safeParseAsync3(outputObj, result.structuredContent);
     if (!parseResult.success) {
       const error62 = "error" in parseResult ? parseResult.error : "Unknown error";
       const errorMessage = getParseErrorMessage(error62);
@@ -40592,7 +42091,7 @@ var McpServer = class {
       }
       if (prompt.argsSchema) {
         const argsObj = normalizeObjectSchema(prompt.argsSchema);
-        const parseResult = await safeParseAsync2(argsObj, request.params.arguments ?? {});
+        const parseResult = await safeParseAsync3(argsObj, request.params.arguments ?? {});
         if (!parseResult.success) {
           const error62 = "error" in parseResult ? parseResult.error : "Unknown error";
           const errorMessage = getParseErrorMessage(error62);
@@ -40752,7 +42251,7 @@ var McpServer = class {
     this._registeredPrompts[name] = registeredPrompt;
     if (argsSchema) {
       const hasCompletable = Object.values(argsSchema).some((field) => {
-        const inner = field instanceof ZodOptional2 ? field._def?.innerType : field;
+        const inner = field instanceof ZodOptional ? field._def?.innerType : field;
         return isCompletable(inner);
       });
       if (hasCompletable) {
@@ -41177,7 +42676,7 @@ var DragStepSchema = external_exports.object({
   toX: external_exports.number().describe("Destination X coordinate"),
   toY: external_exports.number().describe("Destination Y coordinate"),
   button: MouseButtonSchema.optional(),
-  durationMs: external_exports.number().min(0).max(1e4).optional().describe("Drag duration in ms (default 180)"),
+  durationMs: external_exports.number().min(0).max(1e4).optional().describe("Drag duration in ms (default 160)"),
   steps: external_exports.number().int().min(2).max(200).optional().describe("Interpolation steps along drag path"),
   coordinateSpace: CoordinateSpaceSchema.optional()
 });
@@ -41197,9 +42696,17 @@ var TypeStepSchema = external_exports.object({
   delayMs: external_exports.number().min(0).max(1e3).optional().describe("Optional delay between characters in ms"),
   submit: external_exports.boolean().optional().describe("Press Enter immediately after typing")
 });
+var PasteStepSchema = external_exports.object({
+  type: external_exports.literal("paste"),
+  text: external_exports.string().max(1e5).describe("Text to paste instantly via OS clipboard + mod+v (ideal for long text, URLs, or code)"),
+  restoreClipboard: external_exports.boolean().optional().describe("Restore previous clipboard text after pasting (default: true)"),
+  submit: external_exports.boolean().optional().describe("Press Enter immediately after pasting")
+});
 var KeyStepSchema = external_exports.object({
   type: external_exports.literal("key"),
-  key: external_exports.string().min(1).max(100).describe("Key or chord, e.g. 'Enter', 'Tab', 'Escape', 'Backspace', 'ArrowDown', 'ctrl+c', 'mod+a', 'cmd+shift+p'"),
+  key: external_exports.string().min(1).max(100).describe(
+    "Key or chord, e.g. 'Enter', 'Tab', 'Escape', 'Backspace', 'ArrowDown', 'ctrl+c', 'mod+a', 'cmd+shift+p'"
+  ),
   modifiers: external_exports.array(ModifierKeySchema).optional().describe("Optional modifiers held while pressing key"),
   count: external_exports.number().int().min(1).max(50).optional().describe("Repeat count (default 1)")
 });
@@ -41211,9 +42718,30 @@ var KeyUpStepSchema = external_exports.object({
   type: external_exports.literal("key_up"),
   key: external_exports.string().min(1).max(64).describe("Key to release")
 });
+var FocusWindowStepSchema = external_exports.object({
+  type: external_exports.literal("focus_window"),
+  title: external_exports.string().min(1).max(256).optional().describe("Case-insensitive substring of window title to focus"),
+  app: external_exports.string().min(1).max(256).optional().describe("Case-insensitive application/process name to focus"),
+  id: external_exports.union([external_exports.string(), external_exports.number()]).optional().describe("Exact window ID from handy_windows")
+});
 var WaitStepSchema = external_exports.object({
   type: external_exports.literal("wait"),
   ms: external_exports.number().min(0).max(3e4).describe("Milliseconds to wait (0..30000)")
+});
+var WaitForChangeStepSchema = external_exports.object({
+  type: external_exports.literal("wait_for_change"),
+  region: RegionSchema.optional().describe("Optional screen region to watch for visual change"),
+  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 3000)"),
+  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 60)"),
+  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Minimum changed pixel percentage to trigger completion (default: 0.05)")
+});
+var WaitForSettledStepSchema = external_exports.object({
+  type: external_exports.literal("wait_for_settled"),
+  region: RegionSchema.optional().describe("Optional screen region to wait until animations stop"),
+  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 3000)"),
+  quietMs: external_exports.number().min(30).max(2e3).optional().describe("Required visually quiet window in ms (default: 120)"),
+  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
+  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Max changed pixel percentage treated as settled (default: 0.05)")
 });
 var ScreenshotStepSchema = external_exports.object({
   type: external_exports.literal("screenshot"),
@@ -41234,17 +42762,21 @@ var ActionStepSchema = external_exports.discriminatedUnion("type", [
   DragStepSchema,
   ScrollStepSchema,
   TypeStepSchema,
+  PasteStepSchema,
   KeyStepSchema,
   KeyDownStepSchema,
   KeyUpStepSchema,
+  FocusWindowStepSchema,
   WaitStepSchema,
+  WaitForChangeStepSchema,
+  WaitForSettledStepSchema,
   ScreenshotStepSchema
 ]);
 
 // src/version.ts
 var HANDY_NAME = "handy";
 var HANDY_PACKAGE_NAME = "@miisodev/handy";
-var HANDY_VERSION = "1.0.0";
+var HANDY_VERSION = "1.1.0";
 
 // src/mcp.ts
 function logAudit(enabled, event) {
@@ -41300,7 +42832,7 @@ function createHandyMcpServer(options = {}) {
         resources: { listChanged: true },
         prompts: {}
       },
-      instructions: "Handy provides real-time computer screen vision with mapped (x, y) coordinates and live mouse reticle (`handy_see`), plus real-time native mouse and keyboard control supporting chained multi-step actions (`handy_act`). Always call `handy_see` to read exact screen coordinates before clicking unfamiliar UI elements, and chain related steps (e.g. move -> click -> type) in a single `handy_act` call."
+      instructions: "Handy provides real-time computer screen vision with mapped (x, y) coordinates, active window metadata, pixel-under-cursor color, and frame-to-frame visual diffs (`handy_see`), plus real-time native mouse, keyboard, clipboard, and window control supporting chained multi-step actions (`handy_act`, `handy_windows`, `handy_clipboard`). Always call `handy_see` before clicking unfamiliar UI elements, prefer `paste` for long or multi-line text, use `wait_for_change` / `wait_for_settled` instead of blind sleeps, and chain sequential steps in a single `handy_act` call."
     }
   );
   const stopWatch = controller.permissions.watch((state) => {
@@ -41313,8 +42845,8 @@ function createHandyMcpServer(options = {}) {
   server.registerTool(
     "handy_see",
     {
-      title: "See Computer Screen (Mapped Coordinates + Mouse)",
-      description: "Capture the computer screen in real-time with mapped (x, y) coordinate rulers, grid labels, and a high-contrast reticle marking the live mouse position. Use `region` to zoom into dense UI areas at 1:1 resolution while preserving global screen coordinates.",
+      title: "See Computer Screen (Mapped Coordinates + Mouse + Diff)",
+      description: "Capture the computer screen in real-time with mapped (x, y) coordinate rulers, dual-contrast grid labels, live mouse reticle, hex color under cursor, active window info, and visual diff since the previous capture (`changedPercent`, `changedBounds`). Use `region` to zoom into dense UI areas at 1:1 resolution while preserving global screen coordinates.",
       inputSchema: {
         display: external_exports.number().int().min(0).max(16).optional().describe("Monitor index (default: 0 primary)"),
         region: RegionSchema.optional().describe("Optional screen rectangle { x, y, width, height } to zoom into"),
@@ -41345,6 +42877,9 @@ function createHandyMcpServer(options = {}) {
         const metadata = {
           ok: true,
           mouse: shot.mouse,
+          pixelUnderMouse: shot.pixelUnderMouse,
+          activeWindow: shot.activeWindow,
+          screenDiff: shot.screenDiff,
           screen: shot.screen,
           region: shot.region,
           imageSize: { width: shot.imageWidth, height: shot.imageHeight },
@@ -41358,7 +42893,8 @@ function createHandyMcpServer(options = {}) {
           ok: true,
           latencyMs: Math.round(performance.now() - t0),
           mouse: shot.mouse,
-          region: shot.region
+          region: shot.region,
+          changedPercent: shot.screenDiff?.changedPercent
         });
         return {
           content: [
@@ -41388,11 +42924,15 @@ function createHandyMcpServer(options = {}) {
     "handy_act",
     {
       title: "Control Mouse & Keyboard (Single or Chained)",
-      description: 'Execute native mouse and keyboard controls in real-time. Supports chaining multiple steps sequentially in one call \u2014 for example: [{ "type": "move", "x": 420, "y": 260 }, { "type": "click" }, { "type": "type", "text": "Sam" }]. Set `screenshotAfter: true` to receive an updated coordinate-mapped screenshot immediately after the chain finishes.',
+      description: 'Execute native mouse, keyboard, clipboard-paste, window-focus, and smart visual-wait controls in real-time. Supports chaining multiple steps sequentially in one call \u2014 e.g. [{ "type": "focus_window", "title": "Code" }, { "type": "click", "x": 420, "y": 260 }, { "type": "paste", "text": "Hello!" }, { "type": "wait_for_settled" }]. Set `screenshotAfter: true` to receive an updated coordinate-mapped screenshot with numbered action-trail markers.',
       inputSchema: {
-        actions: external_exports.array(ActionStepSchema).min(1).max(100).describe("Ordered array of mouse/keyboard/wait/screenshot steps to execute sequentially"),
+        actions: external_exports.array(ActionStepSchema).min(1).max(100).describe(
+          "Ordered array of steps (move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, screenshot)"
+        ),
         stepDelayMs: external_exports.number().min(0).max(5e3).optional().describe("Settling delay in ms between steps so native UI focus updates reliably (default: 15)"),
         screenshotAfter: external_exports.boolean().optional().describe("Capture and return an annotated screen image after the chain completes (default: false)"),
+        showTrail: external_exports.boolean().optional().describe("Draw numbered amber markers (#1, #2, drag lines) on post-action screenshots (default: true)"),
+        failsafe: external_exports.boolean().optional().describe("Abort immediately if a human slams the cursor to the top-left (0,0) corner (default: true)"),
         settleMs: external_exports.number().min(0).max(5e3).optional().describe("Wait in ms before taking screenshotAfter (default: 50)"),
         display: external_exports.number().int().min(0).max(16).optional().describe("Target display index for normalized coordinates or screenshotAfter"),
         maxWidth: external_exports.number().int().min(320).max(3840).optional(),
@@ -41414,6 +42954,8 @@ function createHandyMcpServer(options = {}) {
           actions: args.actions,
           stepDelayMs: args.stepDelayMs,
           screenshotAfter: args.screenshotAfter,
+          showTrail: args.showTrail,
+          failsafe: args.failsafe,
           settleMs: args.settleMs,
           display: args.display,
           maxWidth: args.maxWidth,
@@ -41426,6 +42968,7 @@ function createHandyMcpServer(options = {}) {
           stepsCompleted: result.stepsCompleted,
           totalDurationMs: result.totalDurationMs,
           mouse: result.mouse,
+          activeWindow: result.activeWindow,
           receipts: result.receipts
         };
         logAudit(auditEnabled, {
@@ -41461,10 +43004,134 @@ function createHandyMcpServer(options = {}) {
     }
   );
   server.registerTool(
+    "handy_windows",
+    {
+      title: "List or Focus Desktop Windows",
+      description: "List visible desktop windows with their titles, owning apps, screen bounds `{ x, y, width, height }`, and focused state (`action: 'list'`), or bring a specific window to the foreground (`action: 'focus'`).",
+      inputSchema: {
+        action: external_exports.enum(["list", "focus"]).describe("'list' to inspect visible windows or 'focus' to activate one"),
+        title: external_exports.string().max(500).optional().describe("Case-insensitive window title substring when focusing"),
+        app: external_exports.string().max(500).optional().describe("Case-insensitive application name substring when focusing"),
+        id: external_exports.union([external_exports.string(), external_exports.number()]).optional().describe("Exact window ID from handy_windows list")
+      },
+      annotations: {
+        title: "Desktop Windows",
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async (args) => {
+      const t0 = performance.now();
+      try {
+        if (args.action === "list") {
+          const windows = await controller.listWindows();
+          const activeWindow = windows.find((w) => w.focused) ?? await controller.getActiveWindow();
+          logAudit(auditEnabled, {
+            tool: "handy_windows",
+            action: "list",
+            ok: true,
+            count: windows.length,
+            latencyMs: Math.round(performance.now() - t0)
+          });
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ ok: true, count: windows.length, activeWindow, windows }, null, 2)
+              }
+            ]
+          };
+        }
+        if (args.title === void 0 && args.app === void 0 && args.id === void 0) {
+          throw new Error("Provide `title`, `app`, or `id` when `action` is 'focus'.");
+        }
+        const res = await controller.focusWindow({ title: args.title, app: args.app, id: args.id });
+        logAudit(auditEnabled, {
+          tool: "handy_windows",
+          action: "focus",
+          ok: res.focused,
+          latencyMs: Math.round(performance.now() - t0)
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ ok: res.focused, focused: res.focused, activeWindow: res.activeWindow }, null, 2)
+            }
+          ]
+        };
+      } catch (err) {
+        return formatToolError(err);
+      }
+    }
+  );
+  server.registerTool(
+    "handy_clipboard",
+    {
+      title: "Read or Write System Clipboard",
+      description: "Read current plain-text clipboard contents (`action: 'read'`, works in `full` and `view_only` modes) or write Unicode text directly to the system clipboard (`action: 'write'`, requires `full` control mode).",
+      inputSchema: {
+        action: external_exports.enum(["read", "write"]).describe("'read' clipboard text or 'write' text to clipboard"),
+        text: external_exports.string().max(1e5).optional().describe("Text to copy to clipboard when action is 'write'")
+      },
+      annotations: {
+        title: "System Clipboard",
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async (args) => {
+      const t0 = performance.now();
+      try {
+        if (args.action === "read") {
+          const text2 = await controller.readClipboard();
+          logAudit(auditEnabled, {
+            tool: "handy_clipboard",
+            action: "read",
+            ok: true,
+            charCount: Array.from(text2).length,
+            latencyMs: Math.round(performance.now() - t0)
+          });
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify({ ok: true, length: Array.from(text2).length, text: text2 }, null, 2)
+              }
+            ]
+          };
+        }
+        const text = args.text ?? "";
+        await controller.writeClipboard(text);
+        logAudit(auditEnabled, {
+          tool: "handy_clipboard",
+          action: "write",
+          ok: true,
+          charCount: Array.from(text).length,
+          latencyMs: Math.round(performance.now() - t0)
+        });
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ ok: true, writtenChars: Array.from(text).length }, null, 2)
+            }
+          ]
+        };
+      } catch (err) {
+        return formatToolError(err);
+      }
+    }
+  );
+  server.registerTool(
     "handy_status",
     {
       title: "Check Handy Status & Permission Toggle",
-      description: "Check whether Handy permission is currently ON or OFF, which native OS backend is active, connected monitor dimensions, and current mouse position (when enabled).",
+      description: "Check whether Handy permission is currently ON or OFF, which native OS backend is active, connected monitor dimensions, active window, and current mouse position (when enabled).",
       inputSchema: {},
       annotations: {
         title: "Handy Status",
@@ -41539,7 +43206,7 @@ function createHandyMcpServer(options = {}) {
     "handy://status",
     {
       title: "Handy Status & Permissions",
-      description: "Live JSON state of Handy permission toggle, OS backend, and displays.",
+      description: "Live JSON state of Handy permission toggle, OS backend, active window, and displays.",
       mimeType: "application/json"
     },
     async (uri) => {
@@ -41550,6 +43217,27 @@ function createHandyMcpServer(options = {}) {
             uri: uri.href,
             mimeType: "application/json",
             text: JSON.stringify(info, null, 2)
+          }
+        ]
+      };
+    }
+  );
+  server.registerResource(
+    "handy-windows",
+    "handy://windows",
+    {
+      title: "Open Desktop Windows",
+      description: "Live list of visible desktop windows with titles, apps, and bounds (requires Handy ON).",
+      mimeType: "application/json"
+    },
+    async (uri) => {
+      const windows = await controller.listWindows();
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify({ windows }, null, 2)
           }
         ]
       };
@@ -41596,11 +43284,12 @@ function createHandyMcpServer(options = {}) {
             content: {
               type: "text",
               text: `${taskLine}Use Handy to complete this task safely and accurately:
-1. Call \`handy_see\` first to inspect the live screen. Read the exact (x, y) pixel coordinates from the top/left rulers and interior grid badges, and note the red \`MOUSE (x,y)\` reticle.
-2. For small icons or dense UI controls, call \`handy_see\` with \`region: { x, y, width, height }\` to inspect at 1:1 resolution with global screen coordinates.
-3. Chain sequential interactions in a single \`handy_act\` call (for example: move -> click -> type -> key Enter) with \`screenshotAfter: true\` so you can verify the UI change in one round-trip.
-4. Use \`mod+<key>\` (e.g. \`mod+a\`, \`mod+c\`, \`mod+v\`) for cross-platform shortcuts (maps to Cmd on macOS, Ctrl on Windows/Linux).
-5. Respect the user's permission toggle; if Handy is OFF, ask the user to run \`handy on\` or \`/handy:on\`. Confirm with the user before irreversible actions (deleting files, sending messages, or completing purchases).`
+1. Call \`handy_see\` first to inspect the live screen, active window, pixel color under cursor, and exact (x, y) pixel coordinates from the top/left rulers and interior grid badges.
+2. Use \`handy_windows\` (\`action: "list"\` or \`"focus"\`) or the \`focus_window\` step in \`handy_act\` to bring a target app forward cleanly.
+3. For small icons or dense UI controls, call \`handy_see\` with \`region: { x, y, width, height }\` to inspect at 1:1 resolution with global screen coordinates.
+4. Chain sequential interactions in a single \`handy_act\` call (prefer \`paste\` for long/Unicode text and \`wait_for_change\` / \`wait_for_settled\` instead of blind sleeps) with \`screenshotAfter: true\` so you can verify both the UI state and numbered action trail in one round-trip.
+5. Use \`mod+<key>\` (e.g. \`mod+a\`, \`mod+c\`, \`mod+v\`) for cross-platform shortcuts (maps to Cmd on macOS, Ctrl on Windows/Linux).
+6. Respect the user's permission toggle and top-left (0,0) failsafe; if Handy is OFF, ask the user to run \`handy on\` or \`/handy:on\`. Confirm with the user before irreversible actions.`
             }
           }
         ]
@@ -41651,6 +43340,518 @@ async function runStdioMcpServer(options = {}) {
   await server.connect(transport);
 }
 
+// src/ui.ts
+import { randomBytes } from "node:crypto";
+import { createServer } from "node:http";
+function readJsonBody(req, maxBytes = 65536) {
+  return new Promise((resolve2, reject) => {
+    const chunks = [];
+    let total = 0;
+    req.on("data", (chunk) => {
+      total += chunk.length;
+      if (total > maxBytes) {
+        reject(new Error("Request body too large."));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      const text = Buffer.concat(chunks).toString("utf8").trim();
+      if (!text) {
+        resolve2({});
+        return;
+      }
+      try {
+        const parsed = JSON.parse(text);
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          reject(new Error("Expected JSON object body."));
+          return;
+        }
+        resolve2(parsed);
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+function sendJson(res, status, body) {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  res.end(payload);
+}
+function renderHtml(token) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Handy Control Panel v${HANDY_VERSION}</title>
+  <style>
+    :root {
+      --bg: #0b1120;
+      --panel: #111827;
+      --border: #1f2937;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #0ea5e9;
+      --green: #10b981;
+      --amber: #f59e0b;
+      --red: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 20px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+    }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; }
+    .badge {
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .badge.on { background: rgba(16,185,129,0.18); color: #34d399; border: 1px solid rgba(16,185,129,0.4); }
+    .badge.view { background: rgba(245,158,11,0.18); color: #fbbf24; border: 1px solid rgba(245,158,11,0.4); }
+    .badge.off { background: rgba(239,68,68,0.18); color: #f87171; border: 1px solid rgba(239,68,68,0.4); }
+    .controls { display: flex; flex-wrap: wrap; gap: 8px; }
+    button {
+      cursor: pointer;
+      border: 1px solid var(--border);
+      background: #1e293b;
+      color: var(--text);
+      padding: 8px 13px;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 13px;
+      transition: filter 0.12s;
+    }
+    button:hover { filter: brightness(1.12); }
+    button.btn-green { background: #059669; border-color: #10b981; }
+    button.btn-amber { background: #b45309; border-color: #f59e0b; }
+    button.btn-red { background: #dc2626; border-color: #ef4444; }
+    button.btn-blue { background: #0284c7; border-color: #38bdf8; }
+    main {
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 16px;
+      padding: 16px 20px;
+    }
+    @media (max-width: 980px) { main { grid-template-columns: 1fr; } }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .screen-wrap {
+      position: relative;
+      background: #020617;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      overflow: hidden;
+      min-height: 280px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #screenImg {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      cursor: crosshair;
+    }
+    .meta-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 13px;
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(148,163,184,0.1);
+    }
+    .meta-row span:first-child { color: var(--muted); }
+    input[type="text"] {
+      width: 100%;
+      background: #0f172a;
+      border: 1px solid #334155;
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      margin-bottom: 8px;
+    }
+    .win-list { max-height: 200px; overflow-y: auto; font-size: 12px; }
+    .win-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 8px;
+      border-radius: 6px;
+      background: #0f172a;
+      margin-bottom: 6px;
+    }
+    .muted { color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span>Handy Control Panel</span>
+      <span class="muted">v${HANDY_VERSION}</span>
+      <span id="permBadge" class="badge on">Checking...</span>
+    </div>
+    <div class="controls">
+      <button class="btn-green" onclick="setPerm(true, 'full')">ON (Full Control)</button>
+      <button class="btn-amber" onclick="setPerm(true, 'view_only')">View Only</button>
+      <button onclick="setPerm(true, 'full', 900000)">ON 15m</button>
+      <button class="btn-red" onclick="setPerm(false)">STOP / OFF</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="toolbar">
+        <div>
+          <button class="btn-blue" onclick="refreshScreen()">Refresh Screen</button>
+          <label style="margin-left:10px;font-size:13px;cursor:pointer;">
+            <input type="checkbox" id="liveToggle" onchange="toggleLive()" /> Live (1.5s)
+          </label>
+        </div>
+        <div class="muted" id="hoverCoords">Hover image to inspect (x, y)</div>
+      </div>
+      <div class="screen-wrap">
+        <img id="screenImg" alt="Live annotated screen" style="display:none" />
+        <div id="screenPlaceholder" class="muted">Click "Refresh Screen" to capture coordinate-mapped view</div>
+      </div>
+    </section>
+
+    <aside style="display:flex;flex-direction:column;gap:14px;">
+      <div class="card">
+        <div style="font-weight:700;margin-bottom:8px;">Telemetry</div>
+        <div class="meta-row"><span>Backend</span><span id="mBackend">-</span></div>
+        <div class="meta-row"><span>Mouse</span><span id="mMouse">-</span></div>
+        <div class="meta-row"><span>Pixel Hex</span><span id="mPixel">-</span></div>
+        <div class="meta-row"><span>Active Window</span><span id="mWin">-</span></div>
+        <div class="meta-row"><span>Frame Diff</span><span id="mDiff">-</span></div>
+        <div class="meta-row"><span>Capture Latency</span><span id="mLatency">-</span></div>
+      </div>
+
+      <div class="card">
+        <div style="font-weight:700;margin-bottom:8px;">Run Chained Action</div>
+        <input id="chainInput" type="text" placeholder='move 420 260 -> click -> paste "Hello"' />
+        <button class="btn-blue" style="width:100%" onclick="runChain()">Execute Chain</button>
+        <div id="chainResult" class="muted" style="margin-top:8px;"></div>
+      </div>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <span style="font-weight:700;">Windows</span>
+          <button style="padding:4px 8px;font-size:11px;" onclick="loadWindows()">Refresh</button>
+        </div>
+        <div id="winList" class="win-list"><div class="muted">Click Refresh to list windows</div></div>
+      </div>
+    </aside>
+  </main>
+
+  <script>
+    const TOKEN = ${JSON.stringify(token)};
+    let screenMeta = null;
+    let liveTimer = null;
+
+    async function api(path, method = "GET", body) {
+      const res = await fetch(path, {
+        method,
+        headers: {
+          "x-handy-token": TOKEN,
+          ...(body ? { "content-type": "application/json" } : {})
+        },
+        body: body ? JSON.stringify(body) : undefined
+      });
+      return res.json();
+    }
+
+    function updateBadge(state) {
+      const el = document.getElementById("permBadge");
+      if (!state.enabled) {
+        el.className = "badge off";
+        el.textContent = "OFF (Blocked)";
+      } else if (state.mode === "view_only") {
+        el.className = "badge view";
+        el.textContent = "ON (View Only)";
+      } else {
+        el.className = "badge on";
+        el.textContent = "ON (Full Control)";
+      }
+    }
+
+    async function loadStatus() {
+      const data = await api("/api/status");
+      if (data.status) {
+        updateBadge(data.status);
+        document.getElementById("mBackend").textContent = data.status.backend || "-";
+        if (data.status.mouse) {
+          document.getElementById("mMouse").textContent = data.status.mouse.x + ", " + data.status.mouse.y;
+        }
+        if (data.status.activeWindow) {
+          document.getElementById("mWin").textContent = data.status.activeWindow.title || "-";
+        }
+      }
+    }
+
+    async function setPerm(enabled, mode, durationMs) {
+      const data = await api("/api/permission", "POST", { enabled, mode, durationMs });
+      if (data.permission) updateBadge(data.permission);
+      await loadStatus();
+    }
+
+    async function refreshScreen() {
+      const data = await api("/api/see");
+      if (!data.ok) {
+        document.getElementById("screenPlaceholder").style.display = "block";
+        document.getElementById("screenPlaceholder").textContent = data.error || "Unable to capture screen";
+        document.getElementById("screenImg").style.display = "none";
+        return;
+      }
+      screenMeta = data;
+      const img = document.getElementById("screenImg");
+      img.src = "data:image/png;base64," + data.base64Png;
+      img.style.display = "block";
+      document.getElementById("screenPlaceholder").style.display = "none";
+      document.getElementById("mMouse").textContent = data.mouse.x + ", " + data.mouse.y;
+      document.getElementById("mPixel").textContent = data.pixelUnderMouse || "-";
+      document.getElementById("mWin").textContent = (data.activeWindow && data.activeWindow.title) || "-";
+      document.getElementById("mDiff").textContent = data.screenDiff ? (data.screenDiff.changedPercent + "%") : "baseline";
+      document.getElementById("mLatency").textContent = data.captureMs + " ms";
+    }
+
+    function toggleLive() {
+      const on = document.getElementById("liveToggle").checked;
+      if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+      if (on) {
+        refreshScreen();
+        liveTimer = setInterval(refreshScreen, 1500);
+      }
+    }
+
+    document.getElementById("screenImg").addEventListener("mousemove", (ev) => {
+      if (!screenMeta) return;
+      const rect = ev.target.getBoundingClientRect();
+      const rx = (ev.clientX - rect.left) / Math.max(1, rect.width);
+      const ry = (ev.clientY - rect.top) / Math.max(1, rect.height);
+      const sx = Math.round(screenMeta.region.x + rx * screenMeta.region.width);
+      const sy = Math.round(screenMeta.region.y + ry * screenMeta.region.height);
+      document.getElementById("hoverCoords").textContent = "Screen (" + sx + ", " + sy + ") \u2014 click to insert into chain";
+    });
+
+    document.getElementById("screenImg").addEventListener("click", (ev) => {
+      if (!screenMeta) return;
+      const rect = ev.target.getBoundingClientRect();
+      const rx = (ev.clientX - rect.left) / Math.max(1, rect.width);
+      const ry = (ev.clientY - rect.top) / Math.max(1, rect.height);
+      const sx = Math.round(screenMeta.region.x + rx * screenMeta.region.width);
+      const sy = Math.round(screenMeta.region.y + ry * screenMeta.region.height);
+      const inp = document.getElementById("chainInput");
+      inp.value = inp.value ? (inp.value + " -> click " + sx + " " + sy) : ("click " + sx + " " + sy);
+    });
+
+    async function runChain() {
+      const expr = document.getElementById("chainInput").value.trim();
+      if (!expr) return;
+      const out = document.getElementById("chainResult");
+      out.textContent = "Running...";
+      const data = await api("/api/act", "POST", { chain: expr });
+      if (data.ok) {
+        out.textContent = "Completed " + data.stepsCompleted + " step(s) in " + data.totalDurationMs + " ms";
+        await refreshScreen();
+      } else {
+        out.textContent = "Error: " + (data.error || "failed");
+      }
+    }
+
+    async function loadWindows() {
+      const data = await api("/api/windows");
+      const container = document.getElementById("winList");
+      container.innerHTML = "";
+      if (!data.ok || !data.windows || data.windows.length === 0) {
+        container.innerHTML = '<div class="muted">No windows reported</div>';
+        return;
+      }
+      for (const w of data.windows) {
+        const row = document.createElement("div");
+        row.className = "win-item";
+        const label = document.createElement("span");
+        label.textContent = (w.focused ? "\u25CF " : "") + w.title;
+        const btn = document.createElement("button");
+        btn.style.padding = "3px 8px";
+        btn.style.fontSize = "11px";
+        btn.textContent = "Focus";
+        btn.onclick = async () => {
+          await api("/api/windows/focus", "POST", { id: w.id, title: w.title });
+          await loadWindows();
+          await refreshScreen();
+        };
+        row.appendChild(label);
+        row.appendChild(btn);
+        container.appendChild(row);
+      }
+    }
+
+    loadStatus();
+    refreshScreen();
+  </script>
+</body>
+</html>`;
+}
+async function startControlPanel(options = {}) {
+  const host = options.host ?? "127.0.0.1";
+  const port = options.port ?? 7788;
+  const permissions = options.permissions ?? new PermissionStore();
+  const controller = options.controller ?? new HandyController({
+    backend: createBackend({ kind: options.backendKind }),
+    permissions
+  });
+  const token = randomBytes(24).toString("hex");
+  const html = renderHtml(token);
+  const server = createServer(async (req, res) => {
+    try {
+      const url3 = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+      if (req.method === "GET" && url3.pathname === "/") {
+        res.writeHead(200, {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "x-frame-options": "SAMEORIGIN"
+        });
+        res.end(html);
+        return;
+      }
+      if (url3.pathname.startsWith("/api/")) {
+        const headerToken = req.headers["x-handy-token"];
+        if (headerToken !== token) {
+          sendJson(res, 403, { ok: false, error: "Forbidden: missing or invalid X-Handy-Token." });
+          return;
+        }
+      }
+      if (req.method === "GET" && url3.pathname === "/api/status") {
+        const status = await controller.status();
+        sendJson(res, 200, { ok: true, status });
+        return;
+      }
+      if (req.method === "POST" && url3.pathname === "/api/permission") {
+        const body = await readJsonBody(req);
+        const enabled = Boolean(body.enabled);
+        if (!enabled) {
+          await controller.releaseHeldInputs();
+        }
+        const permission = controller.permissions.setEnabled(enabled, {
+          mode: body.mode === "view_only" ? "view_only" : "full",
+          ttlMs: typeof body.durationMs === "number" ? body.durationMs : void 0,
+          updatedBy: "ui"
+        });
+        sendJson(res, 200, { ok: true, permission });
+        return;
+      }
+      if (req.method === "GET" && url3.pathname === "/api/see") {
+        const shot = await controller.see({ grid: true, showMouse: true });
+        sendJson(res, 200, {
+          ok: true,
+          base64Png: shot.base64Png,
+          mouse: shot.mouse,
+          pixelUnderMouse: shot.pixelUnderMouse,
+          activeWindow: shot.activeWindow,
+          screenDiff: shot.screenDiff,
+          region: shot.region,
+          captureMs: shot.captureMs
+        });
+        return;
+      }
+      if (req.method === "GET" && url3.pathname === "/api/windows") {
+        const windows = await controller.listWindows();
+        sendJson(res, 200, { ok: true, windows });
+        return;
+      }
+      if (req.method === "POST" && url3.pathname === "/api/windows/focus") {
+        const body = await readJsonBody(req);
+        const result = await controller.focusWindow({
+          id: typeof body.id === "string" || typeof body.id === "number" ? body.id : void 0,
+          title: typeof body.title === "string" ? body.title : void 0,
+          app: typeof body.app === "string" ? body.app : void 0
+        });
+        sendJson(res, 200, { ok: result.focused, ...result });
+        return;
+      }
+      if (req.method === "POST" && url3.pathname === "/api/act") {
+        const body = await readJsonBody(req);
+        const chainStr = typeof body.chain === "string" ? body.chain : "";
+        const steps = parseChainInput(chainStr);
+        const result = await controller.act({ actions: steps });
+        sendJson(res, 200, {
+          ok: true,
+          stepsCompleted: result.stepsCompleted,
+          totalDurationMs: result.totalDurationMs,
+          mouse: result.mouse,
+          receipts: result.receipts
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: "Not found" });
+    } catch (err) {
+      sendJson(res, 400, {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err)
+      });
+    }
+  });
+  await new Promise((resolve2, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, () => {
+      server.off("error", reject);
+      resolve2();
+    });
+  });
+  const addr = server.address();
+  const displayHost = host === "0.0.0.0" ? "127.0.0.1" : host;
+  const url2 = `http://${displayHost}:${addr.port}`;
+  return {
+    url: url2,
+    port: addr.port,
+    host,
+    token,
+    controller,
+    server,
+    close: async () => {
+      await new Promise((resolve2) => server.close(() => resolve2()));
+      await controller.close();
+    }
+  };
+}
+
 // src/cli.ts
 var EXIT_OK = 0;
 var EXIT_ERROR = 1;
@@ -41668,16 +43869,23 @@ var HELP_TEXT = `handy v${HANDY_VERSION} \u2014 Real-time native computer contro
 
 Usage:
   handy mcp                                  Start stdio MCP server (also runs when piped without args)
+  handy install [host] [--dry-run]           Auto-register Handy in Claude Desktop, Cursor, Windsurf, or Claude Code
+  handy uninstall [host] [--dry-run]         Remove Handy from MCP host config(s)
+  handy ui [--port 7788]                     Launch local live web Control Panel & coordinate inspector
   handy on [--view-only] [--ttl <duration>]  Turn Handy permissions ON (e.g. --ttl 30m)
   handy off                                  Turn Handy permissions OFF immediately
   handy toggle                               Toggle Handy permissions ON / OFF
-  handy status [--json]                      Show permission toggle state, backend, displays & mouse
+  handy status [--json]                      Show permission state, backend, displays, active window & mouse
   handy doctor [--json]                      Verify native OS input & screen capture readiness
-  handy see [options]                        Capture screen with mapped (x, y) grid & mouse reticle
+  handy see [options]                        Capture screen with mapped (x, y) grid, reticle & frame diff
+  handy windows [--json]                     List visible desktop windows with bounds & focus state
+  handy focus <title>                        Bring a desktop window to the foreground
+  handy clipboard [get|set <text>]           Read or write plain-text system clipboard
   handy act <chain|json> [options]           Execute single or chained mouse & keyboard controls
   handy move <x> <y>                         Move mouse cursor to screen coordinates (x, y)
   handy click [x] [y] [--right|--double]     Click at current cursor or (x, y)
   handy type <text> [--submit]               Type text natively (with optional Enter submit)
+  handy paste <text> [--submit]              Paste Unicode/long text instantly via clipboard
   handy key <key-or-chord>                   Press key or shortcut (e.g. Enter, mod+a, ctrl+c)
   handy scroll <up|down|left|right> [amount] Scroll mouse wheel
   handy config [client]                      Print MCP config for claude-desktop, claude-code, or cursor
@@ -41694,13 +43902,15 @@ Options for 'see':
 
 Options for 'act':
   --step-delay <ms>      Delay in ms between chained steps (default: 15)
-  --screenshot-after <f> Save post-chain annotated PNG screenshot to path
+  --screenshot-after <f> Save post-chain annotated PNG screenshot (with numbered trail) to path
+  --no-trail             Omit numbered action-trail markers on --screenshot-after
+  --no-failsafe          Disable top-left (0,0) corner-slam failsafe
   --backend <kind>       Override backend (auto, virtual, linux-x11, linux-cli, darwin, win32)
   --json                 Print structured JSON receipt to stdout
 
 Chained control examples:
-  handy act 'move 420 260 -> click -> type "Sam"'
-  handy act '[{"type":"move","x":420,"y":260},{"type":"click"},{"type":"type","text":"Sam"}]'
+  handy act 'focus "Scratchpad" -> click 800 420 -> paste "Hello \u{1F30D}" -> wait_for_settled'
+  handy act '[{"type":"move","x":420,"y":260},{"type":"click"},{"type":"paste","text":"Sam"}]'
 
 Exit codes:
   0  Success
@@ -41719,8 +43929,11 @@ function parseArgv(argv) {
     "json",
     "stdio",
     "view-only",
+    "dry-run",
     "no-grid",
     "no-mouse",
+    "no-trail",
+    "no-failsafe",
     "submit",
     "right",
     "middle",
@@ -41810,6 +44023,16 @@ claude mcp add handy -- npx -y ${HANDY_PACKAGE_NAME} mcp
   process.stdout.write(`${JSON.stringify(mcpServersJson, null, 2)}
 `);
 }
+function parseHostArg(raw) {
+  if (!raw || raw.toLowerCase() === "all") return "all";
+  const normalized = raw.toLowerCase();
+  if (!SUPPORTED_MCP_HOSTS.includes(normalized)) {
+    throw new Error(
+      `Unsupported host "${raw}". Expected one of: all, ${SUPPORTED_MCP_HOSTS.join(", ")}.`
+    );
+  }
+  return normalized;
+}
 async function runCli(argv = process.argv.slice(2)) {
   const { positional, flags } = parseArgv(argv);
   if (flags.has("version") || flags.has("v")) {
@@ -41839,6 +44062,52 @@ ${HELP_TEXT}`);
     return EXIT_OK;
   }
   try {
+    if (subcommand === "install" || subcommand === "uninstall") {
+      let target;
+      try {
+        target = parseHostArg(positional[1]);
+      } catch (e) {
+        process.stderr.write(`Error: ${e instanceof Error ? e.message : String(e)}
+`);
+        return EXIT_USAGE;
+      }
+      const dryRun = flags.get("dry-run") === true;
+      const results = subcommand === "install" ? installHandyToHosts(target, { dryRun }) : uninstallHandyFromHosts(target, { dryRun });
+      if (jsonOut) {
+        process.stdout.write(`${JSON.stringify({ ok: true, dryRun, results }, null, 2)}
+`);
+      } else {
+        for (const r of results) {
+          const tag = r.action === "installed" || r.action === "updated" || r.action === "removed" ? colorize(`[${r.action.toUpperCase()}]`, "32;1") : `[${r.action.toUpperCase()}]`;
+          process.stdout.write(`${tag} ${r.host} -> ${r.configPath} (${r.detail})
+`);
+        }
+      }
+      return EXIT_OK;
+    }
+    if (subcommand === "ui" || subcommand === "panel") {
+      const port = typeof flags.get("port") === "string" ? Number(flags.get("port")) : 7788;
+      const host = typeof flags.get("host") === "string" ? flags.get("host") : "127.0.0.1";
+      const running = await startControlPanel({
+        port,
+        host,
+        backendKind: backendFlag,
+        permissions
+      });
+      process.stdout.write(
+        `${colorize("Handy Control Panel", "36;1")} listening on ${running.url}
+Press Ctrl+C to stop.
+`
+      );
+      await new Promise((resolveStop) => {
+        const stop = () => {
+          void running.close().finally(() => resolveStop());
+        };
+        process.once("SIGINT", stop);
+        process.once("SIGTERM", stop);
+      });
+      return EXIT_OK;
+    }
     if (subcommand === "on" || subcommand === "enable") {
       const mode = flags.get("view-only") === true ? "view_only" : "full";
       const ttlRaw = typeof flags.get("ttl") === "string" ? flags.get("ttl") : void 0;
@@ -41908,6 +44177,12 @@ ${HELP_TEXT}`);
               );
             }
           }
+          if (info.activeWindow) {
+            process.stdout.write(
+              `Window     : ${info.activeWindow.title}${info.activeWindow.app ? ` (${info.activeWindow.app})` : ""}
+`
+            );
+          }
           if (info.mouse) {
             process.stdout.write(`Mouse      : (${info.mouse.x}, ${info.mouse.y})
 `);
@@ -41934,6 +44209,73 @@ ${HELP_TEXT}`);
         }
         return allOk ? EXIT_OK : EXIT_ERROR;
       }
+      if (subcommand === "windows") {
+        const windows = await controller.listWindows();
+        if (jsonOut) {
+          process.stdout.write(`${JSON.stringify({ ok: true, count: windows.length, windows }, null, 2)}
+`);
+        } else if (windows.length === 0) {
+          process.stdout.write("No visible windows reported.\n");
+        } else {
+          for (const w of windows) {
+            const mark = w.focused ? colorize("*", "32;1") : " ";
+            const b = w.bounds ? ` [${w.bounds.x},${w.bounds.y} ${w.bounds.width}x${w.bounds.height}]` : "";
+            process.stdout.write(`${mark} ${w.id}: ${w.title}${w.app ? ` (${w.app})` : ""}${b}
+`);
+          }
+        }
+        return EXIT_OK;
+      }
+      if (subcommand === "focus") {
+        const title = positional.slice(1).join(" ").trim();
+        if (!title) {
+          process.stderr.write(`Usage: handy focus <window-title>
+`);
+          return EXIT_USAGE;
+        }
+        const res = await controller.focusWindow({ title });
+        if (jsonOut) {
+          process.stdout.write(`${JSON.stringify({ ok: res.focused, ...res }, null, 2)}
+`);
+        } else if (res.focused) {
+          process.stdout.write(`Focused window "${res.activeWindow?.title ?? title}".
+`);
+        } else {
+          process.stderr.write(`No window matched "${title}".
+`);
+          return EXIT_ERROR;
+        }
+        return EXIT_OK;
+      }
+      if (subcommand === "clipboard") {
+        const action = (positional[1] ?? "get").toLowerCase();
+        if (action === "get" || action === "read") {
+          const text = await controller.readClipboard();
+          if (jsonOut) {
+            process.stdout.write(`${JSON.stringify({ ok: true, length: Array.from(text).length, text }, null, 2)}
+`);
+          } else {
+            process.stdout.write(`${text}
+`);
+          }
+          return EXIT_OK;
+        }
+        if (action === "set" || action === "write") {
+          const text = positional.slice(2).join(" ");
+          await controller.writeClipboard(text);
+          if (jsonOut) {
+            process.stdout.write(`${JSON.stringify({ ok: true, writtenChars: Array.from(text).length }, null, 2)}
+`);
+          } else {
+            process.stdout.write(`Copied ${Array.from(text).length} characters to clipboard.
+`);
+          }
+          return EXIT_OK;
+        }
+        process.stderr.write(`Usage: handy clipboard [get | set <text>]
+`);
+        return EXIT_USAGE;
+      }
       if (subcommand === "see" || subcommand === "screenshot") {
         const outPath = resolve(
           typeof flags.get("out") === "string" ? flags.get("out") : "handy-screen.png"
@@ -41945,11 +44287,14 @@ ${HELP_TEXT}`);
         const grid = flags.get("no-grid") === true ? false : true;
         const showMouse = flags.get("no-mouse") === true ? false : true;
         const shot = await controller.see({ display, region, maxWidth, gridStep, grid, showMouse });
-        writeFileSync2(outPath, shot.pngBuffer);
+        writeFileSync3(outPath, shot.pngBuffer);
         const payload = {
           ok: true,
           path: outPath,
           mouse: shot.mouse,
+          pixelUnderMouse: shot.pixelUnderMouse,
+          activeWindow: shot.activeWindow,
+          screenDiff: shot.screenDiff,
           screen: shot.screen,
           region: shot.region,
           imageSize: { width: shot.imageWidth, height: shot.imageHeight },
@@ -41961,7 +44306,7 @@ ${HELP_TEXT}`);
 `);
         } else {
           process.stdout.write(
-            `Saved ${shot.imageWidth}x${shot.imageHeight} screenshot -> ${outPath} (mouse=${shot.mouse.x},${shot.mouse.y}, ${shot.captureMs}ms)
+            `Saved ${shot.imageWidth}x${shot.imageHeight} screenshot -> ${outPath} (mouse=${shot.mouse.x},${shot.mouse.y}${shot.pixelUnderMouse ? ` ${shot.pixelUnderMouse}` : ""}, ${shot.captureMs}ms)
 `
           );
         }
@@ -42009,6 +44354,14 @@ ${HELP_TEXT}`);
           return EXIT_USAGE;
         }
         steps = [{ type: "type", text, submit: flags.get("submit") === true }];
+      } else if (subcommand === "paste") {
+        const text = positional.slice(1).join(" ");
+        if (!text) {
+          process.stderr.write(`Usage: handy paste <text> [--submit]
+`);
+          return EXIT_USAGE;
+        }
+        steps = [{ type: "paste", text, submit: flags.get("submit") === true }];
       } else if (subcommand === "key" || subcommand === "press") {
         const key = positional[1];
         if (!key) {
@@ -42033,19 +44386,24 @@ ${HELP_TEXT}`);
       }
       const stepDelayMs = typeof flags.get("step-delay") === "string" ? Number(flags.get("step-delay")) : void 0;
       const afterPath = typeof flags.get("screenshot-after") === "string" ? resolve(flags.get("screenshot-after")) : void 0;
+      const showTrail = flags.get("no-trail") !== true;
+      const failsafe = flags.get("no-failsafe") !== true;
       const result = await controller.act({
         actions: steps,
         stepDelayMs,
-        screenshotAfter: Boolean(afterPath)
+        screenshotAfter: Boolean(afterPath),
+        showTrail,
+        failsafe
       });
       if (afterPath && result.screenshots[0]) {
-        writeFileSync2(afterPath, result.screenshots[0].pngBuffer);
+        writeFileSync3(afterPath, result.screenshots[0].pngBuffer);
       }
       const summary = {
         ok: true,
         stepsCompleted: result.stepsCompleted,
         totalDurationMs: result.totalDurationMs,
         mouse: result.mouse,
+        activeWindow: result.activeWindow,
         receipts: result.receipts,
         screenshotPath: afterPath
       };

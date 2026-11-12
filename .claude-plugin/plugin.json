@@ -1,7 +1,7 @@
 {
   "name": "handy",
-  "version": "1.0.0",
-  "description": "Real-time native mouse, keyboard, and coordinate-mapped screen control via stdio MCP with permission toggle.",
+  "version": "1.1.0",
+  "description": "Real-time native mouse, keyboard, window, clipboard, and coordinate-mapped screen control via stdio MCP with permission toggle.",
   "author": {
     "name": "Kevin Miiso Novo",
     "email": "miisodev@gmail.com",
