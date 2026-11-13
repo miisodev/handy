@@ -28125,7 +28125,7 @@ var WaitForSettledStepSchema = external_exports.object({
   timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 3000)"),
   quietMs: external_exports.number().min(30).max(2e3).optional().describe("Required visually quiet window in ms (default: 120)"),
   pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
-  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Max changed pixel percentage still treated as settled (default: 0.1)")
+  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Changed pixel percentage at or above which the screen counts as still moving (default: 0.1)")
 });
 var WaitForColorStepSchema = external_exports.object({
   type: external_exports.literal("wait_for_color"),
@@ -33731,7 +33731,10 @@ var HandyController = class _HandyController {
             });
             const deadline = performance.now() + timeoutMs;
             let maxObserved = 0;
-            let matchedDiff = null;
+            let matched = false;
+            let matchedPercent = threshold;
+            let matchedPartial = false;
+            const pollOptions = { earlyExitPercent: threshold, computeBounds: false };
             while (performance.now() < deadline) {
               await sleepAbortable(pollMs, options.signal);
               this.permissions.assertCanControl();
@@ -33740,21 +33743,23 @@ var HandyController = class _HandyController {
                 display: options.display,
                 region: step.region
               });
-              const diff = computeFrameDiff(baseline, next);
+              const diff = computeFrameDiff(baseline, next, pollOptions);
               if (diff) {
-                if (diff.changedPercent > maxObserved) maxObserved = diff.changedPercent;
-                if (diff.changedPercent >= threshold) {
-                  matchedDiff = diff;
+                if (diff.partial || diff.changedPercent >= threshold) {
+                  matched = true;
+                  matchedPercent = Math.max(diff.changedPercent, threshold);
+                  matchedPartial = Boolean(diff.partial);
                   break;
                 }
+                if (diff.changedPercent > maxObserved) maxObserved = diff.changedPercent;
               }
             }
-            if (!matchedDiff) {
+            if (!matched) {
               throw new Error(
                 `Timed out after ${timeoutMs}ms waiting for screen change >= ${threshold}% (max observed: ${maxObserved}%).`
               );
             }
-            detail = `detected ${matchedDiff.changedPercent}% visual change`;
+            detail = matchedPartial ? `detected >= ${matchedPercent}% visual change` : `detected ${matchedPercent}% visual change`;
             break;
           }
           case "wait_for_settled": {
@@ -33769,6 +33774,7 @@ var HandyController = class _HandyController {
             const deadline = performance.now() + timeoutMs;
             let quietSince = performance.now();
             let settled = false;
+            const pollOptions = { earlyExitPercent: threshold, computeBounds: false };
             while (performance.now() < deadline) {
               await sleepAbortable(pollMs, options.signal);
               this.permissions.assertCanControl();
@@ -33777,9 +33783,9 @@ var HandyController = class _HandyController {
                 display: options.display,
                 region: step.region
               });
-              const diff = computeFrameDiff(prev, curr);
+              const diff = computeFrameDiff(prev, curr, pollOptions);
               prev = curr;
-              if (!diff || diff.changedPercent <= threshold) {
+              if (!diff || !diff.partial && diff.changedPercent < threshold) {
                 if (performance.now() - quietSince >= quietMs) {
                   settled = true;
                   break;
@@ -34029,56 +34035,111 @@ function parseChainInput(input2) {
       }
       return null;
     };
+    const takeTarget = (pos) => {
+      const tok = tokens[pos.i];
+      if (tok === void 0) return null;
+      const hash2 = /^#(\d+)$/.exec(tok);
+      if (hash2) {
+        pos.i += 1;
+        return { mark: Number(hash2[1]) };
+      }
+      const keyword = tok.toLowerCase();
+      if (keyword === "mark" || keyword === "m" || keyword === "#") {
+        const raw = tokens[pos.i + 1];
+        const index = raw === void 0 ? Number.NaN : Number(raw);
+        if (!Number.isInteger(index) || index < 1) {
+          throw new Error(
+            `Invalid mark reference in "${seg}". Expected a mark index of 1 or more after "${tok}", e.g. "${cmd} mark 5". Run handy_see with marks:true (or "handy see --marks") to list the available marks.`
+          );
+        }
+        pos.i += 2;
+        return { mark: index };
+      }
+      const comma = parseCoords(tok, void 0);
+      if (comma) {
+        pos.i += 1;
+        return { x: comma[0], y: comma[1] };
+      }
+      const pair = parseCoords(tok, tokens[pos.i + 1]);
+      if (pair) {
+        pos.i += 2;
+        return { x: pair[0], y: pair[1] };
+      }
+      return null;
+    };
+    const requireTarget = (stepName, allowBare) => {
+      const pos = { i: 1 };
+      const target = takeTarget(pos);
+      if (!target) {
+        if (allowBare && tokens.length === 1) return null;
+        throw new Error(
+          `Invalid ${stepName} step "${seg}". Expected "${stepName} <x> <y>", "${stepName} mark <n>",` + (allowBare ? ` or "${stepName}" to act at the current cursor position.` : ` or "${stepName} <x> <y>".`)
+        );
+      }
+      if (pos.i !== tokens.length) {
+        throw new Error(`Unexpected trailing argument "${tokens[pos.i]}" in ${stepName} step "${seg}".`);
+      }
+      return target;
+    };
     switch (cmd) {
       case "move": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        if (!coords) throw new Error(`Invalid move step "${seg}". Expected: move <x> <y>`);
-        return { type: "move", x: coords[0], y: coords[1] };
+        const target = requireTarget("move", false);
+        return { type: "move", ...target };
       }
       case "click": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "click", x: coords[0], y: coords[1] } : { type: "click" };
+        const target = requireTarget("click", true);
+        return target ? { type: "click", ...target } : { type: "click" };
       }
       case "double_click":
       case "doubleclick":
       case "dblclick": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "double_click", x: coords[0], y: coords[1] } : { type: "double_click" };
+        const target = requireTarget("double_click", true);
+        return target ? { type: "double_click", ...target } : { type: "double_click" };
       }
       case "triple_click":
       case "tripleclick": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "triple_click", x: coords[0], y: coords[1] } : { type: "triple_click" };
+        const target = requireTarget("triple_click", true);
+        return target ? { type: "triple_click", ...target } : { type: "triple_click" };
       }
       case "right_click":
       case "rightclick":
       case "rclick": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "right_click", x: coords[0], y: coords[1] } : { type: "right_click" };
+        const target = requireTarget("right_click", true);
+        return target ? { type: "right_click", ...target } : { type: "right_click" };
       }
       case "drag": {
-        if (tokens.length >= 5) {
-          return {
-            type: "drag",
-            fromX: Number(tokens[1]),
-            fromY: Number(tokens[2]),
-            toX: Number(tokens[3]),
-            toY: Number(tokens[4])
-          };
+        const usage = `Invalid drag step "${seg}". Expected "drag <toX> <toY>", "drag <fromX> <fromY> <toX> <toY>", or the mark forms "drag mark <n>" / "drag mark <n> mark <m>".`;
+        const pos = { i: 1 };
+        const targets = [];
+        while (pos.i < tokens.length) {
+          const target = takeTarget(pos);
+          if (!target) throw new Error(usage);
+          targets.push(target);
         }
-        const coords = parseCoords(tokens[1], tokens[2]);
-        if (!coords) throw new Error(`Invalid drag step "${seg}". Expected: drag [fromX fromY] <toX> <toY>`);
-        return { type: "drag", toX: coords[0], toY: coords[1] };
+        if (targets.length === 0 || targets.length > 2) throw new Error(usage);
+        const asFrom = (t) => "mark" in t ? { fromMark: t.mark } : { fromX: t.x, fromY: t.y };
+        const asTo = (t) => "mark" in t ? { toMark: t.mark } : { toX: t.x, toY: t.y };
+        if (targets.length === 1) return { type: "drag", ...asTo(targets[0]) };
+        return { type: "drag", ...asFrom(targets[0]), ...asTo(targets[1]) };
       }
       case "scroll": {
         const dir = tokens[1]?.toLowerCase();
         if (dir === "up" || dir === "down" || dir === "left" || dir === "right") {
-          const amount = tokens[2] ? Number(tokens[2]) : 3;
-          return { type: "scroll", direction: dir, amount };
+          const amountToken = tokens[2];
+          const hasAmount = amountToken !== void 0 && !Number.isNaN(Number(amountToken));
+          const amount = hasAmount ? Number(amountToken) : 3;
+          const pos = { i: hasAmount ? 3 : 2 };
+          const at = takeTarget(pos);
+          if (pos.i !== tokens.length) {
+            throw new Error(`Unexpected trailing argument "${tokens[pos.i]}" in scroll step "${seg}".`);
+          }
+          return { type: "scroll", direction: dir, amount, ...at ?? {} };
         }
         const coords = parseCoords(tokens[1], tokens[2]);
         if (coords) return { type: "scroll", deltaX: coords[0], deltaY: coords[1] };
-        throw new Error(`Invalid scroll step "${seg}". Expected: scroll <up|down|left|right> [amount]`);
+        throw new Error(
+          `Invalid scroll step "${seg}". Expected: scroll <up|down|left|right> [amount] [<x> <y> | mark <n>]`
+        );
       }
       case "type": {
         const rawAfterCmd = seg.replace(/^type\s+/i, "");
@@ -44796,6 +44857,9 @@ function renderHtml(token) {
           <label style="margin-left:10px;font-size:13px;cursor:pointer;">
             <input type="checkbox" id="diffToggle" checked onchange="refreshScreen()" /> Highlight Diff
           </label>
+          <label style="margin-left:10px;font-size:13px;cursor:pointer;" title="Detect and number interactive UI elements; clicking one inserts a mark reference instead of raw coordinates">
+            <input type="checkbox" id="marksToggle" onchange="refreshScreen()" /> Detect Marks
+          </label>
         </div>
         <div class="muted" id="hoverCoords">Hover image to inspect (x, y)</div>
       </div>
@@ -44813,7 +44877,16 @@ function renderHtml(token) {
         <div class="meta-row"><span>Pixel Hex</span><span id="mPixel">-</span></div>
         <div class="meta-row"><span>Active Window</span><span id="mWin">-</span></div>
         <div class="meta-row"><span>Frame Diff</span><span id="mDiff">-</span></div>
+        <div class="meta-row"><span>UI Elements</span><span id="mMarks">-</span></div>
         <div class="meta-row"><span>Capture Latency</span><span id="mLatency">-</span></div>
+      </div>
+
+      <div class="card" id="marksCard" style="display:none;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <span style="font-weight:700;">Detected Marks</span>
+          <span class="muted" style="font-size:11px;">click to chain</span>
+        </div>
+        <div id="markList" class="win-list"></div>
       </div>
 
       <div class="card">
@@ -44886,7 +44959,8 @@ function renderHtml(token) {
 
     async function refreshScreen() {
       const hi = document.getElementById("diffToggle")?.checked ? "1" : "0";
-      const data = await api("/api/see?highlightDiff=" + hi);
+      const mk = document.getElementById("marksToggle")?.checked ? "1" : "0";
+      const data = await api("/api/see?highlightDiff=" + hi + "&marks=" + mk);
       if (!data.ok) {
         document.getElementById("screenPlaceholder").style.display = "block";
         document.getElementById("screenPlaceholder").textContent = data.error || "Unable to capture screen";
@@ -44903,6 +44977,48 @@ function renderHtml(token) {
       document.getElementById("mWin").textContent = (data.activeWindow && data.activeWindow.title) || "-";
       document.getElementById("mDiff").textContent = data.screenDiff ? (data.screenDiff.changedPercent + "%") : "baseline";
       document.getElementById("mLatency").textContent = data.captureMs + " ms";
+      renderMarks(data.elements);
+    }
+
+    function renderMarks(elements) {
+      const card = document.getElementById("marksCard");
+      const count = document.getElementById("mMarks");
+      if (!elements || !elements.length) {
+        card.style.display = "none";
+        count.textContent = elements ? "0" : "-";
+        return;
+      }
+      count.textContent = String(elements.length);
+      card.style.display = "block";
+      const list = document.getElementById("markList");
+      list.innerHTML = "";
+      for (const el of elements) {
+        const row = document.createElement("div");
+        row.className = "win-item";
+        row.style.cursor = "pointer";
+        row.title = "Bounds " + el.x + "," + el.y + " " + el.width + "x" + el.height + " \u2014 score " + el.score.toFixed(2);
+        row.textContent = "#" + el.index + " " + el.kind + " (" + el.centerX + "," + el.centerY + ")";
+        row.onclick = () => appendChain("click mark " + el.index);
+        list.appendChild(row);
+      }
+    }
+
+    function appendChain(fragment) {
+      const inp = document.getElementById("chainInput");
+      inp.value = inp.value ? (inp.value + " -> " + fragment) : fragment;
+      inp.focus();
+    }
+
+    // Smallest detected element containing the point, so nested controls resolve to the tightest target.
+    function markAt(elements, sx, sy) {
+      if (!elements) return null;
+      let best = null;
+      for (const el of elements) {
+        if (sx < el.x || sy < el.y || sx > el.x + el.width || sy > el.y + el.height) continue;
+        const area = el.width * el.height;
+        if (!best || area < best.area) best = { index: el.index, kind: el.kind, area };
+      }
+      return best;
     }
 
     function toggleLive() {
@@ -44921,7 +45037,10 @@ function renderHtml(token) {
       const ry = (ev.clientY - rect.top) / Math.max(1, rect.height);
       const sx = Math.round(screenMeta.region.x + rx * screenMeta.region.width);
       const sy = Math.round(screenMeta.region.y + ry * screenMeta.region.height);
-      document.getElementById("hoverCoords").textContent = "Screen (" + sx + ", " + sy + ") \u2014 click to insert into chain";
+      const hit = markAt(screenMeta.elements, sx, sy);
+      document.getElementById("hoverCoords").textContent = hit
+        ? "Screen (" + sx + ", " + sy + ") \u2014 mark #" + hit.index + " (" + hit.kind + ") \u2014 click to chain"
+        : "Screen (" + sx + ", " + sy + ") \u2014 click to insert into chain";
     });
 
     document.getElementById("screenImg").addEventListener("click", (ev) => {
@@ -44931,8 +45050,8 @@ function renderHtml(token) {
       const ry = (ev.clientY - rect.top) / Math.max(1, rect.height);
       const sx = Math.round(screenMeta.region.x + rx * screenMeta.region.width);
       const sy = Math.round(screenMeta.region.y + ry * screenMeta.region.height);
-      const inp = document.getElementById("chainInput");
-      inp.value = inp.value ? (inp.value + " -> click " + sx + " " + sy) : ("click " + sx + " " + sy);
+      const hit = markAt(screenMeta.elements, sx, sy);
+      appendChain(hit ? ("click mark " + hit.index) : ("click " + sx + " " + sy));
     });
 
     async function runChain() {
@@ -45077,11 +45196,13 @@ data: ${JSON.stringify(initial)}
       }
       if (req.method === "GET" && url3.pathname === "/api/see") {
         const highlightDiff = url3.searchParams.get("highlightDiff") === "1";
+        const marks = url3.searchParams.get("marks") === "1";
         const windowQuery = url3.searchParams.get("window") ?? void 0;
         const shot = await controller.see({
           grid: true,
           showMouse: true,
           highlightDiff,
+          marks,
           window: windowQuery || void 0
         });
         sendJson(res, 200, {
@@ -45092,7 +45213,8 @@ data: ${JSON.stringify(initial)}
           activeWindow: shot.activeWindow,
           screenDiff: shot.screenDiff,
           region: shot.region,
-          captureMs: shot.captureMs
+          captureMs: shot.captureMs,
+          elements: shot.elements ?? null
         });
         return;
       }

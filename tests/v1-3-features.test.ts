@@ -3,13 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VirtualDesktopBackend } from "../src/backends/virtual.js";
-import { HandyController, fittsDurationMs } from "../src/controller.js";
+import { HandyController, fittsDurationMs, parseChainInput } from "../src/controller.js";
 import { computeFrameDiff } from "../src/diff.js";
 import { detectUiElements, resolveMarkCenter } from "../src/marks.js";
 import { PermissionStore } from "../src/permissions.js";
 import { decodePng, encodePng, resizeRgba, type PngFilterStrategy } from "../src/png.js";
 import { renderScreenOverlay } from "../src/overlay.js";
 import { pickDisplay, type DisplayInfo, type RawFrame, type UiElement } from "../src/types.js";
+import { startControlPanel } from "../src/ui.js";
 
 function makeFrame(
   width: number,
@@ -728,5 +729,161 @@ describe("Handy v1.3.0 — Backend capability detection & display resolution", (
     expect(pickDisplay(displays, 99)?.name).toBe("b"); // out of range -> primary
     expect(pickDisplay(displays)?.name).toBe("a"); // default index 0 -> first display
     expect(pickDisplay([])).toBeUndefined();
+  });
+});
+
+describe("Handy v1.3.0 — Control Panel mark support (real HTTP on loopback)", () => {
+  it("serves marks through /api/see and exposes them in the panel HTML", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "handy-v13-ui-"));
+    const backend = new VirtualDesktopBackend();
+    const controller = new HandyController({ backend, permissions: new PermissionStore({ configDir }) });
+    const panel = await startControlPanel({ port: 0, controller });
+
+    try {
+      const headers = { "x-handy-token": panel.token };
+
+      const plain = (await (
+        await fetch(`http://127.0.0.1:${panel.port}/api/see`, { headers })
+      ).json()) as { ok: boolean; elements: UiElement[] | null };
+      expect(plain.ok).toBe(true);
+      expect(plain.elements).toBeNull();
+
+      const marked = (await (
+        await fetch(`http://127.0.0.1:${panel.port}/api/see?marks=1`, { headers })
+      ).json()) as { ok: boolean; elements: UiElement[] | null; base64Png: string };
+      expect(marked.ok).toBe(true);
+      expect(Array.isArray(marked.elements)).toBe(true);
+      expect(marked.elements!.length).toBeGreaterThan(0);
+      expect(marked.base64Png.length).toBeGreaterThan(0);
+
+      // The served page must wire the toggle and the mark-aware click handler.
+      const html = await (await fetch(`http://127.0.0.1:${panel.port}/?token=${panel.token}`)).text();
+      expect(html).toContain('id="marksToggle"');
+      expect(html).toContain('id="marksCard"');
+      expect(html).toContain('id="mMarks"');
+      expect(html).toContain("click mark ");
+      expect(html).toContain("function markAt");
+
+      // A chained click by mark through the panel's own /api/act endpoint must land.
+      const L = VirtualDesktopBackend.LAYOUT;
+      const submitMark = findByBox(marked.elements!, L.submitButton)!;
+      expect(submitMark).toBeDefined();
+      const nameMark = findByBox(marked.elements!, L.nameInput)!;
+      expect(nameMark).toBeDefined();
+
+      const acted = (await (
+        await fetch(`http://127.0.0.1:${panel.port}/api/act`, {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/json" },
+          body: JSON.stringify({
+            chain: `click mark ${nameMark.index} -> type "PanelMark" -> click mark ${submitMark.index}`,
+          }),
+        })
+      ).json()) as { ok: boolean };
+      expect(acted.ok).toBe(true);
+      expect(backend.state.submittedValue).toBe("PanelMark");
+    } finally {
+      await panel.close();
+      await controller.close();
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects panel requests that omit the bearer token", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "handy-v13-ui-auth-"));
+    const backend = new VirtualDesktopBackend();
+    const controller = new HandyController({ backend, permissions: new PermissionStore({ configDir }) });
+    const panel = await startControlPanel({ port: 0, controller });
+    try {
+      const res = await fetch(`http://127.0.0.1:${panel.port}/api/see?marks=1`);
+      // The panel rejects a missing/incorrect token with 403 before touching the controller.
+      expect(res.status).toBe(403);
+    } finally {
+      await panel.close();
+      await controller.close();
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Handy v1.3.0 — Chain DSL mark references & argument validation", () => {
+  it("parses mark targets for every pointer step", () => {
+    expect(parseChainInput("move mark 3")).toEqual([{ type: "move", mark: 3 }]);
+    expect(parseChainInput("click mark 5")).toEqual([{ type: "click", mark: 5 }]);
+    expect(parseChainInput("double_click mark 5")).toEqual([{ type: "double_click", mark: 5 }]);
+    expect(parseChainInput("triple_click mark 5")).toEqual([{ type: "triple_click", mark: 5 }]);
+    expect(parseChainInput("right_click mark 5")).toEqual([{ type: "right_click", mark: 5 }]);
+    expect(parseChainInput("scroll down 4 mark 9")).toEqual([{ type: "scroll", direction: "down", amount: 4, mark: 9 }]);
+    // Compact aliases, and amount omitted so the mark is not mistaken for one.
+    expect(parseChainInput("click #12")).toEqual([{ type: "click", mark: 12 }]);
+    expect(parseChainInput("click m 12")).toEqual([{ type: "click", mark: 12 }]);
+    expect(parseChainInput("scroll down mark 9")).toEqual([{ type: "scroll", direction: "down", amount: 3, mark: 9 }]);
+  });
+
+  it("parses drag endpoints as coordinates, marks, or a mix", () => {
+    expect(parseChainInput("drag 100 200 300 400")).toEqual([
+      { type: "drag", fromX: 100, fromY: 200, toX: 300, toY: 400 },
+    ]);
+    expect(parseChainInput("drag 300 400")).toEqual([{ type: "drag", toX: 300, toY: 400 }]);
+    expect(parseChainInput("drag mark 3 mark 7")).toEqual([{ type: "drag", fromMark: 3, toMark: 7 }]);
+    expect(parseChainInput("drag mark 3 300 400")).toEqual([{ type: "drag", fromMark: 3, toX: 300, toY: 400 }]);
+    expect(parseChainInput("drag 100 200 mark 7")).toEqual([{ type: "drag", fromX: 100, fromY: 200, toMark: 7 }]);
+    expect(parseChainInput("drag mark 7")).toEqual([{ type: "drag", toMark: 7 }]);
+  });
+
+  it("still parses pre-existing coordinate forms, including the comma shorthand", () => {
+    expect(parseChainInput("click 400 300")).toEqual([{ type: "click", x: 400, y: 300 }]);
+    expect(parseChainInput("click 400,300")).toEqual([{ type: "click", x: 400, y: 300 }]);
+    expect(parseChainInput("move 10,20")).toEqual([{ type: "move", x: 10, y: 20 }]);
+    // A bare click acts at the current cursor position.
+    expect(parseChainInput("click")).toEqual([{ type: "click" }]);
+    expect(parseChainInput("scroll down")).toEqual([{ type: "scroll", direction: "down", amount: 3 }]);
+    expect(parseChainInput("scroll 5 10")).toEqual([{ type: "scroll", deltaX: 5, deltaY: 10 }]);
+  });
+
+  it("rejects malformed targets instead of silently acting at the cursor", () => {
+    // Before this change `click mark 5` parsed as a bare click and quietly clicked the wrong place.
+    expect(() => parseChainInput("click mark")).toThrow(/mark index of 1 or more/);
+    expect(() => parseChainInput("click mark 0")).toThrow(/mark index of 1 or more/);
+    expect(() => parseChainInput("click mark abc")).toThrow(/mark index of 1 or more/);
+    expect(() => parseChainInput("click 12")).toThrow(/Invalid click step/);
+    expect(() => parseChainInput("click maybe here")).toThrow(/Invalid click step/);
+    expect(() => parseChainInput("move")).toThrow(/Invalid move step/);
+    expect(() => parseChainInput("click 100 200 300")).toThrow(/Unexpected trailing argument/);
+    expect(() => parseChainInput("drag 100 200 300")).toThrow(/Invalid drag step/);
+    expect(() => parseChainInput("drag")).toThrow(/Invalid drag step/);
+    expect(() => parseChainInput("drag mark 1 mark 2 mark 3")).toThrow(/Invalid drag step/);
+    expect(() => parseChainInput("scroll down 3 mark")).toThrow(/mark index of 1 or more/);
+    expect(() => parseChainInput("scroll down 3 400")).toThrow(/Unexpected trailing argument/);
+  });
+
+  it("reports the offending segment text in every parse error", () => {
+    expect(() => parseChainInput('type "hi" -> click bogus')).toThrow(/click bogus/);
+  });
+
+  it("executes a whole mark-driven chain parsed from text, end to end", async () => {
+    const configDir = mkdtempSync(join(tmpdir(), "handy-v13-dsl-"));
+    const backend = new VirtualDesktopBackend();
+    const controller = new HandyController({ backend, permissions: new PermissionStore({ configDir }) });
+    await controller.init();
+    try {
+      const L = VirtualDesktopBackend.LAYOUT;
+      const shot = await controller.see({ marks: true });
+      const nameMark = findByBox(shot.elements!, L.nameInput)!;
+      const submitMark = findByBox(shot.elements!, L.submitButton)!;
+
+      const res = await controller.act({
+        actions: parseChainInput(
+          `click mark ${nameMark.index} -> type "DslMark" -> click mark ${submitMark.index}`,
+        ),
+        stepDelayMs: 2,
+      });
+
+      expect(res.stepsCompleted).toBe(3);
+      expect(backend.state.submittedValue).toBe("DslMark");
+    } finally {
+      await controller.close();
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 });
