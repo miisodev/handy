@@ -34305,14 +34305,31 @@ function buildHandyMcpEntry(platform = process.platform) {
   };
 }
 function readJsonObject(filePath) {
-  if (!existsSync3(filePath)) return {};
-  const raw = readFileSync5(filePath, "utf8").trim();
-  if (!raw) return {};
-  const parsed = JSON.parse(raw);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`Expected JSON object in ${filePath}`);
+  if (!existsSync3(filePath)) return { doc: {} };
+  let raw;
+  try {
+    raw = readFileSync5(filePath, "utf8").trim();
+  } catch (error62) {
+    return { error: `Could not read ${filePath}: ${error62 instanceof Error ? error62.message : String(error62)}` };
   }
-  return parsed;
+  if (!raw) return { doc: {} };
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error62) {
+    return {
+      error: `${filePath} is not valid JSON (${error62 instanceof Error ? error62.message : String(error62)}). Fix or remove the file, then re-run; Handy left it untouched.`
+    };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: `Expected a JSON object in ${filePath}` };
+  }
+  return { doc: parsed };
+}
+function backupOnce(configPath) {
+  const backupPath = `${configPath}.handy.bak`;
+  if (!existsSync3(backupPath)) copyFileSync(configPath, backupPath);
+  return backupPath;
 }
 function atomicWriteJson(filePath, data) {
   const dir = dirname(filePath);
@@ -34342,7 +34359,12 @@ function installHandyToHosts(target = "all", env = {}) {
       continue;
     }
     const fileExisted = existsSync3(configPath);
-    const doc = readJsonObject(configPath);
+    const read = readJsonObject(configPath);
+    if ("error" in read) {
+      results.push({ host, configPath, action: "skipped", dryRun, detail: read.error });
+      continue;
+    }
+    const doc = read.doc;
     const servers = doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers) ? { ...doc.mcpServers } : {};
     const prev = JSON.stringify(servers.handy ?? null);
     const next = JSON.stringify(entry);
@@ -34360,10 +34382,7 @@ function installHandyToHosts(target = "all", env = {}) {
     const updatedDoc = { ...doc, mcpServers: servers };
     let backupPath;
     if (!dryRun) {
-      if (fileExisted) {
-        backupPath = `${configPath}.handy.bak`;
-        copyFileSync(configPath, backupPath);
-      }
+      if (fileExisted) backupPath = backupOnce(configPath);
       atomicWriteJson(configPath, updatedDoc);
     }
     results.push({
@@ -34393,7 +34412,12 @@ function uninstallHandyFromHosts(target = "all", env = {}) {
       });
       continue;
     }
-    const doc = readJsonObject(configPath);
+    const read = readJsonObject(configPath);
+    if ("error" in read) {
+      results.push({ host, configPath, action: "skipped", dryRun, detail: read.error });
+      continue;
+    }
+    const doc = read.doc;
     const servers = doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers) ? { ...doc.mcpServers } : {};
     if (!("handy" in servers)) {
       results.push({
@@ -34409,8 +34433,7 @@ function uninstallHandyFromHosts(target = "all", env = {}) {
     const updatedDoc = { ...doc, mcpServers: servers };
     let backupPath;
     if (!dryRun) {
-      backupPath = `${configPath}.handy.bak`;
-      copyFileSync(configPath, backupPath);
+      backupPath = backupOnce(configPath);
       atomicWriteJson(configPath, updatedDoc);
     }
     results.push({
