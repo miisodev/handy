@@ -496,6 +496,7 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<nu
           gridStep: shot.gridStep,
           captureMs: shot.captureMs,
           ...(shot.elements ? { elementCount: shot.elements.length, elements: shot.elements } : {}),
+          ...(shot.marksError ? { marksError: shot.marksError } : {}),
         };
 
         if (jsonOut) {
@@ -503,6 +504,9 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<nu
         } else {
           process.stdout.write(
             `Saved ${shot.imageWidth}x${shot.imageHeight} screenshot -> ${outPath} (mouse=${shot.mouse.x},${shot.mouse.y}${shot.pixelUnderMouse ? ` ${shot.pixelUnderMouse}` : ""}, ${shot.captureMs}ms)\n` +
+              (shot.marksError
+                ? `Mark detection failed (screenshot is still valid; use ruler coordinates): ${shot.marksError}\n`
+                : "") +
               (shot.elements
                 ? `Detected ${shot.elements.length} UI element mark(s):\n` +
                   shot.elements

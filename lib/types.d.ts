@@ -712,6 +712,12 @@ export interface SeeResult {
     gridStep: number | null;
     /** Detected Set-of-Mark UI elements (present when `marks: true`), in global logical screen coords. */
     elements?: UiElement[];
+    /**
+     * Set when `marks: true` was requested but detection failed. Element detection is a
+     * best-effort enhancement, so a failure degrades to a plain screenshot rather than losing the
+     * capture; this carries the reason so callers can fall back to reading coordinates.
+     */
+    marksError?: string;
     coordinateSpace: "screen";
     captureMs: number;
     timestamp: string;

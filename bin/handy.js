@@ -33188,13 +33188,19 @@ var HandyController = class _HandyController {
       rgba = new Uint8Array(frame.data);
     }
     let elements;
+    let marksError;
     if (options.marks) {
-      elements = detectUiElements(frame, {
-        maxMarks: options.maxMarks,
-        kinds: options.markKinds,
-        minScore: options.minMarkScore
-      });
-      this.lastElements = elements;
+      try {
+        elements = detectUiElements(frame, {
+          maxMarks: options.maxMarks,
+          kinds: options.markKinds,
+          minScore: options.minMarkScore
+        });
+        this.lastElements = elements;
+      } catch (error62) {
+        this.lastElements = null;
+        marksError = error62 instanceof Error ? error62.message : String(error62);
+      }
     }
     const overlayMeta = renderScreenOverlay(rgba, outWidth, outHeight, {
       originX: frame.originX,
@@ -33236,6 +33242,7 @@ var HandyController = class _HandyController {
       screenDiff,
       gridStep: overlayMeta.gridStep,
       ...elements ? { elements } : {},
+      ...marksError ? { marksError } : {},
       coordinateSpace: "screen",
       captureMs,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
@@ -44198,6 +44205,13 @@ function createHandyMcpServer(options = {}) {
             elementCount: shot.elements.length,
             elements: shot.elements,
             elementHint: 'Click any element by index without restating coordinates, e.g. { "type": "click", "mark": 3 }. Marks are only valid until the screen changes; re-run handy_see with marks: true after any interaction that mutates the UI.'
+          } : {},
+          // Detection degrades rather than fails the capture, so say why and what to do instead
+          // — otherwise an agent sees no `elements` and cannot tell "nothing detected" from
+          // "detection broke", nor know that `mark` references are unavailable this round.
+          ...shot.marksError ? {
+            marksError: shot.marksError,
+            marksHint: "UI element detection failed, so this capture has no marks and `mark` references will be rejected. The screenshot is still valid: read (x, y) from the coordinate rulers and pass explicit coordinates instead."
           } : {}
         };
         logAudit(auditEnabled, {
@@ -45773,7 +45787,8 @@ Press Ctrl+C to stop.
           imageSize: { width: shot.imageWidth, height: shot.imageHeight },
           gridStep: shot.gridStep,
           captureMs: shot.captureMs,
-          ...shot.elements ? { elementCount: shot.elements.length, elements: shot.elements } : {}
+          ...shot.elements ? { elementCount: shot.elements.length, elements: shot.elements } : {},
+          ...shot.marksError ? { marksError: shot.marksError } : {}
         };
         if (jsonOut) {
           process.stdout.write(`${JSON.stringify(payload, null, 2)}
@@ -45781,7 +45796,8 @@ Press Ctrl+C to stop.
         } else {
           process.stdout.write(
             `Saved ${shot.imageWidth}x${shot.imageHeight} screenshot -> ${outPath} (mouse=${shot.mouse.x},${shot.mouse.y}${shot.pixelUnderMouse ? ` ${shot.pixelUnderMouse}` : ""}, ${shot.captureMs}ms)
-` + (shot.elements ? `Detected ${shot.elements.length} UI element mark(s):
+` + (shot.marksError ? `Mark detection failed (screenshot is still valid; use ruler coordinates): ${shot.marksError}
+` : "") + (shot.elements ? `Detected ${shot.elements.length} UI element mark(s):
 ` + shot.elements.map(
               (e) => `  #${String(e.index).padStart(2)} ${e.kind.padEnd(7)} (${e.centerX},${e.centerY})  ${e.width}x${e.height} @ ${e.x},${e.y}  score=${e.score.toFixed(2)}`
             ).join("\n") + "\n" : "")
