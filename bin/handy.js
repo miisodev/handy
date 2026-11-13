@@ -44049,7 +44049,7 @@ var StdioServerTransport = class {
 };
 
 // src/version.ts
-var HANDY_VERSION = "1.2.0";
+var HANDY_VERSION = "1.3.0";
 var HANDY_NAME = "handy";
 var HANDY_PACKAGE_NAME = "@miisodev/handy";
 
