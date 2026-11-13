@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { VirtualDesktopBackend } from "../src/backends/virtual.js";
 import { PermissionStore } from "../src/permissions.js";
 import { decodePng } from "../src/png.js";
 
@@ -171,6 +172,101 @@ describe("Stdio MCP Server (Real Child Process End-to-End)", () => {
     expect(r1.isError).toBeFalsy();
     expect(r2.isError).toBeFalsy();
     expect(r3.isError).toBeFalsy();
+  });
+
+  it("detects Set-of-Mark UI elements over MCP and clicks one by mark index", async () => {
+    const seeRes = await client.callTool({ name: "handy_see", arguments: { marks: true } });
+    expect(seeRes.isError).toBeFalsy();
+    const seeContent = seeRes.content as Array<{ type: string; data?: string; text?: string }>;
+    expect(seeContent.some((c) => c.type === "image")).toBe(true);
+
+    const meta = JSON.parse(seeContent.find((c) => c.type === "text")!.text!) as {
+      ok: boolean;
+      elementCount: number;
+      elementHint: string;
+      elements: Array<{
+        index: number;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        centerX: number;
+        centerY: number;
+        score: number;
+        kind: string;
+      }>;
+    };
+    expect(meta.ok).toBe(true);
+    expect(meta.elementCount).toBeGreaterThan(0);
+    expect(meta.elements).toHaveLength(meta.elementCount);
+    expect(meta.elementHint).toMatch(/mark/);
+
+    // Marks are numbered 1..N in reading order with no gaps or duplicates.
+    const indices = meta.elements.map((e) => e.index);
+    expect(indices).toEqual([...indices].sort((a, b) => a - b));
+    expect(indices[0]).toBe(1);
+    expect(new Set(indices).size).toBe(indices.length);
+    for (const el of meta.elements) {
+      expect(["control", "text", "icon", "region"]).toContain(el.kind);
+      expect(el.score).toBeGreaterThan(0);
+      expect(el.score).toBeLessThanOrEqual(1);
+      expect(el.centerX).toBeGreaterThanOrEqual(el.x);
+      expect(el.centerX).toBeLessThanOrEqual(el.x + el.width);
+    }
+
+    // A marked capture must not be returned when marks are not requested.
+    const plain = await client.callTool({ name: "handy_see", arguments: {} });
+    const plainMeta = JSON.parse(
+      (plain.content as Array<{ type: string; text?: string }>).find((c) => c.type === "text")!.text!,
+    ) as { elements?: unknown };
+    expect(plainMeta.elements).toBeUndefined();
+
+    const L = VirtualDesktopBackend.LAYOUT;
+    const nearBox = (t: { x: number; y: number }) =>
+      meta.elements.find((e) => Math.abs(e.x - t.x) < 14 && Math.abs(e.y - t.y) < 14);
+    const nameMark = nearBox(L.nameInput);
+    const submitMark = nearBox(L.submitButton);
+    expect(nameMark, "expected a mark on the name input").toBeDefined();
+    expect(submitMark, "expected a mark on the submit button").toBeDefined();
+
+    const actRes = await client.callTool({
+      name: "handy_act",
+      arguments: {
+        actions: [
+          { type: "click", mark: nameMark!.index },
+          { type: "type", text: "McpMarkDriven" },
+          { type: "click", mark: submitMark!.index },
+        ],
+        stepDelayMs: 2,
+        verifyChange: true,
+      },
+    });
+    expect(actRes.isError).toBeFalsy();
+    const summary = JSON.parse(
+      (actRes.content as Array<{ type: string; text?: string }>).find((c) => c.type === "text")!.text!,
+    ) as {
+      ok: boolean;
+      stepsCompleted: number;
+      changed: boolean;
+      change: { changedPercent: number };
+      receipts: Array<{ detail: string }>;
+    };
+    expect(summary.ok).toBe(true);
+    expect(summary.stepsCompleted).toBe(3);
+    expect(summary.changed).toBe(true);
+    expect(summary.change.changedPercent).toBeGreaterThan(0);
+    expect(summary.receipts[0]!.detail).toContain(`mark #${nameMark!.index}`);
+    expect(summary.receipts[2]!.detail).toContain(`mark #${submitMark!.index}`);
+
+    // Out-of-range marks are rejected at the schema layer (1..200) ...
+    const outOfRange = await client.callTool({ name: "handy_act", arguments: { actions: [{ type: "click", mark: 9999 }] } });
+    expect(outOfRange.isError).toBe(true);
+    expect((outOfRange.content as Array<{ text: string }>)[0]!.text).toMatch(/<=200/);
+
+    // ... and in-range-but-undetected marks fail loudly at the controller layer, never silently.
+    const unknown = await client.callTool({ name: "handy_act", arguments: { actions: [{ type: "click", mark: 150 }] } });
+    expect(unknown.isError).toBe(true);
+    expect((unknown.content as Array<{ text: string }>)[0]!.text).toMatch(/not available/);
   });
 
   it("keeps stdout strictly JSON-RPC clean and exits 0 cleanly on stdin EOF (MCP-04)", async () => {

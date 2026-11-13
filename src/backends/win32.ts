@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseKeyChord, toWin32Vk, WIN32_VK_CODES, type ConcreteModifier } from "../keys.js";
 import { decodePng } from "../png.js";
+import { pickDisplay } from "../types.js";
 import type {
   DesktopBackend,
   DisplayInfo,
@@ -740,7 +741,7 @@ export class Win32Backend implements DesktopBackend {
 
   async captureScreen(options: { display?: number; region?: Region } = {}): Promise<RawFrame> {
     const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0]!;
+    const disp = pickDisplay(displays, options.display)!;
 
     const rx = options.region ? Math.round(options.region.x) : disp.x;
     const ry = options.region ? Math.round(options.region.y) : disp.y;

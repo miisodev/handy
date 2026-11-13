@@ -774,16 +774,34 @@ export interface DoctorCheck {
     ok: boolean;
     detail: string;
 }
+/**
+ * Resolves the display an operation should target.
+ *
+ * Every bundled backend numbers displays from zero, but `id` is an opaque backend value rather
+ * than a guaranteed index, so this falls back to positional lookup and then to the primary display
+ * instead of silently operating on the wrong monitor (or on `undefined`).
+ */
+export declare function pickDisplay(displays: DisplayInfo[], index?: number): DisplayInfo | undefined;
 export interface DesktopBackend {
     readonly name: string;
     readonly platform: NodeJS.Platform | "virtual";
+    /**
+     * True when the backend carries click count and held modifiers on the native event itself
+     * (macOS CGEvent requires this for double/triple clicks to register). Lets the controller use
+     * capability detection rather than an `instanceof` check against a concrete class.
+     */
+    readonly nativeClickCount?: boolean;
     init(): Promise<void>;
     close(): Promise<void>;
     getDisplays(): Promise<DisplayInfo[]>;
     getMousePosition(): Promise<Point>;
     moveMouse(x: number, y: number): Promise<void>;
-    mouseDown(button: MouseButton): Promise<void>;
-    mouseUp(button: MouseButton): Promise<void>;
+    /**
+     * Extra arguments are honoured only by backends that set `nativeClickCount`; all others may
+     * ignore them, which keeps a plain `(button) => Promise<void>` implementation assignable.
+     */
+    mouseDown(button: MouseButton, clickCount?: number, modifiers?: Exclude<ModifierKey, "mod">[]): Promise<void>;
+    mouseUp(button: MouseButton, clickCount?: number, modifiers?: Exclude<ModifierKey, "mod">[]): Promise<void>;
     scroll(deltaX: number, deltaY: number): Promise<void>;
     keyDown(key: string): Promise<void>;
     keyUp(key: string): Promise<void>;

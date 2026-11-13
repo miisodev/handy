@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { DARWIN_KEYCODES, parseKeyChord, type ConcreteModifier } from "../keys.js";
 import { decodePng } from "../png.js";
+import { pickDisplay } from "../types.js";
 import type {
   DesktopBackend,
   DisplayInfo,
@@ -299,6 +300,8 @@ export interface DarwinBackendOptions {
 export class DarwinBackend implements DesktopBackend {
   readonly name = "darwin-coregraphics";
   readonly platform = "darwin" as const;
+  /** CGEvent carries click count and held modifiers, so double/triple clicks must be sent natively. */
+  readonly nativeClickCount = true;
 
   private readonly worker: JsonlWorker;
   private readonly customCapturePng?: (args: { display: DisplayInfo; region?: Region }) => Promise<Buffer>;
@@ -464,7 +467,7 @@ export class DarwinBackend implements DesktopBackend {
 
   async captureScreen(options: { display?: number; region?: Region } = {}): Promise<RawFrame> {
     const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0]!;
+    const disp = pickDisplay(displays, options.display)!;
 
     const logicalWidth = options.region ? Math.round(options.region.width) : disp.width;
     const logicalHeight = options.region ? Math.round(options.region.height) : disp.height;

@@ -3,6 +3,7 @@ import { createConnection, type Socket } from "node:net";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { parseKeyChord, toX11Keysym, X11_KEYSYMS, type ConcreteModifier } from "../keys.js";
+import { pickDisplay } from "../types.js";
 import type {
   DesktopBackend,
   DisplayInfo,
@@ -1077,7 +1078,7 @@ export class LinuxX11Backend implements DesktopBackend {
   async captureScreen(options: { display?: number; region?: Region } = {}): Promise<RawFrame> {
     const screen = await this.ensureReady();
     const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0]!;
+    const disp = pickDisplay(displays, options.display)!;
 
     const rx = options.region ? Math.max(0, Math.min(screen.width - 1, Math.round(options.region.x))) : disp.x;
     const ry = options.region ? Math.max(0, Math.min(screen.height - 1, Math.round(options.region.y))) : disp.y;

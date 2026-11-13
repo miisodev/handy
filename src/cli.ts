@@ -60,6 +60,8 @@ Options for 'see':
   --region <x,y,w,h>     Zoom into a rectangular screen region (keeps global coordinates)
   --window <title>       Capture a specific visible window by title/app substring
   --highlight-diff       Outline changed pixels since the previous capture
+  --marks                Detect & number UI elements (Set-of-Mark); prints their bounds/centres
+  --max-marks <n>        Max element marks to return with --marks (default: 40)
   --display <index>      Target monitor index (default: 0)
   --max-width <px>       Max output image width (default: 1280)
   --grid-step <px>       Custom major coordinate grid spacing
@@ -464,6 +466,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<nu
         const grid = flags.get("no-grid") === true ? false : true;
         const showMouse = flags.get("no-mouse") === true ? false : true;
         const highlightDiff = flags.get("highlight-diff") === true;
+        const marks = flags.get("marks") === true;
+        const maxMarks = typeof flags.get("max-marks") === "string" ? Number(flags.get("max-marks")) : undefined;
 
         const shot = await controller.see({
           display,
@@ -474,6 +478,8 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<nu
           grid,
           showMouse,
           highlightDiff,
+          marks,
+          maxMarks,
         });
         writeFileSync(outPath, shot.pngBuffer);
 
@@ -489,13 +495,24 @@ export async function runCli(argv: string[] = process.argv.slice(2)): Promise<nu
           imageSize: { width: shot.imageWidth, height: shot.imageHeight },
           gridStep: shot.gridStep,
           captureMs: shot.captureMs,
+          ...(shot.elements ? { elementCount: shot.elements.length, elements: shot.elements } : {}),
         };
 
         if (jsonOut) {
           process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
         } else {
           process.stdout.write(
-            `Saved ${shot.imageWidth}x${shot.imageHeight} screenshot -> ${outPath} (mouse=${shot.mouse.x},${shot.mouse.y}${shot.pixelUnderMouse ? ` ${shot.pixelUnderMouse}` : ""}, ${shot.captureMs}ms)\n`,
+            `Saved ${shot.imageWidth}x${shot.imageHeight} screenshot -> ${outPath} (mouse=${shot.mouse.x},${shot.mouse.y}${shot.pixelUnderMouse ? ` ${shot.pixelUnderMouse}` : ""}, ${shot.captureMs}ms)\n` +
+              (shot.elements
+                ? `Detected ${shot.elements.length} UI element mark(s):\n` +
+                  shot.elements
+                    .map(
+                      (e) =>
+                        `  #${String(e.index).padStart(2)} ${e.kind.padEnd(7)} (${e.centerX},${e.centerY})  ${e.width}x${e.height} @ ${e.x},${e.y}  score=${e.score.toFixed(2)}`,
+                    )
+                    .join("\n") +
+                  "\n"
+                : ""),
           );
         }
         return EXIT_OK;

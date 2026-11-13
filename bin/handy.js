@@ -27972,6 +27972,211 @@ function resizeRgba(src, srcWidth, srcHeight, dstWidth, dstHeight, options = {})
   return resizeRgbaBilinear(src, srcWidth, srcHeight, dstWidth, dstHeight);
 }
 
+// src/types.ts
+var UiElementKindSchema = external_exports.enum(["control", "text", "icon", "region"]);
+var MouseButtonSchema = external_exports.enum(["left", "right", "middle"]);
+var ModifierKeySchema = external_exports.enum(["ctrl", "alt", "shift", "meta", "mod"]);
+var CoordinateSpaceSchema = external_exports.enum(["screen", "normalized", "window"]);
+var MotionProfileSchema = external_exports.enum(["linear", "ease", "human"]);
+var RegionSchema = external_exports.object({
+  x: external_exports.number().int().describe("Left X coordinate in screen pixels"),
+  y: external_exports.number().int().describe("Top Y coordinate in screen pixels"),
+  width: external_exports.number().int().min(1).max(16384).describe("Region width in screen pixels"),
+  height: external_exports.number().int().min(1).max(16384).describe("Region height in screen pixels")
+});
+var MarkRefSchema = external_exports.number().int().min(1).max(200).optional().describe(
+  "Target detected UI element mark #N \u2014 the number drawn on the screenshot returned by the last `handy_see({ marks: true })` \u2014 instead of supplying x/y"
+);
+var MoveStepSchema = external_exports.object({
+  type: external_exports.literal("move"),
+  x: external_exports.number().optional().describe("Target X coordinate (or delta X when relative=true). Omit when using `mark`."),
+  y: external_exports.number().optional().describe("Target Y coordinate (or delta Y when relative=true). Omit when using `mark`."),
+  mark: MarkRefSchema,
+  relative: external_exports.boolean().optional().describe("Move relative to current mouse position"),
+  durationMs: external_exports.number().min(0).max(1e4).optional().describe("Smooth movement duration in ms (0 = instant)"),
+  steps: external_exports.number().int().min(1).max(200).optional().describe("Interpolation steps when durationMs > 0"),
+  motion: MotionProfileSchema.optional().describe("Interpolation curve used when durationMs > 0"),
+  coordinateSpace: CoordinateSpaceSchema.optional().describe("screen (default), normalized (0..1000), or window")
+});
+var ClickStepSchema = external_exports.object({
+  type: external_exports.literal("click"),
+  x: external_exports.number().optional().describe("Optional X coordinate to move to before clicking"),
+  y: external_exports.number().optional().describe("Optional Y coordinate to move to before clicking"),
+  mark: MarkRefSchema,
+  button: MouseButtonSchema.optional().describe("Mouse button: left (default), right, or middle"),
+  count: external_exports.number().int().min(1).max(5).optional().describe("Click count (1 = single, 2 = double, 3 = triple)"),
+  modifiers: external_exports.array(ModifierKeySchema).optional().describe("Modifier keys held during click"),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var DoubleClickStepSchema = external_exports.object({
+  type: external_exports.literal("double_click"),
+  x: external_exports.number().optional().describe("Optional X coordinate to move to before double-clicking"),
+  y: external_exports.number().optional().describe("Optional Y coordinate to move to before double-clicking"),
+  mark: MarkRefSchema,
+  button: MouseButtonSchema.optional(),
+  modifiers: external_exports.array(ModifierKeySchema).optional(),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var TripleClickStepSchema = external_exports.object({
+  type: external_exports.literal("triple_click"),
+  x: external_exports.number().optional().describe("Optional X coordinate to move to before triple-clicking"),
+  y: external_exports.number().optional().describe("Optional Y coordinate to move to before triple-clicking"),
+  mark: MarkRefSchema,
+  modifiers: external_exports.array(ModifierKeySchema).optional(),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var RightClickStepSchema = external_exports.object({
+  type: external_exports.literal("right_click"),
+  x: external_exports.number().optional().describe("Optional X coordinate to move to before right-clicking"),
+  y: external_exports.number().optional().describe("Optional Y coordinate to move to before right-clicking"),
+  mark: MarkRefSchema,
+  modifiers: external_exports.array(ModifierKeySchema).optional(),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var MouseDownStepSchema = external_exports.object({
+  type: external_exports.literal("mouse_down"),
+  x: external_exports.number().optional(),
+  y: external_exports.number().optional(),
+  mark: MarkRefSchema,
+  button: MouseButtonSchema.optional(),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var MouseUpStepSchema = external_exports.object({
+  type: external_exports.literal("mouse_up"),
+  x: external_exports.number().optional(),
+  y: external_exports.number().optional(),
+  mark: MarkRefSchema,
+  button: MouseButtonSchema.optional(),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var DragStepSchema = external_exports.object({
+  type: external_exports.literal("drag"),
+  fromX: external_exports.number().optional().describe("Start X (defaults to current mouse X)"),
+  fromY: external_exports.number().optional().describe("Start Y (defaults to current mouse Y)"),
+  fromMark: external_exports.number().int().min(1).max(200).optional().describe("Start the drag at detected element mark #N"),
+  toX: external_exports.number().optional().describe("Destination X coordinate. Omit when using `toMark`."),
+  toY: external_exports.number().optional().describe("Destination Y coordinate. Omit when using `toMark`."),
+  toMark: external_exports.number().int().min(1).max(200).optional().describe("End the drag at detected element mark #N"),
+  button: MouseButtonSchema.optional(),
+  durationMs: external_exports.number().min(0).max(1e4).optional().describe("Drag duration in ms (default 160)"),
+  steps: external_exports.number().int().min(2).max(200).optional().describe("Interpolation steps along drag path"),
+  motion: MotionProfileSchema.optional().describe("Interpolation curve along the drag path"),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var ScrollStepSchema = external_exports.object({
+  type: external_exports.literal("scroll"),
+  x: external_exports.number().optional().describe("Optional X to position cursor over before scrolling"),
+  y: external_exports.number().optional().describe("Optional Y to position cursor over before scrolling"),
+  mark: MarkRefSchema,
+  deltaX: external_exports.number().optional().describe("Horizontal wheel ticks (+ right, - left)"),
+  deltaY: external_exports.number().optional().describe("Vertical wheel ticks (+ down, - up)"),
+  direction: external_exports.enum(["up", "down", "left", "right"]).optional().describe("Named scroll direction"),
+  amount: external_exports.number().min(1).max(100).optional().describe("Wheel ticks when using direction (default 3)"),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var TypeStepSchema = external_exports.object({
+  type: external_exports.literal("type"),
+  text: external_exports.string().max(1e4).describe("Text to type natively (supports Unicode and newlines)"),
+  delayMs: external_exports.number().min(0).max(1e3).optional().describe("Optional delay between characters in ms"),
+  submit: external_exports.boolean().optional().describe("Press Enter immediately after typing")
+});
+var PasteStepSchema = external_exports.object({
+  type: external_exports.literal("paste"),
+  text: external_exports.string().max(1e5).describe("Text to paste instantly via OS clipboard + mod+v (ideal for long text, URLs, or code)"),
+  restoreClipboard: external_exports.boolean().optional().describe("Restore previous clipboard text after pasting (default: true)"),
+  submit: external_exports.boolean().optional().describe("Press Enter immediately after pasting")
+});
+var KeyStepSchema = external_exports.object({
+  type: external_exports.literal("key"),
+  key: external_exports.string().min(1).max(100).describe(
+    "Key or chord, e.g. 'Enter', 'Tab', 'Escape', 'Backspace', 'ArrowDown', 'ctrl+c', 'mod+a', 'cmd+shift+p'"
+  ),
+  modifiers: external_exports.array(ModifierKeySchema).optional().describe("Optional modifiers held while pressing key"),
+  count: external_exports.number().int().min(1).max(50).optional().describe("Repeat count (default 1)")
+});
+var KeyDownStepSchema = external_exports.object({
+  type: external_exports.literal("key_down"),
+  key: external_exports.string().min(1).max(64).describe("Key to press and hold down")
+});
+var KeyUpStepSchema = external_exports.object({
+  type: external_exports.literal("key_up"),
+  key: external_exports.string().min(1).max(64).describe("Key to release")
+});
+var FocusWindowStepSchema = external_exports.object({
+  type: external_exports.literal("focus_window"),
+  title: external_exports.string().min(1).max(256).optional().describe("Case-insensitive substring of window title to focus"),
+  app: external_exports.string().min(1).max(256).optional().describe("Case-insensitive application/process name to focus"),
+  id: external_exports.union([external_exports.string(), external_exports.number()]).optional().describe("Exact window ID from handy_windows")
+});
+var WaitStepSchema = external_exports.object({
+  type: external_exports.literal("wait"),
+  ms: external_exports.number().min(0).max(3e4).describe("Milliseconds to wait (0..30000)")
+});
+var WaitForChangeStepSchema = external_exports.object({
+  type: external_exports.literal("wait_for_change"),
+  region: RegionSchema.optional().describe("Optional screen region to watch for visual change"),
+  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 3000)"),
+  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 60)"),
+  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Minimum changed pixel percentage to trigger completion (default: 0.05)")
+});
+var WaitForSettledStepSchema = external_exports.object({
+  type: external_exports.literal("wait_for_settled"),
+  region: RegionSchema.optional().describe("Optional screen region to wait until animations stop"),
+  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 3000)"),
+  quietMs: external_exports.number().min(30).max(2e3).optional().describe("Required visually quiet window in ms (default: 120)"),
+  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
+  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Max changed pixel percentage still treated as settled (default: 0.1)")
+});
+var WaitForColorStepSchema = external_exports.object({
+  type: external_exports.literal("wait_for_color"),
+  x: external_exports.number().int().describe("Target X coordinate of pixel to inspect"),
+  y: external_exports.number().int().describe("Target Y coordinate of pixel to inspect"),
+  color: external_exports.string().regex(/^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/).describe("Expected hex color (#rrggbb or #rgb)"),
+  tolerance: external_exports.number().min(0).max(442).optional().describe("Allowed Euclidean RGB distance 0..442 (default: 24)"),
+  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 5000)"),
+  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var ScreenshotStepSchema = external_exports.object({
+  type: external_exports.literal("screenshot"),
+  region: RegionSchema.optional(),
+  window: external_exports.string().max(256).optional().describe("Optional window title substring to capture at 1:1 resolution"),
+  grid: external_exports.boolean().optional(),
+  showMouse: external_exports.boolean().optional(),
+  highlightDiff: external_exports.boolean().optional(),
+  maxWidth: external_exports.number().int().min(320).max(3840).optional(),
+  marks: external_exports.boolean().optional().describe("Run Set-of-Mark UI element detection on this mid-chain capture"),
+  maxMarks: external_exports.number().int().min(1).max(200).optional(),
+  label: external_exports.string().max(120).optional().describe("Optional label identifying this mid-chain capture")
+});
+var ActionStepSchema = external_exports.discriminatedUnion("type", [
+  MoveStepSchema,
+  ClickStepSchema,
+  DoubleClickStepSchema,
+  TripleClickStepSchema,
+  RightClickStepSchema,
+  MouseDownStepSchema,
+  MouseUpStepSchema,
+  DragStepSchema,
+  ScrollStepSchema,
+  TypeStepSchema,
+  PasteStepSchema,
+  KeyStepSchema,
+  KeyDownStepSchema,
+  KeyUpStepSchema,
+  FocusWindowStepSchema,
+  WaitStepSchema,
+  WaitForChangeStepSchema,
+  WaitForSettledStepSchema,
+  WaitForColorStepSchema,
+  ScreenshotStepSchema
+]);
+function pickDisplay(displays, index) {
+  if (displays.length === 0) return void 0;
+  const wanted = index ?? 0;
+  return displays.find((d) => d.id === wanted) ?? displays[wanted] ?? displays.find((d) => d.primary) ?? displays[0];
+}
+
 // src/backends/jsonl-worker.ts
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -28359,6 +28564,8 @@ while (true) {
 var DarwinBackend = class {
   name = "darwin-coregraphics";
   platform = "darwin";
+  /** CGEvent carries click count and held modifiers, so double/triple clicks must be sent natively. */
+  nativeClickCount = true;
   worker;
   customCapturePng;
   constructor(options = {}) {
@@ -28501,7 +28708,7 @@ var DarwinBackend = class {
   }
   async captureScreen(options = {}) {
     const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
+    const disp = pickDisplay(displays, options.display);
     const logicalWidth = options.region ? Math.round(options.region.width) : disp.width;
     const logicalHeight = options.region ? Math.round(options.region.height) : disp.height;
     const originX = options.region ? Math.round(options.region.x) : disp.x;
@@ -29994,7 +30201,7 @@ var LinuxX11Backend = class {
   async captureScreen(options = {}) {
     const screen = await this.ensureReady();
     const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
+    const disp = pickDisplay(displays, options.display);
     const rx = options.region ? Math.max(0, Math.min(screen.width - 1, Math.round(options.region.x))) : disp.x;
     const ry = options.region ? Math.max(0, Math.min(screen.height - 1, Math.round(options.region.y))) : disp.y;
     const rw = options.region ? Math.max(1, Math.min(screen.width - rx, Math.round(options.region.width))) : Math.min(disp.width, screen.width - rx);
@@ -31593,7 +31800,7 @@ var Win32Backend = class {
   }
   async captureScreen(options = {}) {
     const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
+    const disp = pickDisplay(displays, options.display);
     const rx = options.region ? Math.round(options.region.x) : disp.x;
     const ry = options.region ? Math.round(options.region.y) : disp.y;
     const rw = options.region ? Math.max(1, Math.round(options.region.width)) : disp.width;
@@ -32921,7 +33128,7 @@ var HandyController = class _HandyController {
       const label = typeof query === "string" ? query : query.title ?? query.app ?? String(query.id ?? "");
       throw new Error(`No visible window with bounds matched "${label}".`);
     }
-    const disp = displays.find((d) => d.id === (displayIndex ?? 0)) ?? displays[0];
+    const disp = pickDisplay(displays, displayIndex);
     if (!disp) return match.bounds;
     const x1 = Math.max(disp.x, match.bounds.x);
     const y1 = Math.max(disp.y, match.bounds.y);
@@ -33105,7 +33312,7 @@ var HandyController = class _HandyController {
       };
     }
     const displays = cachedDisplays ?? await this.backend.getDisplays();
-    const disp = displays.find((d) => d.id === (displayIndex ?? 0)) ?? displays[0];
+    const disp = pickDisplay(displays, displayIndex);
     if (!disp) {
       throw new Error("No display found for normalized coordinate conversion.");
     }
@@ -33166,7 +33373,7 @@ var HandyController = class _HandyController {
     try {
       for (let c = 1; c <= count; c++) {
         this.permissions.assertCanControl();
-        if (this.backend instanceof DarwinBackend) {
+        if (this.backend.nativeClickCount) {
           await this.backend.mouseDown(button, c, resolvedMods);
           this.heldButtons.add(button);
           await this.backend.mouseUp(button, c, resolvedMods);
@@ -33596,7 +33803,7 @@ var HandyController = class _HandyController {
               cachedDisplays
             );
             cachedDisplays = resolved.displays ?? await this.backend.getDisplays();
-            const disp = cachedDisplays.find((d) => d.id === (options.display ?? 0)) ?? cachedDisplays[0];
+            const disp = pickDisplay(cachedDisplays, options.display);
             let sampleRegion;
             if (disp) {
               const rx1 = Math.max(disp.x, resolved.point.x - 1);
@@ -43780,206 +43987,6 @@ var StdioServerTransport = class {
   }
 };
 
-// src/types.ts
-var UiElementKindSchema = external_exports.enum(["control", "text", "icon", "region"]);
-var MouseButtonSchema = external_exports.enum(["left", "right", "middle"]);
-var ModifierKeySchema = external_exports.enum(["ctrl", "alt", "shift", "meta", "mod"]);
-var CoordinateSpaceSchema = external_exports.enum(["screen", "normalized", "window"]);
-var MotionProfileSchema = external_exports.enum(["linear", "ease", "human"]);
-var RegionSchema = external_exports.object({
-  x: external_exports.number().int().describe("Left X coordinate in screen pixels"),
-  y: external_exports.number().int().describe("Top Y coordinate in screen pixels"),
-  width: external_exports.number().int().min(1).max(16384).describe("Region width in screen pixels"),
-  height: external_exports.number().int().min(1).max(16384).describe("Region height in screen pixels")
-});
-var MarkRefSchema = external_exports.number().int().min(1).max(200).optional().describe(
-  "Target detected UI element mark #N \u2014 the number drawn on the screenshot returned by the last `handy_see({ marks: true })` \u2014 instead of supplying x/y"
-);
-var MoveStepSchema = external_exports.object({
-  type: external_exports.literal("move"),
-  x: external_exports.number().optional().describe("Target X coordinate (or delta X when relative=true). Omit when using `mark`."),
-  y: external_exports.number().optional().describe("Target Y coordinate (or delta Y when relative=true). Omit when using `mark`."),
-  mark: MarkRefSchema,
-  relative: external_exports.boolean().optional().describe("Move relative to current mouse position"),
-  durationMs: external_exports.number().min(0).max(1e4).optional().describe("Smooth movement duration in ms (0 = instant)"),
-  steps: external_exports.number().int().min(1).max(200).optional().describe("Interpolation steps when durationMs > 0"),
-  motion: MotionProfileSchema.optional().describe("Interpolation curve used when durationMs > 0"),
-  coordinateSpace: CoordinateSpaceSchema.optional().describe("screen (default), normalized (0..1000), or window")
-});
-var ClickStepSchema = external_exports.object({
-  type: external_exports.literal("click"),
-  x: external_exports.number().optional().describe("Optional X coordinate to move to before clicking"),
-  y: external_exports.number().optional().describe("Optional Y coordinate to move to before clicking"),
-  mark: MarkRefSchema,
-  button: MouseButtonSchema.optional().describe("Mouse button: left (default), right, or middle"),
-  count: external_exports.number().int().min(1).max(5).optional().describe("Click count (1 = single, 2 = double, 3 = triple)"),
-  modifiers: external_exports.array(ModifierKeySchema).optional().describe("Modifier keys held during click"),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var DoubleClickStepSchema = external_exports.object({
-  type: external_exports.literal("double_click"),
-  x: external_exports.number().optional().describe("Optional X coordinate to move to before double-clicking"),
-  y: external_exports.number().optional().describe("Optional Y coordinate to move to before double-clicking"),
-  mark: MarkRefSchema,
-  button: MouseButtonSchema.optional(),
-  modifiers: external_exports.array(ModifierKeySchema).optional(),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var TripleClickStepSchema = external_exports.object({
-  type: external_exports.literal("triple_click"),
-  x: external_exports.number().optional().describe("Optional X coordinate to move to before triple-clicking"),
-  y: external_exports.number().optional().describe("Optional Y coordinate to move to before triple-clicking"),
-  mark: MarkRefSchema,
-  modifiers: external_exports.array(ModifierKeySchema).optional(),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var RightClickStepSchema = external_exports.object({
-  type: external_exports.literal("right_click"),
-  x: external_exports.number().optional().describe("Optional X coordinate to move to before right-clicking"),
-  y: external_exports.number().optional().describe("Optional Y coordinate to move to before right-clicking"),
-  mark: MarkRefSchema,
-  modifiers: external_exports.array(ModifierKeySchema).optional(),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var MouseDownStepSchema = external_exports.object({
-  type: external_exports.literal("mouse_down"),
-  x: external_exports.number().optional(),
-  y: external_exports.number().optional(),
-  mark: MarkRefSchema,
-  button: MouseButtonSchema.optional(),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var MouseUpStepSchema = external_exports.object({
-  type: external_exports.literal("mouse_up"),
-  x: external_exports.number().optional(),
-  y: external_exports.number().optional(),
-  mark: MarkRefSchema,
-  button: MouseButtonSchema.optional(),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var DragStepSchema = external_exports.object({
-  type: external_exports.literal("drag"),
-  fromX: external_exports.number().optional().describe("Start X (defaults to current mouse X)"),
-  fromY: external_exports.number().optional().describe("Start Y (defaults to current mouse Y)"),
-  fromMark: external_exports.number().int().min(1).max(200).optional().describe("Start the drag at detected element mark #N"),
-  toX: external_exports.number().optional().describe("Destination X coordinate. Omit when using `toMark`."),
-  toY: external_exports.number().optional().describe("Destination Y coordinate. Omit when using `toMark`."),
-  toMark: external_exports.number().int().min(1).max(200).optional().describe("End the drag at detected element mark #N"),
-  button: MouseButtonSchema.optional(),
-  durationMs: external_exports.number().min(0).max(1e4).optional().describe("Drag duration in ms (default 160)"),
-  steps: external_exports.number().int().min(2).max(200).optional().describe("Interpolation steps along drag path"),
-  motion: MotionProfileSchema.optional().describe("Interpolation curve along the drag path"),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var ScrollStepSchema = external_exports.object({
-  type: external_exports.literal("scroll"),
-  x: external_exports.number().optional().describe("Optional X to position cursor over before scrolling"),
-  y: external_exports.number().optional().describe("Optional Y to position cursor over before scrolling"),
-  mark: MarkRefSchema,
-  deltaX: external_exports.number().optional().describe("Horizontal wheel ticks (+ right, - left)"),
-  deltaY: external_exports.number().optional().describe("Vertical wheel ticks (+ down, - up)"),
-  direction: external_exports.enum(["up", "down", "left", "right"]).optional().describe("Named scroll direction"),
-  amount: external_exports.number().min(1).max(100).optional().describe("Wheel ticks when using direction (default 3)"),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var TypeStepSchema = external_exports.object({
-  type: external_exports.literal("type"),
-  text: external_exports.string().max(1e4).describe("Text to type natively (supports Unicode and newlines)"),
-  delayMs: external_exports.number().min(0).max(1e3).optional().describe("Optional delay between characters in ms"),
-  submit: external_exports.boolean().optional().describe("Press Enter immediately after typing")
-});
-var PasteStepSchema = external_exports.object({
-  type: external_exports.literal("paste"),
-  text: external_exports.string().max(1e5).describe("Text to paste instantly via OS clipboard + mod+v (ideal for long text, URLs, or code)"),
-  restoreClipboard: external_exports.boolean().optional().describe("Restore previous clipboard text after pasting (default: true)"),
-  submit: external_exports.boolean().optional().describe("Press Enter immediately after pasting")
-});
-var KeyStepSchema = external_exports.object({
-  type: external_exports.literal("key"),
-  key: external_exports.string().min(1).max(100).describe(
-    "Key or chord, e.g. 'Enter', 'Tab', 'Escape', 'Backspace', 'ArrowDown', 'ctrl+c', 'mod+a', 'cmd+shift+p'"
-  ),
-  modifiers: external_exports.array(ModifierKeySchema).optional().describe("Optional modifiers held while pressing key"),
-  count: external_exports.number().int().min(1).max(50).optional().describe("Repeat count (default 1)")
-});
-var KeyDownStepSchema = external_exports.object({
-  type: external_exports.literal("key_down"),
-  key: external_exports.string().min(1).max(64).describe("Key to press and hold down")
-});
-var KeyUpStepSchema = external_exports.object({
-  type: external_exports.literal("key_up"),
-  key: external_exports.string().min(1).max(64).describe("Key to release")
-});
-var FocusWindowStepSchema = external_exports.object({
-  type: external_exports.literal("focus_window"),
-  title: external_exports.string().min(1).max(256).optional().describe("Case-insensitive substring of window title to focus"),
-  app: external_exports.string().min(1).max(256).optional().describe("Case-insensitive application/process name to focus"),
-  id: external_exports.union([external_exports.string(), external_exports.number()]).optional().describe("Exact window ID from handy_windows")
-});
-var WaitStepSchema = external_exports.object({
-  type: external_exports.literal("wait"),
-  ms: external_exports.number().min(0).max(3e4).describe("Milliseconds to wait (0..30000)")
-});
-var WaitForChangeStepSchema = external_exports.object({
-  type: external_exports.literal("wait_for_change"),
-  region: RegionSchema.optional().describe("Optional screen region to watch for visual change"),
-  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 3000)"),
-  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 60)"),
-  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Minimum changed pixel percentage to trigger completion (default: 0.05)")
-});
-var WaitForSettledStepSchema = external_exports.object({
-  type: external_exports.literal("wait_for_settled"),
-  region: RegionSchema.optional().describe("Optional screen region to wait until animations stop"),
-  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 3000)"),
-  quietMs: external_exports.number().min(30).max(2e3).optional().describe("Required visually quiet window in ms (default: 120)"),
-  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
-  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Max changed pixel percentage still treated as settled (default: 0.1)")
-});
-var WaitForColorStepSchema = external_exports.object({
-  type: external_exports.literal("wait_for_color"),
-  x: external_exports.number().int().describe("Target X coordinate of pixel to inspect"),
-  y: external_exports.number().int().describe("Target Y coordinate of pixel to inspect"),
-  color: external_exports.string().regex(/^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/).describe("Expected hex color (#rrggbb or #rgb)"),
-  tolerance: external_exports.number().min(0).max(442).optional().describe("Allowed Euclidean RGB distance 0..442 (default: 24)"),
-  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 5000)"),
-  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var ScreenshotStepSchema = external_exports.object({
-  type: external_exports.literal("screenshot"),
-  region: RegionSchema.optional(),
-  window: external_exports.string().max(256).optional().describe("Optional window title substring to capture at 1:1 resolution"),
-  grid: external_exports.boolean().optional(),
-  showMouse: external_exports.boolean().optional(),
-  highlightDiff: external_exports.boolean().optional(),
-  maxWidth: external_exports.number().int().min(320).max(3840).optional(),
-  marks: external_exports.boolean().optional().describe("Run Set-of-Mark UI element detection on this mid-chain capture"),
-  maxMarks: external_exports.number().int().min(1).max(200).optional(),
-  label: external_exports.string().max(120).optional().describe("Optional label identifying this mid-chain capture")
-});
-var ActionStepSchema = external_exports.discriminatedUnion("type", [
-  MoveStepSchema,
-  ClickStepSchema,
-  DoubleClickStepSchema,
-  TripleClickStepSchema,
-  RightClickStepSchema,
-  MouseDownStepSchema,
-  MouseUpStepSchema,
-  DragStepSchema,
-  ScrollStepSchema,
-  TypeStepSchema,
-  PasteStepSchema,
-  KeyStepSchema,
-  KeyDownStepSchema,
-  KeyUpStepSchema,
-  FocusWindowStepSchema,
-  WaitStepSchema,
-  WaitForChangeStepSchema,
-  WaitForSettledStepSchema,
-  WaitForColorStepSchema,
-  ScreenshotStepSchema
-]);
-
 // src/version.ts
 var HANDY_VERSION = "1.2.0";
 var HANDY_NAME = "handy";
@@ -45200,6 +45207,8 @@ Options for 'see':
   --region <x,y,w,h>     Zoom into a rectangular screen region (keeps global coordinates)
   --window <title>       Capture a specific visible window by title/app substring
   --highlight-diff       Outline changed pixels since the previous capture
+  --marks                Detect & number UI elements (Set-of-Mark); prints their bounds/centres
+  --max-marks <n>        Max element marks to return with --marks (default: 40)
   --display <index>      Target monitor index (default: 0)
   --max-width <px>       Max output image width (default: 1280)
   --grid-step <px>       Custom major coordinate grid spacing
@@ -45597,6 +45606,8 @@ Press Ctrl+C to stop.
         const grid = flags.get("no-grid") === true ? false : true;
         const showMouse = flags.get("no-mouse") === true ? false : true;
         const highlightDiff2 = flags.get("highlight-diff") === true;
+        const marks = flags.get("marks") === true;
+        const maxMarks = typeof flags.get("max-marks") === "string" ? Number(flags.get("max-marks")) : void 0;
         const shot = await controller.see({
           display,
           region,
@@ -45605,7 +45616,9 @@ Press Ctrl+C to stop.
           gridStep,
           grid,
           showMouse,
-          highlightDiff: highlightDiff2
+          highlightDiff: highlightDiff2,
+          marks,
+          maxMarks
         });
         writeFileSync4(outPath, shot.pngBuffer);
         const payload = {
@@ -45619,7 +45632,8 @@ Press Ctrl+C to stop.
           region: shot.region,
           imageSize: { width: shot.imageWidth, height: shot.imageHeight },
           gridStep: shot.gridStep,
-          captureMs: shot.captureMs
+          captureMs: shot.captureMs,
+          ...shot.elements ? { elementCount: shot.elements.length, elements: shot.elements } : {}
         };
         if (jsonOut) {
           process.stdout.write(`${JSON.stringify(payload, null, 2)}
@@ -45627,7 +45641,10 @@ Press Ctrl+C to stop.
         } else {
           process.stdout.write(
             `Saved ${shot.imageWidth}x${shot.imageHeight} screenshot -> ${outPath} (mouse=${shot.mouse.x},${shot.mouse.y}${shot.pixelUnderMouse ? ` ${shot.pixelUnderMouse}` : ""}, ${shot.captureMs}ms)
-`
+` + (shot.elements ? `Detected ${shot.elements.length} UI element mark(s):
+` + shot.elements.map(
+              (e) => `  #${String(e.index).padStart(2)} ${e.kind.padEnd(7)} (${e.centerX},${e.centerY})  ${e.width}x${e.height} @ ${e.x},${e.y}  score=${e.score.toFixed(2)}`
+            ).join("\n") + "\n" : "")
           );
         }
         return EXIT_OK;
