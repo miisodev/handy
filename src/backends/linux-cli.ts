@@ -31,7 +31,12 @@ function pipeStdin(cmd: string, args: string[], input: string, timeoutMs = 4000)
   return new Promise<void>((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ["pipe", "ignore", "pipe"] });
     let stderr = "";
+    let settled = false;
+    let stdinError: Error | null = null;
+
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       child.kill("SIGKILL");
       reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
@@ -41,16 +46,47 @@ function pipeStdin(cmd: string, args: string[], input: string, timeoutMs = 4000)
       stderr += chunk;
     });
     child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       reject(err);
     });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(stderr.trim() || `${cmd} exited with code ${code}`));
+
+    // The helper can exit before draining stdin — no Wayland compositor, no DISPLAY, or it
+    // rejected the payload — which surfaces as EPIPE on the stdin stream. A stream 'error' event
+    // with no listener is thrown as an uncaught exception, so a clipboard write to a broken
+    // helper used to take the entire MCP server process down with it. Capture it here and report
+    // it through the promise instead; 'close' still produces the final rejection so the helper's
+    // own stderr is preserved in the message.
+    child.stdin.on("error", (err: Error) => {
+      stdinError = err;
     });
 
-    child.stdin.write(input, "utf8");
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0 && !stdinError) {
+        resolve();
+        return;
+      }
+      const detail = stderr.trim();
+      if (detail) {
+        reject(new Error(detail));
+        return;
+      }
+      reject(
+        new Error(
+          stdinError
+            ? `${cmd} exited with code ${code} without reading the piped input (${stdinError.message})`
+            : `${cmd} exited with code ${code}`,
+        ),
+      );
+    });
+
+    child.stdin.write(input, "utf8", (err) => {
+      if (err) stdinError = err;
+    });
     child.stdin.end();
   });
 }

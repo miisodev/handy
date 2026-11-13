@@ -28238,6 +28238,15 @@ var JsonlWorker = class {
     child.on("error", (err) => {
       failAll(`Native worker spawn error (${this.options.command}): ${err.message}`);
     });
+    child.stdin.on("error", (err) => {
+      if (this.proc === child) {
+        this.proc = null;
+        this.rl?.close();
+        this.rl = null;
+        child.kill();
+      }
+      failAll(`Native worker stdin failed (${this.options.command}): ${err.message}`);
+    });
     child.on("close", (code) => {
       this.proc = null;
       this.rl = null;
@@ -28815,7 +28824,11 @@ function pipeStdin(cmd, args, input2, timeoutMs = 4e3) {
   return new Promise((resolve2, reject) => {
     const child = spawn2(cmd, args, { stdio: ["pipe", "ignore", "pipe"] });
     let stderr = "";
+    let settled = false;
+    let stdinError = null;
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       child.kill("SIGKILL");
       reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
@@ -28824,15 +28837,36 @@ function pipeStdin(cmd, args, input2, timeoutMs = 4e3) {
       stderr += chunk;
     });
     child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       reject(err);
     });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve2();
-      else reject(new Error(stderr.trim() || `${cmd} exited with code ${code}`));
+    child.stdin.on("error", (err) => {
+      stdinError = err;
     });
-    child.stdin.write(input2, "utf8");
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0 && !stdinError) {
+        resolve2();
+        return;
+      }
+      const detail = stderr.trim();
+      if (detail) {
+        reject(new Error(detail));
+        return;
+      }
+      reject(
+        new Error(
+          stdinError ? `${cmd} exited with code ${code} without reading the piped input (${stdinError.message})` : `${cmd} exited with code ${code}`
+        )
+      );
+    });
+    child.stdin.write(input2, "utf8", (err) => {
+      if (err) stdinError = err;
+    });
     child.stdin.end();
   });
 }
