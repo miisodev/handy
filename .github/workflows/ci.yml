@@ -26,5 +26,20 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+
+      # lib/ and bin/handy.js are committed build artifacts, and bin/handy.js is what the MCP
+      # server and every plugin host actually execute. Without this check, editing src/ and
+      # forgetting to rebuild passes CI while shipping a bundle whose behaviour differs from
+      # the source it claims to represent. The build is byte-for-byte deterministic (verified:
+      # two consecutive `npm run build` runs produce identical checksums and a clean tree), so
+      # any diff here is real drift rather than noise.
+      - name: Verify committed build artifacts are up to date
+        run: |
+          if ! git diff --quiet -- lib bin public; then
+            echo "::error::Committed build artifacts are stale. Run 'npm run build' and commit lib/, bin/handy.js, and public/handy.png."
+            git diff --stat -- lib bin public
+            exit 1
+          fi
+
       - run: npm test
       - run: npm run validate
