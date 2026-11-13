@@ -13,6 +13,12 @@ jobs:
   verify:
     name: Build, Test & Validate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The default shell on windows-latest is PowerShell, so any bash syntax in a run step parses
+    # only on ubuntu and macOS and fails on Windows with no output. Pin bash for the whole job
+    # (Git Bash is preinstalled on the Windows runners) so a step behaves the same everywhere.
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
@@ -31,35 +37,26 @@ jobs:
       # server and every plugin host actually execute. Without this check, editing src/ and
       # forgetting to rebuild passes CI while shipping a bundle whose behaviour differs from
       # the source it claims to represent. The build is byte-for-byte deterministic (verified:
-      # two consecutive `npm run build` runs produce identical checksums and a clean tree), so
-      # any diff here is real drift rather than noise.
+      # two consecutive `npm run build` runs produce identical checksums and a clean tree), and
+      # .gitattributes pins `* text=auto eol=lf` plus `*.png binary`, so line endings introduced
+      # by a Windows checkout are normalised away and any diff here is real drift rather than noise.
       - name: Verify committed build artifacts are up to date
         run: |
           # Artifacts are generated, never hand-edited, so a fresh build must reproduce them
-          # exactly. When it does not, say precisely which file diverged and how -- a bare
-          # "artifacts are stale" is not actionable from a CI log, and the cause can be
-          # platform-specific (a differing zlib in the runner's Node changes PNG deflate bytes,
-          # for instance, with no source change at all).
+          # exactly. When it does not, name the file that diverged: "artifacts are stale" is not
+          # actionable from a CI log, and log access is not always available to whoever triages it.
           if ! git diff --quiet -- lib bin public; then
             echo "::error::Committed build artifacts are stale. Run 'npm run build' and commit lib/, bin/handy.js, and public/handy.png."
-            echo "--- git status (untracked/deleted artifacts) ---"
+            echo "--- changed artifacts ---"
             git status --porcelain -- lib bin public
-            echo "--- git diff --numstat (added/removed lines per file) ---"
             git diff --numstat -- lib bin public
-            echo "--- git diff --stat ---"
-            git diff --stat -- lib bin public
-            echo "--- first differing hunk of each changed text artifact ---"
+            echo "--- first differing hunk per changed text artifact ---"
             for f in $(git diff --name-only -- lib bin | head -5); do
               echo "### $f"
               git diff -- "$f" | head -40
             done
-            echo "--- png identity ---"
-            node -e "const c=require('crypto'),f=require('fs');for(const p of ['public/handy.png']){try{console.log(p,c.createHash('sha256').update(f.readFileSync(p)).digest('hex'),f.statSync(p).size+'B')}catch(e){console.log(p,'missing')}}"
-            git show HEAD:public/handy.png > ./__committed.png 2>/dev/null || true
-            node -e "const c=require('crypto'),f=require('fs');try{console.log('committed',c.createHash('sha256').update(f.readFileSync('./__committed.png')).digest('hex'),f.statSync('./__committed.png').size+'B')}catch(e){console.log('committed','unreadable')}"
-            rm -f ./__committed.png
-            echo "--- toolchain versions ---"
-            node --version && node -e "console.log('zlib', process.versions.zlib || 'n/a')"
+            echo "--- toolchain ---"
+            node --version
             exit 1
           fi
 
