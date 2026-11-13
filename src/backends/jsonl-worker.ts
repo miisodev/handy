@@ -84,6 +84,21 @@ export class JsonlWorker {
       failAll(`Native worker spawn error (${this.options.command}): ${err.message}`);
     });
 
+    // Writing to a child whose stdin has closed (the bridge exited before or during the
+    // handshake) surfaces as EPIPE on the stream. The write callback in request() is not enough:
+    // the stream still emits 'error', and an unhandled 'error' event is thrown as an uncaught
+    // exception, killing the whole MCP server. Treat it like a spawn failure — reject everything
+    // outstanding and mark the worker dead so the next request restarts it.
+    child.stdin.on("error", (err: Error) => {
+      if (this.proc === child) {
+        this.proc = null;
+        this.rl?.close();
+        this.rl = null;
+        child.kill();
+      }
+      failAll(`Native worker stdin failed (${this.options.command}): ${err.message}`);
+    });
+
     child.on("close", (code) => {
       this.proc = null;
       this.rl = null;

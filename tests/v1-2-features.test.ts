@@ -204,8 +204,9 @@ describe("Handy v1.2.0 Features (Window Capture, Window Coordinates, wait_for_co
                 }
               }
               if (events.length === 1) {
-                // Trigger an external permission change (like `handy off` from CLI)
-                permissions.setEnabled(false, { updatedBy: "cli-test" });
+                // Trigger an external permission change (like `handy off` from the CLI).
+                // `updatedBy` is a closed contract ("cli" | "mcp" | "ui"); this simulates the CLI.
+                permissions.setEnabled(false, { updatedBy: "cli" });
               } else if (events.length >= 2) {
                 req.destroy();
                 resolveDone();

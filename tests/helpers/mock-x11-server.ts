@@ -154,7 +154,9 @@ export class MockX11Server {
   private handleClient(socket: Socket): void {
     let handshakeDone = false;
     let seq = 0;
-    let buf = Buffer.alloc(0);
+    // Annotated as `Buffer` (i.e. Buffer<ArrayBufferLike>) rather than inferred from alloc(),
+    // which narrows to Buffer<ArrayBuffer> and then rejects the ArrayBufferLike socket chunks.
+    let buf: Buffer = Buffer.alloc(0);
 
     socket.on("data", (chunk: Buffer) => {
       buf = buf.length === 0 ? chunk : Buffer.concat([buf, chunk]);

@@ -1,6 +1,6 @@
 {
   "name": "@miisodev/handy",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "mcpName": "io.github.miisodev/handy",
   "description": "Real-time native mouse, keyboard, and coordinate-mapped screen control for LLMs via stdio MCP.",
   "type": "module",
@@ -69,7 +69,9 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "typecheck:src": "tsc --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "validate": "node --import tsx scripts/validate-release.ts",

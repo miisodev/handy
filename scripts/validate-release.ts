@@ -1,8 +1,15 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import Ajv2020 from "ajv/dist/2020.js";
-import addFormats from "ajv-formats";
+// Both packages ship CommonJS with `__esModule` and `exports.default`. Under NodeNext,
+// TypeScript types a default import of such a module as the module *namespace* — which has no
+// construct or call signature — even though `module.exports` really is the class/function at
+// runtime under tsx and plain Node alike. Importing ajv's named class export and reaching
+// through `.default` for the formats plugin gives types that match what actually runs.
+import { Ajv2020 } from "ajv/dist/2020.js";
+import addFormatsPkg from "ajv-formats";
+
+const addFormats = addFormatsPkg.default;
 
 const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 

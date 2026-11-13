@@ -68,15 +68,48 @@ export function buildHandyMcpEntry(platform: NodeJS.Platform = process.platform)
   };
 }
 
-function readJsonObject(filePath: string): Record<string, unknown> {
-  if (!existsSync(filePath)) return {};
-  const raw = readFileSync(filePath, "utf8").trim();
-  if (!raw) return {};
-  const parsed = JSON.parse(raw) as unknown;
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`Expected JSON object in ${filePath}`);
+/**
+ * Reads a host config as a JSON object, reporting a malformed file as a result rather than
+ * throwing. `handy install` walks every supported host in one pass, and hosts do write
+ * near-JSON files in practice — trailing commas, comments, a half-written file from a crashed
+ * editor. Letting one unreadable config throw would abort the loop and leave the healthy hosts
+ * uninstalled, so the caller records a `skipped` result naming the file and the parse error and
+ * carries on.
+ */
+function readJsonObject(filePath: string): { doc: Record<string, unknown> } | { error: string } {
+  if (!existsSync(filePath)) return { doc: {} };
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf8").trim();
+  } catch (error) {
+    return { error: `Could not read ${filePath}: ${error instanceof Error ? error.message : String(error)}` };
   }
-  return parsed as Record<string, unknown>;
+  if (!raw) return { doc: {} };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    return {
+      error: `${filePath} is not valid JSON (${error instanceof Error ? error.message : String(error)}). ` +
+        `Fix or remove the file, then re-run; Handy left it untouched.`,
+    };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: `Expected a JSON object in ${filePath}` };
+  }
+  return { doc: parsed as Record<string, unknown> };
+}
+
+/**
+ * Backs up the user's config before Handy modifies it, but never overwrites an existing backup.
+ * A second run would otherwise replace the pristine pre-Handy original with a copy that already
+ * contains Handy's entry, destroying the only clean restore point.
+ */
+function backupOnce(configPath: string): string {
+  const backupPath = `${configPath}.handy.bak`;
+  if (!existsSync(backupPath)) copyFileSync(configPath, backupPath);
+  return backupPath;
 }
 
 function atomicWriteJson(filePath: string, data: Record<string, unknown>): void {
@@ -115,7 +148,12 @@ export function installHandyToHosts(
     }
 
     const fileExisted = existsSync(configPath);
-    const doc = readJsonObject(configPath);
+    const read = readJsonObject(configPath);
+    if ("error" in read) {
+      results.push({ host, configPath, action: "skipped", dryRun, detail: read.error });
+      continue;
+    }
+    const doc = read.doc;
     const servers =
       doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers)
         ? { ...(doc.mcpServers as Record<string, unknown>) }
@@ -139,10 +177,7 @@ export function installHandyToHosts(
     let backupPath: string | undefined;
 
     if (!dryRun) {
-      if (fileExisted) {
-        backupPath = `${configPath}.handy.bak`;
-        copyFileSync(configPath, backupPath);
-      }
+      if (fileExisted) backupPath = backupOnce(configPath);
       atomicWriteJson(configPath, updatedDoc);
     }
 
@@ -180,7 +215,12 @@ export function uninstallHandyFromHosts(
       continue;
     }
 
-    const doc = readJsonObject(configPath);
+    const read = readJsonObject(configPath);
+    if ("error" in read) {
+      results.push({ host, configPath, action: "skipped", dryRun, detail: read.error });
+      continue;
+    }
+    const doc = read.doc;
     const servers =
       doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers)
         ? { ...(doc.mcpServers as Record<string, unknown>) }
@@ -202,8 +242,7 @@ export function uninstallHandyFromHosts(
     let backupPath: string | undefined;
 
     if (!dryRun) {
-      backupPath = `${configPath}.handy.bak`;
-      copyFileSync(configPath, backupPath);
+      backupPath = backupOnce(configPath);
       atomicWriteJson(configPath, updatedDoc);
     }
 

@@ -16,6 +16,8 @@ export interface DarwinBackendOptions {
 export declare class DarwinBackend implements DesktopBackend {
     readonly name = "darwin-coregraphics";
     readonly platform: "darwin";
+    /** CGEvent carries click count and held modifiers, so double/triple clicks must be sent natively. */
+    readonly nativeClickCount = true;
     private readonly worker;
     private readonly customCapturePng?;
     constructor(options?: DarwinBackendOptions);

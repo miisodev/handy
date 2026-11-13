@@ -32,11 +32,32 @@ function makeChunk(type: string, data: Uint8Array): Buffer {
   return chunk;
 }
 
+/**
+ * PNG row-filter strategy.
+ * - `auto` (default): Up for rows identical to the previous one, otherwise Paeth. Benchmarked as
+ *   both smaller *and* faster than a full per-row min-sum search on UI screenshots, because flat
+ *   background rows collapse to all-zero bytes that deflate encodes almost for free.
+ * - `sub`: legacy behaviour (Sub on every row).
+ * - `none` / `up` / `paeth`: force a single filter for every row.
+ */
+export type PngFilterStrategy = "auto" | "none" | "sub" | "up" | "paeth";
+
+/** Returns a Uint32Array view over whole RGBA pixels, or null when `data` is not 4-byte aligned. */
+function asUint32View(data: Uint8Array, pixelCount: number): Uint32Array | null {
+  if (pixelCount <= 0 || data.byteLength < pixelCount * 4) return null;
+  if ((data.byteOffset & 3) !== 0) return null;
+  try {
+    return new Uint32Array(data.buffer, data.byteOffset, pixelCount);
+  } catch {
+    return null;
+  }
+}
+
 export function encodePng(
   width: number,
   height: number,
   rgba: Uint8Array,
-  options: { compressionLevel?: number } = {},
+  options: { compressionLevel?: number; filter?: PngFilterStrategy } = {},
 ): Buffer {
   if (width <= 0 || height <= 0) {
     throw new Error(`Invalid PNG dimensions: ${width}x${height}`);
@@ -48,18 +69,105 @@ export function encodePng(
 
   const stride = width * 4;
   const raw = Buffer.allocUnsafe((stride + 1) * height);
-  // Use Sub filter (1) on rows for significantly better compression of UI flat regions & rulers
+  const strategy = options.filter ?? "auto";
+  const rgba32 = strategy === "auto" ? asUint32View(rgba, width * height) : null;
+
   for (let y = 0; y < height; y++) {
     const srcOffset = y * stride;
+    const prevOffset = srcOffset - stride;
     const dstOffset = y * (stride + 1);
-    raw[dstOffset] = 1; // Sub filter
-    // First pixel (4 bytes) has left predictor = 0
-    raw[dstOffset + 1] = rgba[srcOffset]!;
-    raw[dstOffset + 2] = rgba[srcOffset + 1]!;
-    raw[dstOffset + 3] = rgba[srcOffset + 2]!;
-    raw[dstOffset + 4] = rgba[srcOffset + 3]!;
+    raw[dstOffset] = 0;
+
+    if (strategy === "none") {
+      raw.set(rgba.subarray(srcOffset, srcOffset + stride), dstOffset + 1);
+      continue;
+    }
+
+    if (strategy === "sub") {
+      raw[dstOffset] = 1; // Sub filter
+      // First pixel (4 bytes) has left predictor = 0
+      raw[dstOffset + 1] = rgba[srcOffset]!;
+      raw[dstOffset + 2] = rgba[srcOffset + 1]!;
+      raw[dstOffset + 3] = rgba[srcOffset + 2]!;
+      raw[dstOffset + 4] = rgba[srcOffset + 3]!;
+      for (let i = 4; i < stride; i++) {
+        raw[dstOffset + 1 + i] = (rgba[srcOffset + i]! - rgba[srcOffset + i - 4]!) & 0xff;
+      }
+      continue;
+    }
+
+    if (y === 0 && strategy === "up") {
+      // No previous row: Up degenerates to None.
+      raw.set(rgba.subarray(srcOffset, srcOffset + stride), dstOffset + 1);
+      continue;
+    }
+
+    if (strategy === "up") {
+      raw[dstOffset] = 2;
+      for (let i = 0; i < stride; i++) {
+        raw[dstOffset + 1 + i] = (rgba[srcOffset + i]! - rgba[prevOffset + i]!) & 0xff;
+      }
+      continue;
+    }
+
+    // strategy === "auto" | "paeth"
+    if (y > 0 && strategy === "auto") {
+      // Identical-row shortcut: emit an all-zero Up row (extremely common in flat UI backgrounds).
+      let identical = true;
+      if (rgba32) {
+        const row = y * width;
+        const prevRow = row - width;
+        for (let x = 0; x < width; x++) {
+          if (rgba32[row + x] !== rgba32[prevRow + x]) {
+            identical = false;
+            break;
+          }
+        }
+      } else {
+        for (let i = 0; i < stride; i++) {
+          if (rgba[srcOffset + i] !== rgba[prevOffset + i]) {
+            identical = false;
+            break;
+          }
+        }
+      }
+      if (identical) {
+        raw[dstOffset] = 2;
+        raw.fill(0, dstOffset + 1, dstOffset + 1 + stride);
+        continue;
+      }
+    }
+
+    raw[dstOffset] = 4; // Paeth filter
+    if (y === 0) {
+      // No previous row: Paeth degenerates to Sub (predictor is the left pixel).
+      raw[dstOffset + 1] = rgba[srcOffset]!;
+      raw[dstOffset + 2] = rgba[srcOffset + 1]!;
+      raw[dstOffset + 3] = rgba[srcOffset + 2]!;
+      raw[dstOffset + 4] = rgba[srcOffset + 3]!;
+      for (let i = 4; i < stride; i++) {
+        raw[dstOffset + 1 + i] = (rgba[srcOffset + i]! - rgba[srcOffset + i - 4]!) & 0xff;
+      }
+      continue;
+    }
+
+    // First pixel of the row: a = c = 0, so Paeth picks b (the Up predictor).
+    raw[dstOffset + 1] = (rgba[srcOffset]! - rgba[prevOffset]!) & 0xff;
+    raw[dstOffset + 2] = (rgba[srcOffset + 1]! - rgba[prevOffset + 1]!) & 0xff;
+    raw[dstOffset + 3] = (rgba[srcOffset + 2]! - rgba[prevOffset + 2]!) & 0xff;
+    raw[dstOffset + 4] = (rgba[srcOffset + 3]! - rgba[prevOffset + 3]!) & 0xff;
     for (let i = 4; i < stride; i++) {
-      raw[dstOffset + 1 + i] = (rgba[srcOffset + i]! - rgba[srcOffset + i - 4]!) & 0xff;
+      const x = rgba[srcOffset + i]!;
+      const a = rgba[srcOffset + i - 4]!;
+      const b = rgba[prevOffset + i]!;
+      const c = rgba[prevOffset + i - 4]!;
+      // Paeth distances simplified: pa = |b - c|, pb = |a - c|, pc = |a + b - 2c|
+      const pa = b > c ? b - c : c - b;
+      const pb = a > c ? a - c : c - a;
+      const ab = a + b - c;
+      const pc = ab > c ? ab - c : c - ab;
+      const predictor = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      raw[dstOffset + 1 + i] = (x - predictor) & 0xff;
     }
   }
 
@@ -313,21 +421,201 @@ export function cropRgba(
   return { width: cw, height: ch, data: out, x: cx, y: cy };
 }
 
+/** Resampling filter used by {@link resizeRgba}. */
+export type ResizeFilter = "auto" | "box" | "bilinear";
+
+interface SpanTable {
+  starts: Int32Array;
+  ends: Int32Array;
+  indices: Int32Array;
+  weights: Float64Array;
+  sums: Float64Array;
+}
+
 /**
- * Fast bilinear resizer for RGBA buffers so UI text remains legible when downscaling
- * high-DPI screens before applying crisp 1:1 coordinate rulers and mouse reticles.
+ * Precomputes, for every destination sample, the source samples that overlap it and their
+ * fractional coverage weights. Total span length is bounded by `srcSize + dstSize`.
  */
-export function resizeRgba(
+function buildSpanTable(srcSize: number, dstSize: number): SpanTable {
+  const ratio = srcSize / dstSize;
+  const starts = new Int32Array(dstSize);
+  const ends = new Int32Array(dstSize);
+  const sums = new Float64Array(dstSize);
+  const indices = new Int32Array(srcSize + dstSize + 1);
+  const weights = new Float64Array(srcSize + dstSize + 1);
+
+  let p = 0;
+  for (let d = 0; d < dstSize; d++) {
+    const s0 = d * ratio;
+    const s1 = (d + 1) * ratio;
+    const i0 = Math.max(0, Math.min(srcSize - 1, Math.floor(s0)));
+    let i1 = Math.max(i0 + 1, Math.min(srcSize, Math.ceil(s1)));
+    starts[d] = p;
+    let wsum = 0;
+    for (let s = i0; s < i1; s++) {
+      const w = Math.min(s1, s + 1) - Math.max(s0, s);
+      indices[p] = s;
+      weights[p] = w > 0 ? w : 0;
+      wsum += weights[p]!;
+      p++;
+    }
+    ends[d] = p;
+    sums[d] = wsum > 0 ? wsum : 1;
+  }
+
+  return { starts, ends, indices, weights, sums };
+}
+
+/**
+ * Area-average (box) downscale specialised for integer ratios (2x, 3x, ...), which covers the
+ * dominant real-world cases: halving a HiDPI capture to `maxWidth`, or a 4K screen to 1080p.
+ * Avoids all span-table indirection so it runs at raw memory speed.
+ */
+function resizeRgbaBoxInteger(
+  src: Uint8Array,
+  srcWidth: number,
+  srcHeight: number,
+  dstWidth: number,
+  dstHeight: number,
+  kx: number,
+  ky: number,
+): Uint8Array {
+  const dst = new Uint8Array(dstWidth * dstHeight * 4);
+  const inv = 1 / (kx * ky);
+  const srcStride = srcWidth * 4;
+
+  // Fully unrolled 2x2 box: the single most common downscale (HiDPI -> maxWidth).
+  if (kx === 2 && ky === 2) {
+    for (let dy = 0; dy < dstHeight; dy++) {
+      const r0 = dy * 2 * srcStride;
+      const r1 = r0 + srcStride;
+      const out = dy * dstWidth * 4;
+      for (let dx = 0; dx < dstWidth; dx++) {
+        const a = r0 + dx * 8;
+        const b = r1 + dx * 8;
+        const o = out + dx * 4;
+        dst[o] = (src[a]! + src[a + 4]! + src[b]! + src[b + 4]!) >> 2;
+        dst[o + 1] = (src[a + 1]! + src[a + 5]! + src[b + 1]! + src[b + 5]!) >> 2;
+        dst[o + 2] = (src[a + 2]! + src[a + 6]! + src[b + 2]! + src[b + 6]!) >> 2;
+        dst[o + 3] = 255;
+      }
+    }
+    return dst;
+  }
+
+  for (let dy = 0; dy < dstHeight; dy++) {
+    const sy0 = dy * ky;
+    const out = dy * dstWidth * 4;
+    for (let dx = 0; dx < dstWidth; dx++) {
+      const sx0 = dx * kx * 4;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let j = 0; j < ky; j++) {
+        const base = (sy0 + j) * srcStride + sx0;
+        for (let i = 0; i < kx; i++) {
+          const p = base + i * 4;
+          r += src[p]!;
+          g += src[p + 1]!;
+          b += src[p + 2]!;
+        }
+      }
+      const o = out + dx * 4;
+      dst[o] = (r * inv + 0.5) | 0;
+      dst[o + 1] = (g * inv + 0.5) | 0;
+      dst[o + 2] = (b * inv + 0.5) | 0;
+      dst[o + 3] = 255;
+    }
+  }
+
+  return dst;
+}
+
+/**
+ * Area-average (box) downscale. Every source pixel contributes to the destination pixels it
+ * actually overlaps, weighted by coverage, so thin UI text stays legible instead of aliasing.
+ */
+function resizeRgbaBox(
   src: Uint8Array,
   srcWidth: number,
   srcHeight: number,
   dstWidth: number,
   dstHeight: number,
 ): Uint8Array {
-  if (srcWidth === dstWidth && srcHeight === dstHeight) {
-    return new Uint8Array(src);
+  const xRatio = srcWidth / dstWidth;
+  const yRatio = srcHeight / dstHeight;
+  if (Number.isInteger(xRatio) && Number.isInteger(yRatio) && xRatio >= 1 && yRatio >= 1) {
+    return resizeRgbaBoxInteger(src, srcWidth, srcHeight, dstWidth, dstHeight, xRatio, yRatio);
   }
 
+  const cols = buildSpanTable(srcWidth, dstWidth);
+  const rows = buildSpanTable(srcHeight, dstHeight);
+  const srcStride = srcWidth * 4;
+
+  const dst = new Uint8Array(dstWidth * dstHeight * 4);
+  // Pre-scale column byte offsets and normalisation factors so the inner loop is pure arithmetic.
+  const colStart = cols.starts;
+  const colEnd = cols.ends;
+  const colOffset = new Int32Array(cols.indices.length);
+  for (let cp = 0; cp < cols.indices.length; cp++) {
+    colOffset[cp] = cols.indices[cp]! * 4;
+  }
+  const colNorm = new Float64Array(dstWidth);
+  for (let dx = 0; dx < dstWidth; dx++) {
+    colNorm[dx] = 1 / cols.sums[dx]!;
+  }
+
+  for (let dy = 0; dy < dstHeight; dy++) {
+    const rowStart = rows.starts[dy]!;
+    const rowEnd = rows.ends[dy]!;
+    const rowNorm = 1 / rows.sums[dy]!;
+    const out = dy * dstWidth * 4;
+
+    for (let dx = 0; dx < dstWidth; dx++) {
+      const cs = colStart[dx]!;
+      const ce = colEnd[dx]!;
+      const n = colNorm[dx]! * rowNorm;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+
+      for (let rp = rowStart; rp < rowEnd; rp++) {
+        const wy = rows.weights[rp]!;
+        if (wy === 0) continue;
+        const srcRow = rows.indices[rp]! * srcStride;
+        for (let cp = cs; cp < ce; cp++) {
+          const w = cols.weights[cp]! * wy;
+          const i = srcRow + colOffset[cp]!;
+          r += src[i]! * w;
+          g += src[i + 1]! * w;
+          b += src[i + 2]! * w;
+        }
+      }
+
+      // A coverage-weighted average of 0..255 samples cannot leave that range, so no clamping is
+      // needed and rounding is a plain truncate-after-bias (much cheaper than Math.round).
+      const o = out + dx * 4;
+      dst[o] = (r * n + 0.5) | 0;
+      dst[o + 1] = (g * n + 0.5) | 0;
+      dst[o + 2] = (b * n + 0.5) | 0;
+      dst[o + 3] = 255;
+    }
+  }
+
+  return dst;
+}
+
+/**
+ * Bilinear resizer, used for upscaling (where box filtering would just replicate pixels) and as an
+ * explicit opt-in via `{ filter: "bilinear" }`.
+ */
+function resizeRgbaBilinear(
+  src: Uint8Array,
+  srcWidth: number,
+  srcHeight: number,
+  dstWidth: number,
+  dstHeight: number,
+): Uint8Array {
   const dst = new Uint8Array(dstWidth * dstHeight * 4);
   const xRatio = srcWidth / dstWidth;
   const yRatio = srcHeight / dstHeight;
@@ -373,4 +661,36 @@ export function resizeRgba(
   }
 
   return dst;
+}
+
+/**
+ * Resizes an RGBA buffer.
+ *
+ * `auto` (default) picks an area-average box filter when downscaling — the right choice for screen
+ * captures, because it averages every covered source pixel instead of sampling only four of them.
+ * That keeps small UI text legible (and coordinate rulers crisp) where bilinear produces moiré and
+ * dropped strokes. Bilinear is used when upscaling.
+ */
+export function resizeRgba(
+  src: Uint8Array,
+  srcWidth: number,
+  srcHeight: number,
+  dstWidth: number,
+  dstHeight: number,
+  options: { filter?: ResizeFilter } = {},
+): Uint8Array {
+  if (srcWidth === dstWidth && srcHeight === dstHeight) {
+    return new Uint8Array(src);
+  }
+  if (dstWidth <= 0 || dstHeight <= 0 || srcWidth <= 0 || srcHeight <= 0) {
+    throw new Error(`Invalid resize dimensions: ${srcWidth}x${srcHeight} -> ${dstWidth}x${dstHeight}`);
+  }
+
+  const filter = options.filter ?? "auto";
+  const downscaling = dstWidth <= srcWidth && dstHeight <= srcHeight;
+
+  if (filter === "box" || (filter === "auto" && downscaling)) {
+    return resizeRgbaBox(src, srcWidth, srcHeight, dstWidth, dstHeight);
+  }
+  return resizeRgbaBilinear(src, srcWidth, srcHeight, dstWidth, dstHeight);
 }

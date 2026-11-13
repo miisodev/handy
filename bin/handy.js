@@ -27464,6 +27464,15 @@ function makeChunk(type, data) {
   chunk.writeUInt32BE(crc, 8 + data.length);
   return chunk;
 }
+function asUint32View(data, pixelCount) {
+  if (pixelCount <= 0 || data.byteLength < pixelCount * 4) return null;
+  if ((data.byteOffset & 3) !== 0) return null;
+  try {
+    return new Uint32Array(data.buffer, data.byteOffset, pixelCount);
+  } catch {
+    return null;
+  }
+}
 function encodePng(width, height, rgba, options = {}) {
   if (width <= 0 || height <= 0) {
     throw new Error(`Invalid PNG dimensions: ${width}x${height}`);
@@ -27474,16 +27483,90 @@ function encodePng(width, height, rgba, options = {}) {
   }
   const stride = width * 4;
   const raw = Buffer.allocUnsafe((stride + 1) * height);
+  const strategy = options.filter ?? "auto";
+  const rgba32 = strategy === "auto" ? asUint32View(rgba, width * height) : null;
   for (let y = 0; y < height; y++) {
     const srcOffset = y * stride;
+    const prevOffset = srcOffset - stride;
     const dstOffset = y * (stride + 1);
-    raw[dstOffset] = 1;
-    raw[dstOffset + 1] = rgba[srcOffset];
-    raw[dstOffset + 2] = rgba[srcOffset + 1];
-    raw[dstOffset + 3] = rgba[srcOffset + 2];
-    raw[dstOffset + 4] = rgba[srcOffset + 3];
+    raw[dstOffset] = 0;
+    if (strategy === "none") {
+      raw.set(rgba.subarray(srcOffset, srcOffset + stride), dstOffset + 1);
+      continue;
+    }
+    if (strategy === "sub") {
+      raw[dstOffset] = 1;
+      raw[dstOffset + 1] = rgba[srcOffset];
+      raw[dstOffset + 2] = rgba[srcOffset + 1];
+      raw[dstOffset + 3] = rgba[srcOffset + 2];
+      raw[dstOffset + 4] = rgba[srcOffset + 3];
+      for (let i = 4; i < stride; i++) {
+        raw[dstOffset + 1 + i] = rgba[srcOffset + i] - rgba[srcOffset + i - 4] & 255;
+      }
+      continue;
+    }
+    if (y === 0 && strategy === "up") {
+      raw.set(rgba.subarray(srcOffset, srcOffset + stride), dstOffset + 1);
+      continue;
+    }
+    if (strategy === "up") {
+      raw[dstOffset] = 2;
+      for (let i = 0; i < stride; i++) {
+        raw[dstOffset + 1 + i] = rgba[srcOffset + i] - rgba[prevOffset + i] & 255;
+      }
+      continue;
+    }
+    if (y > 0 && strategy === "auto") {
+      let identical = true;
+      if (rgba32) {
+        const row = y * width;
+        const prevRow = row - width;
+        for (let x = 0; x < width; x++) {
+          if (rgba32[row + x] !== rgba32[prevRow + x]) {
+            identical = false;
+            break;
+          }
+        }
+      } else {
+        for (let i = 0; i < stride; i++) {
+          if (rgba[srcOffset + i] !== rgba[prevOffset + i]) {
+            identical = false;
+            break;
+          }
+        }
+      }
+      if (identical) {
+        raw[dstOffset] = 2;
+        raw.fill(0, dstOffset + 1, dstOffset + 1 + stride);
+        continue;
+      }
+    }
+    raw[dstOffset] = 4;
+    if (y === 0) {
+      raw[dstOffset + 1] = rgba[srcOffset];
+      raw[dstOffset + 2] = rgba[srcOffset + 1];
+      raw[dstOffset + 3] = rgba[srcOffset + 2];
+      raw[dstOffset + 4] = rgba[srcOffset + 3];
+      for (let i = 4; i < stride; i++) {
+        raw[dstOffset + 1 + i] = rgba[srcOffset + i] - rgba[srcOffset + i - 4] & 255;
+      }
+      continue;
+    }
+    raw[dstOffset + 1] = rgba[srcOffset] - rgba[prevOffset] & 255;
+    raw[dstOffset + 2] = rgba[srcOffset + 1] - rgba[prevOffset + 1] & 255;
+    raw[dstOffset + 3] = rgba[srcOffset + 2] - rgba[prevOffset + 2] & 255;
+    raw[dstOffset + 4] = rgba[srcOffset + 3] - rgba[prevOffset + 3] & 255;
     for (let i = 4; i < stride; i++) {
-      raw[dstOffset + 1 + i] = rgba[srcOffset + i] - rgba[srcOffset + i - 4] & 255;
+      const x = rgba[srcOffset + i];
+      const a = rgba[srcOffset + i - 4];
+      const b = rgba[prevOffset + i];
+      const c = rgba[prevOffset + i - 4];
+      const pa = b > c ? b - c : c - b;
+      const pb = a > c ? a - c : c - a;
+      const ab = a + b - c;
+      const pc = ab > c ? ab - c : c - ab;
+      const predictor = pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      raw[dstOffset + 1 + i] = x - predictor & 255;
     }
   }
   const ihdr = Buffer.allocUnsafe(13);
@@ -27707,10 +27790,134 @@ function cropRgba(src, srcWidth, srcHeight, x, y, cropWidth, cropHeight) {
   }
   return { width: cw, height: ch, data: out, x: cx, y: cy };
 }
-function resizeRgba(src, srcWidth, srcHeight, dstWidth, dstHeight) {
-  if (srcWidth === dstWidth && srcHeight === dstHeight) {
-    return new Uint8Array(src);
+function buildSpanTable(srcSize, dstSize) {
+  const ratio = srcSize / dstSize;
+  const starts = new Int32Array(dstSize);
+  const ends = new Int32Array(dstSize);
+  const sums = new Float64Array(dstSize);
+  const indices = new Int32Array(srcSize + dstSize + 1);
+  const weights = new Float64Array(srcSize + dstSize + 1);
+  let p = 0;
+  for (let d = 0; d < dstSize; d++) {
+    const s0 = d * ratio;
+    const s1 = (d + 1) * ratio;
+    const i0 = Math.max(0, Math.min(srcSize - 1, Math.floor(s0)));
+    let i1 = Math.max(i0 + 1, Math.min(srcSize, Math.ceil(s1)));
+    starts[d] = p;
+    let wsum = 0;
+    for (let s = i0; s < i1; s++) {
+      const w = Math.min(s1, s + 1) - Math.max(s0, s);
+      indices[p] = s;
+      weights[p] = w > 0 ? w : 0;
+      wsum += weights[p];
+      p++;
+    }
+    ends[d] = p;
+    sums[d] = wsum > 0 ? wsum : 1;
   }
+  return { starts, ends, indices, weights, sums };
+}
+function resizeRgbaBoxInteger(src, srcWidth, srcHeight, dstWidth, dstHeight, kx, ky) {
+  const dst = new Uint8Array(dstWidth * dstHeight * 4);
+  const inv = 1 / (kx * ky);
+  const srcStride = srcWidth * 4;
+  if (kx === 2 && ky === 2) {
+    for (let dy = 0; dy < dstHeight; dy++) {
+      const r0 = dy * 2 * srcStride;
+      const r1 = r0 + srcStride;
+      const out = dy * dstWidth * 4;
+      for (let dx = 0; dx < dstWidth; dx++) {
+        const a = r0 + dx * 8;
+        const b = r1 + dx * 8;
+        const o = out + dx * 4;
+        dst[o] = src[a] + src[a + 4] + src[b] + src[b + 4] >> 2;
+        dst[o + 1] = src[a + 1] + src[a + 5] + src[b + 1] + src[b + 5] >> 2;
+        dst[o + 2] = src[a + 2] + src[a + 6] + src[b + 2] + src[b + 6] >> 2;
+        dst[o + 3] = 255;
+      }
+    }
+    return dst;
+  }
+  for (let dy = 0; dy < dstHeight; dy++) {
+    const sy0 = dy * ky;
+    const out = dy * dstWidth * 4;
+    for (let dx = 0; dx < dstWidth; dx++) {
+      const sx0 = dx * kx * 4;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let j = 0; j < ky; j++) {
+        const base = (sy0 + j) * srcStride + sx0;
+        for (let i = 0; i < kx; i++) {
+          const p = base + i * 4;
+          r += src[p];
+          g += src[p + 1];
+          b += src[p + 2];
+        }
+      }
+      const o = out + dx * 4;
+      dst[o] = r * inv + 0.5 | 0;
+      dst[o + 1] = g * inv + 0.5 | 0;
+      dst[o + 2] = b * inv + 0.5 | 0;
+      dst[o + 3] = 255;
+    }
+  }
+  return dst;
+}
+function resizeRgbaBox(src, srcWidth, srcHeight, dstWidth, dstHeight) {
+  const xRatio = srcWidth / dstWidth;
+  const yRatio = srcHeight / dstHeight;
+  if (Number.isInteger(xRatio) && Number.isInteger(yRatio) && xRatio >= 1 && yRatio >= 1) {
+    return resizeRgbaBoxInteger(src, srcWidth, srcHeight, dstWidth, dstHeight, xRatio, yRatio);
+  }
+  const cols = buildSpanTable(srcWidth, dstWidth);
+  const rows = buildSpanTable(srcHeight, dstHeight);
+  const srcStride = srcWidth * 4;
+  const dst = new Uint8Array(dstWidth * dstHeight * 4);
+  const colStart = cols.starts;
+  const colEnd = cols.ends;
+  const colOffset = new Int32Array(cols.indices.length);
+  for (let cp = 0; cp < cols.indices.length; cp++) {
+    colOffset[cp] = cols.indices[cp] * 4;
+  }
+  const colNorm = new Float64Array(dstWidth);
+  for (let dx = 0; dx < dstWidth; dx++) {
+    colNorm[dx] = 1 / cols.sums[dx];
+  }
+  for (let dy = 0; dy < dstHeight; dy++) {
+    const rowStart = rows.starts[dy];
+    const rowEnd = rows.ends[dy];
+    const rowNorm = 1 / rows.sums[dy];
+    const out = dy * dstWidth * 4;
+    for (let dx = 0; dx < dstWidth; dx++) {
+      const cs = colStart[dx];
+      const ce = colEnd[dx];
+      const n = colNorm[dx] * rowNorm;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let rp = rowStart; rp < rowEnd; rp++) {
+        const wy = rows.weights[rp];
+        if (wy === 0) continue;
+        const srcRow = rows.indices[rp] * srcStride;
+        for (let cp = cs; cp < ce; cp++) {
+          const w = cols.weights[cp] * wy;
+          const i = srcRow + colOffset[cp];
+          r += src[i] * w;
+          g += src[i + 1] * w;
+          b += src[i + 2] * w;
+        }
+      }
+      const o = out + dx * 4;
+      dst[o] = r * n + 0.5 | 0;
+      dst[o + 1] = g * n + 0.5 | 0;
+      dst[o + 2] = b * n + 0.5 | 0;
+      dst[o + 3] = 255;
+    }
+  }
+  return dst;
+}
+function resizeRgbaBilinear(src, srcWidth, srcHeight, dstWidth, dstHeight) {
   const dst = new Uint8Array(dstWidth * dstHeight * 4);
   const xRatio = srcWidth / dstWidth;
   const yRatio = srcHeight / dstHeight;
@@ -27749,6 +27956,225 @@ function resizeRgba(src, srcWidth, srcHeight, dstWidth, dstHeight) {
     }
   }
   return dst;
+}
+function resizeRgba(src, srcWidth, srcHeight, dstWidth, dstHeight, options = {}) {
+  if (srcWidth === dstWidth && srcHeight === dstHeight) {
+    return new Uint8Array(src);
+  }
+  if (dstWidth <= 0 || dstHeight <= 0 || srcWidth <= 0 || srcHeight <= 0) {
+    throw new Error(`Invalid resize dimensions: ${srcWidth}x${srcHeight} -> ${dstWidth}x${dstHeight}`);
+  }
+  const filter = options.filter ?? "auto";
+  const downscaling = dstWidth <= srcWidth && dstHeight <= srcHeight;
+  if (filter === "box" || filter === "auto" && downscaling) {
+    return resizeRgbaBox(src, srcWidth, srcHeight, dstWidth, dstHeight);
+  }
+  return resizeRgbaBilinear(src, srcWidth, srcHeight, dstWidth, dstHeight);
+}
+
+// src/types.ts
+var UiElementKindSchema = external_exports.enum(["control", "text", "icon", "region"]);
+var MouseButtonSchema = external_exports.enum(["left", "right", "middle"]);
+var ModifierKeySchema = external_exports.enum(["ctrl", "alt", "shift", "meta", "mod"]);
+var CoordinateSpaceSchema = external_exports.enum(["screen", "normalized", "window"]);
+var MotionProfileSchema = external_exports.enum(["linear", "ease", "human"]);
+var RegionSchema = external_exports.object({
+  x: external_exports.number().int().describe("Left X coordinate in screen pixels"),
+  y: external_exports.number().int().describe("Top Y coordinate in screen pixels"),
+  width: external_exports.number().int().min(1).max(16384).describe("Region width in screen pixels"),
+  height: external_exports.number().int().min(1).max(16384).describe("Region height in screen pixels")
+});
+var MarkRefSchema = external_exports.number().int().min(1).max(200).optional().describe(
+  "Target detected UI element mark #N \u2014 the number drawn on the screenshot returned by the last `handy_see({ marks: true })` \u2014 instead of supplying x/y"
+);
+var MoveStepSchema = external_exports.object({
+  type: external_exports.literal("move"),
+  x: external_exports.number().optional().describe("Target X coordinate (or delta X when relative=true). Omit when using `mark`."),
+  y: external_exports.number().optional().describe("Target Y coordinate (or delta Y when relative=true). Omit when using `mark`."),
+  mark: MarkRefSchema,
+  relative: external_exports.boolean().optional().describe("Move relative to current mouse position"),
+  durationMs: external_exports.number().min(0).max(1e4).optional().describe("Smooth movement duration in ms (0 = instant)"),
+  steps: external_exports.number().int().min(1).max(200).optional().describe("Interpolation steps when durationMs > 0"),
+  motion: MotionProfileSchema.optional().describe("Interpolation curve used when durationMs > 0"),
+  coordinateSpace: CoordinateSpaceSchema.optional().describe("screen (default), normalized (0..1000), or window")
+});
+var ClickStepSchema = external_exports.object({
+  type: external_exports.literal("click"),
+  x: external_exports.number().optional().describe("Optional X coordinate to move to before clicking"),
+  y: external_exports.number().optional().describe("Optional Y coordinate to move to before clicking"),
+  mark: MarkRefSchema,
+  button: MouseButtonSchema.optional().describe("Mouse button: left (default), right, or middle"),
+  count: external_exports.number().int().min(1).max(5).optional().describe("Click count (1 = single, 2 = double, 3 = triple)"),
+  modifiers: external_exports.array(ModifierKeySchema).optional().describe("Modifier keys held during click"),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var DoubleClickStepSchema = external_exports.object({
+  type: external_exports.literal("double_click"),
+  x: external_exports.number().optional().describe("Optional X coordinate to move to before double-clicking"),
+  y: external_exports.number().optional().describe("Optional Y coordinate to move to before double-clicking"),
+  mark: MarkRefSchema,
+  button: MouseButtonSchema.optional(),
+  modifiers: external_exports.array(ModifierKeySchema).optional(),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var TripleClickStepSchema = external_exports.object({
+  type: external_exports.literal("triple_click"),
+  x: external_exports.number().optional().describe("Optional X coordinate to move to before triple-clicking"),
+  y: external_exports.number().optional().describe("Optional Y coordinate to move to before triple-clicking"),
+  mark: MarkRefSchema,
+  modifiers: external_exports.array(ModifierKeySchema).optional(),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var RightClickStepSchema = external_exports.object({
+  type: external_exports.literal("right_click"),
+  x: external_exports.number().optional().describe("Optional X coordinate to move to before right-clicking"),
+  y: external_exports.number().optional().describe("Optional Y coordinate to move to before right-clicking"),
+  mark: MarkRefSchema,
+  modifiers: external_exports.array(ModifierKeySchema).optional(),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var MouseDownStepSchema = external_exports.object({
+  type: external_exports.literal("mouse_down"),
+  x: external_exports.number().optional(),
+  y: external_exports.number().optional(),
+  mark: MarkRefSchema,
+  button: MouseButtonSchema.optional(),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var MouseUpStepSchema = external_exports.object({
+  type: external_exports.literal("mouse_up"),
+  x: external_exports.number().optional(),
+  y: external_exports.number().optional(),
+  mark: MarkRefSchema,
+  button: MouseButtonSchema.optional(),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var DragStepSchema = external_exports.object({
+  type: external_exports.literal("drag"),
+  fromX: external_exports.number().optional().describe("Start X (defaults to current mouse X)"),
+  fromY: external_exports.number().optional().describe("Start Y (defaults to current mouse Y)"),
+  fromMark: external_exports.number().int().min(1).max(200).optional().describe("Start the drag at detected element mark #N"),
+  toX: external_exports.number().optional().describe("Destination X coordinate. Omit when using `toMark`."),
+  toY: external_exports.number().optional().describe("Destination Y coordinate. Omit when using `toMark`."),
+  toMark: external_exports.number().int().min(1).max(200).optional().describe("End the drag at detected element mark #N"),
+  button: MouseButtonSchema.optional(),
+  durationMs: external_exports.number().min(0).max(1e4).optional().describe("Drag duration in ms (default 160)"),
+  steps: external_exports.number().int().min(2).max(200).optional().describe("Interpolation steps along drag path"),
+  motion: MotionProfileSchema.optional().describe("Interpolation curve along the drag path"),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var ScrollStepSchema = external_exports.object({
+  type: external_exports.literal("scroll"),
+  x: external_exports.number().optional().describe("Optional X to position cursor over before scrolling"),
+  y: external_exports.number().optional().describe("Optional Y to position cursor over before scrolling"),
+  mark: MarkRefSchema,
+  deltaX: external_exports.number().optional().describe("Horizontal wheel ticks (+ right, - left)"),
+  deltaY: external_exports.number().optional().describe("Vertical wheel ticks (+ down, - up)"),
+  direction: external_exports.enum(["up", "down", "left", "right"]).optional().describe("Named scroll direction"),
+  amount: external_exports.number().min(1).max(100).optional().describe("Wheel ticks when using direction (default 3)"),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var TypeStepSchema = external_exports.object({
+  type: external_exports.literal("type"),
+  text: external_exports.string().max(1e4).describe("Text to type natively (supports Unicode and newlines)"),
+  delayMs: external_exports.number().min(0).max(1e3).optional().describe("Optional delay between characters in ms"),
+  submit: external_exports.boolean().optional().describe("Press Enter immediately after typing")
+});
+var PasteStepSchema = external_exports.object({
+  type: external_exports.literal("paste"),
+  text: external_exports.string().max(1e5).describe("Text to paste instantly via OS clipboard + mod+v (ideal for long text, URLs, or code)"),
+  restoreClipboard: external_exports.boolean().optional().describe("Restore previous clipboard text after pasting (default: true)"),
+  submit: external_exports.boolean().optional().describe("Press Enter immediately after pasting")
+});
+var KeyStepSchema = external_exports.object({
+  type: external_exports.literal("key"),
+  key: external_exports.string().min(1).max(100).describe(
+    "Key or chord, e.g. 'Enter', 'Tab', 'Escape', 'Backspace', 'ArrowDown', 'ctrl+c', 'mod+a', 'cmd+shift+p'"
+  ),
+  modifiers: external_exports.array(ModifierKeySchema).optional().describe("Optional modifiers held while pressing key"),
+  count: external_exports.number().int().min(1).max(50).optional().describe("Repeat count (default 1)")
+});
+var KeyDownStepSchema = external_exports.object({
+  type: external_exports.literal("key_down"),
+  key: external_exports.string().min(1).max(64).describe("Key to press and hold down")
+});
+var KeyUpStepSchema = external_exports.object({
+  type: external_exports.literal("key_up"),
+  key: external_exports.string().min(1).max(64).describe("Key to release")
+});
+var FocusWindowStepSchema = external_exports.object({
+  type: external_exports.literal("focus_window"),
+  title: external_exports.string().min(1).max(256).optional().describe("Case-insensitive substring of window title to focus"),
+  app: external_exports.string().min(1).max(256).optional().describe("Case-insensitive application/process name to focus"),
+  id: external_exports.union([external_exports.string(), external_exports.number()]).optional().describe("Exact window ID from handy_windows")
+});
+var WaitStepSchema = external_exports.object({
+  type: external_exports.literal("wait"),
+  ms: external_exports.number().min(0).max(3e4).describe("Milliseconds to wait (0..30000)")
+});
+var WaitForChangeStepSchema = external_exports.object({
+  type: external_exports.literal("wait_for_change"),
+  region: RegionSchema.optional().describe("Optional screen region to watch for visual change"),
+  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 3000)"),
+  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 60)"),
+  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Minimum changed pixel percentage to trigger completion (default: 0.05)")
+});
+var WaitForSettledStepSchema = external_exports.object({
+  type: external_exports.literal("wait_for_settled"),
+  region: RegionSchema.optional().describe("Optional screen region to wait until animations stop"),
+  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 3000)"),
+  quietMs: external_exports.number().min(30).max(2e3).optional().describe("Required visually quiet window in ms (default: 120)"),
+  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
+  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Changed pixel percentage at or above which the screen counts as still moving (default: 0.1)")
+});
+var WaitForColorStepSchema = external_exports.object({
+  type: external_exports.literal("wait_for_color"),
+  x: external_exports.number().int().describe("Target X coordinate of pixel to inspect"),
+  y: external_exports.number().int().describe("Target Y coordinate of pixel to inspect"),
+  color: external_exports.string().regex(/^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/).describe("Expected hex color (#rrggbb or #rgb)"),
+  tolerance: external_exports.number().min(0).max(442).optional().describe("Allowed Euclidean RGB distance 0..442 (default: 24)"),
+  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 5000)"),
+  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
+  coordinateSpace: CoordinateSpaceSchema.optional()
+});
+var ScreenshotStepSchema = external_exports.object({
+  type: external_exports.literal("screenshot"),
+  region: RegionSchema.optional(),
+  window: external_exports.string().max(256).optional().describe("Optional window title substring to capture at 1:1 resolution"),
+  grid: external_exports.boolean().optional(),
+  showMouse: external_exports.boolean().optional(),
+  highlightDiff: external_exports.boolean().optional(),
+  maxWidth: external_exports.number().int().min(320).max(3840).optional(),
+  marks: external_exports.boolean().optional().describe("Run Set-of-Mark UI element detection on this mid-chain capture"),
+  maxMarks: external_exports.number().int().min(1).max(200).optional(),
+  label: external_exports.string().max(120).optional().describe("Optional label identifying this mid-chain capture")
+});
+var ActionStepSchema = external_exports.discriminatedUnion("type", [
+  MoveStepSchema,
+  ClickStepSchema,
+  DoubleClickStepSchema,
+  TripleClickStepSchema,
+  RightClickStepSchema,
+  MouseDownStepSchema,
+  MouseUpStepSchema,
+  DragStepSchema,
+  ScrollStepSchema,
+  TypeStepSchema,
+  PasteStepSchema,
+  KeyStepSchema,
+  KeyDownStepSchema,
+  KeyUpStepSchema,
+  FocusWindowStepSchema,
+  WaitStepSchema,
+  WaitForChangeStepSchema,
+  WaitForSettledStepSchema,
+  WaitForColorStepSchema,
+  ScreenshotStepSchema
+]);
+function pickDisplay(displays, index) {
+  if (displays.length === 0) return void 0;
+  const wanted = index ?? 0;
+  return displays.find((d) => d.id === wanted) ?? displays[wanted] ?? displays.find((d) => d.primary) ?? displays[0];
 }
 
 // src/backends/jsonl-worker.ts
@@ -27811,6 +28237,15 @@ var JsonlWorker = class {
     };
     child.on("error", (err) => {
       failAll(`Native worker spawn error (${this.options.command}): ${err.message}`);
+    });
+    child.stdin.on("error", (err) => {
+      if (this.proc === child) {
+        this.proc = null;
+        this.rl?.close();
+        this.rl = null;
+        child.kill();
+      }
+      failAll(`Native worker stdin failed (${this.options.command}): ${err.message}`);
     });
     child.on("close", (code) => {
       this.proc = null;
@@ -28138,6 +28573,8 @@ while (true) {
 var DarwinBackend = class {
   name = "darwin-coregraphics";
   platform = "darwin";
+  /** CGEvent carries click count and held modifiers, so double/triple clicks must be sent natively. */
+  nativeClickCount = true;
   worker;
   customCapturePng;
   constructor(options = {}) {
@@ -28280,7 +28717,7 @@ var DarwinBackend = class {
   }
   async captureScreen(options = {}) {
     const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
+    const disp = pickDisplay(displays, options.display);
     const logicalWidth = options.region ? Math.round(options.region.width) : disp.width;
     const logicalHeight = options.region ? Math.round(options.region.height) : disp.height;
     const originX = options.region ? Math.round(options.region.x) : disp.x;
@@ -28387,7 +28824,11 @@ function pipeStdin(cmd, args, input2, timeoutMs = 4e3) {
   return new Promise((resolve2, reject) => {
     const child = spawn2(cmd, args, { stdio: ["pipe", "ignore", "pipe"] });
     let stderr = "";
+    let settled = false;
+    let stdinError = null;
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       child.kill("SIGKILL");
       reject(new Error(`${cmd} timed out after ${timeoutMs}ms`));
     }, timeoutMs);
@@ -28396,15 +28837,36 @@ function pipeStdin(cmd, args, input2, timeoutMs = 4e3) {
       stderr += chunk;
     });
     child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       reject(err);
     });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve2();
-      else reject(new Error(stderr.trim() || `${cmd} exited with code ${code}`));
+    child.stdin.on("error", (err) => {
+      stdinError = err;
     });
-    child.stdin.write(input2, "utf8");
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (code === 0 && !stdinError) {
+        resolve2();
+        return;
+      }
+      const detail = stderr.trim();
+      if (detail) {
+        reject(new Error(detail));
+        return;
+      }
+      reject(
+        new Error(
+          stdinError ? `${cmd} exited with code ${code} without reading the piped input (${stdinError.message})` : `${cmd} exited with code ${code}`
+        )
+      );
+    });
+    child.stdin.write(input2, "utf8", (err) => {
+      if (err) stdinError = err;
+    });
     child.stdin.end();
   });
 }
@@ -29773,7 +30235,7 @@ var LinuxX11Backend = class {
   async captureScreen(options = {}) {
     const screen = await this.ensureReady();
     const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
+    const disp = pickDisplay(displays, options.display);
     const rx = options.region ? Math.max(0, Math.min(screen.width - 1, Math.round(options.region.x))) : disp.x;
     const ry = options.region ? Math.max(0, Math.min(screen.height - 1, Math.round(options.region.y))) : disp.y;
     const rw = options.region ? Math.max(1, Math.min(screen.width - rx, Math.round(options.region.width))) : Math.min(disp.width, screen.width - rx);
@@ -30268,7 +30730,10 @@ var VirtualDesktopBackend = class _VirtualDesktopBackend {
       this.state.events.length = 25;
     }
   }
-  async mouseDown(button) {
+  // The optional clickCount/modifiers mirror DesktopBackend so the class stays assignable to it
+  // and tests can spy on the full signature. Double-clicks here are detected by timing and
+  // proximity below, so the count itself is not needed.
+  async mouseDown(button, _clickCount) {
     this.heldButtons.add(button);
     this.state.lastButton = button;
     const now = Date.now();
@@ -30334,7 +30799,7 @@ var VirtualDesktopBackend = class _VirtualDesktopBackend {
       this.pushEvent(`${button} click at (${this.mouse.x},${this.mouse.y})`);
     }
   }
-  async mouseUp(button) {
+  async mouseUp(button, _clickCount) {
     this.heldButtons.delete(button);
     if (button === "left" && this.state.draggingCard) {
       this.state.draggingCard = false;
@@ -31372,7 +31837,7 @@ var Win32Backend = class {
   }
   async captureScreen(options = {}) {
     const displays = await this.getDisplays();
-    const disp = displays.find((d) => d.id === (options.display ?? 0)) ?? displays[0];
+    const disp = pickDisplay(displays, options.display);
     const rx = options.region ? Math.round(options.region.x) : disp.x;
     const ry = options.region ? Math.round(options.region.y) : disp.y;
     const rw = options.region ? Math.max(1, Math.round(options.region.width)) : disp.width;
@@ -31491,16 +31956,30 @@ function samplePixelHex(frame, point) {
   const b = frame.data[idx + 2] ?? 0;
   return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
 }
-function computeFrameDiff(prev, curr, channelDeltaThreshold = 14) {
+function asUint32View2(data, pixelCount) {
+  if (pixelCount <= 0) return null;
+  if (data.byteLength < pixelCount * 4) return null;
+  if ((data.byteOffset & 3) !== 0) return null;
+  try {
+    return new Uint32Array(data.buffer, data.byteOffset, pixelCount);
+  } catch {
+    return null;
+  }
+}
+function computeFrameDiff(prev, curr, channelDeltaThresholdOrOptions = 14, maybeOptions) {
   if (prev.width !== curr.width || prev.height !== curr.height || prev.originX !== curr.originX || prev.originY !== curr.originY) {
     return null;
   }
+  const options = typeof channelDeltaThresholdOrOptions === "number" ? { channelDeltaThreshold: channelDeltaThresholdOrOptions, ...maybeOptions ?? {} } : channelDeltaThresholdOrOptions;
+  const threshold = options.channelDeltaThreshold ?? 14;
+  const computeBounds = options.computeBounds ?? true;
   const w = curr.width;
   const h = curr.height;
   const totalPixels = w * h;
   if (totalPixels === 0) {
     return { changedPercent: 0, changedPixels: 0, changedBounds: null };
   }
+  const earlyExitPixels = options.earlyExitPercent !== void 0 && options.earlyExitPercent > 0 ? Math.max(1, Math.ceil(options.earlyExitPercent / 100 * totalPixels)) : -1;
   const a = prev.data;
   const b = curr.data;
   let changedPixels = 0;
@@ -31508,37 +31987,531 @@ function computeFrameDiff(prev, curr, channelDeltaThreshold = 14) {
   let minY = h;
   let maxX = -1;
   let maxY = -1;
-  for (let y = 0; y < h; y++) {
-    const rowOff = y * w * 4;
-    for (let x = 0; x < w; x++) {
-      const i = rowOff + x * 4;
-      const dr = Math.abs(a[i] - b[i]);
-      const dg = Math.abs(a[i + 1] - b[i + 1]);
-      const db = Math.abs(a[i + 2] - b[i + 2]);
-      if (dr > channelDeltaThreshold || dg > channelDeltaThreshold || db > channelDeltaThreshold) {
-        changedPixels++;
-        if (x < minX) minX = x;
-        if (x > maxX) maxX = x;
-        if (y < minY) minY = y;
-        if (y > maxY) maxY = y;
+  let partial2 = false;
+  const a32 = asUint32View2(a, totalPixels);
+  const b32 = asUint32View2(b, totalPixels);
+  if (a32 && b32) {
+    outer: for (let y = 0; y < h; y++) {
+      const row = y * w;
+      for (let x = 0; x < w; x++) {
+        const i = row + x;
+        const av = a32[i];
+        const bv = b32[i];
+        if (av === bv) continue;
+        const dr = (av & 255) - (bv & 255);
+        const dg = (av >>> 8 & 255) - (bv >>> 8 & 255);
+        const db = (av >>> 16 & 255) - (bv >>> 16 & 255);
+        if (dr > threshold || dr < -threshold || dg > threshold || dg < -threshold || db > threshold || db < -threshold) {
+          changedPixels++;
+          if (computeBounds) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+      if (earlyExitPixels > 0 && changedPixels >= earlyExitPixels) {
+        partial2 = true;
+        break outer;
+      }
+    }
+  } else {
+    outer: for (let y = 0; y < h; y++) {
+      const rowOff = y * w * 4;
+      for (let x = 0; x < w; x++) {
+        const i = rowOff + x * 4;
+        const dr = Math.abs(a[i] - b[i]);
+        const dg = Math.abs(a[i + 1] - b[i + 1]);
+        const db = Math.abs(a[i + 2] - b[i + 2]);
+        if (dr > threshold || dg > threshold || db > threshold) {
+          changedPixels++;
+          if (computeBounds) {
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
+      }
+      if (earlyExitPixels > 0 && changedPixels >= earlyExitPixels) {
+        partial2 = true;
+        break outer;
       }
     }
   }
-  if (changedPixels === 0 || maxX < minX || maxY < minY) {
+  if (changedPixels === 0) {
     return { changedPercent: 0, changedPixels: 0, changedBounds: null };
   }
   const changedPercent = Math.round(changedPixels / totalPixels * 1e5) / 1e3;
-  const scaleX = curr.logicalWidth / Math.max(1, w);
-  const scaleY = curr.logicalHeight / Math.max(1, h);
-  const bx = Math.round(curr.originX + minX * scaleX);
-  const by = Math.round(curr.originY + minY * scaleY);
-  const bw = Math.max(1, Math.round((maxX - minX + 1) * scaleX));
-  const bh = Math.max(1, Math.round((maxY - minY + 1) * scaleY));
-  return {
-    changedPercent,
-    changedPixels,
-    changedBounds: { x: bx, y: by, width: bw, height: bh }
+  let changedBounds = null;
+  if (computeBounds && maxX >= minX && maxY >= minY) {
+    const scaleX = curr.logicalWidth / Math.max(1, w);
+    const scaleY = curr.logicalHeight / Math.max(1, h);
+    changedBounds = {
+      x: Math.round(curr.originX + minX * scaleX),
+      y: Math.round(curr.originY + minY * scaleY),
+      width: Math.max(1, Math.round((maxX - minX + 1) * scaleX)),
+      height: Math.max(1, Math.round((maxY - minY + 1) * scaleY))
+    };
+  }
+  return partial2 ? { changedPercent, changedPixels, changedBounds, partial: true } : { changedPercent, changedPixels, changedBounds };
+}
+
+// src/marks.ts
+var MAX_WORK_PIXELS = 24e5;
+var MAX_EDGE_DENSITY = 0.35;
+var DisjointSet = class {
+  parent;
+  constructor(size) {
+    this.parent = new Int32Array(size);
+    for (let i = 0; i < size; i++) this.parent[i] = i;
+  }
+  find(x) {
+    let root = x;
+    while (this.parent[root] !== root) root = this.parent[root];
+    let cur = x;
+    while (this.parent[cur] !== root) {
+      const next = this.parent[cur];
+      this.parent[cur] = root;
+      cur = next;
+    }
+    return root;
+  }
+  union(a, b) {
+    const ra = this.find(a);
+    const rb = this.find(b);
+    if (ra !== rb) this.parent[rb] = ra;
+  }
+};
+function toGrayscale(rgba, count) {
+  const gray = new Uint8Array(count);
+  for (let i = 0, p = 0; i < count; i++, p += 4) {
+    gray[i] = rgba[p] * 77 + rgba[p + 1] * 151 + rgba[p + 2] * 28 >> 8;
+  }
+  return gray;
+}
+function buildEdgeMap(gray, width, height, threshold) {
+  const edge = new Uint8Array(width * height);
+  let count = 0;
+  for (let y = 0; y < height - 1; y++) {
+    const row = y * width;
+    for (let x = 0; x < width - 1; x++) {
+      const i = row + x;
+      const c = gray[i];
+      if (Math.abs(c - gray[i + 1]) + Math.abs(c - gray[i + width]) >= threshold) {
+        edge[i] = 1;
+        count++;
+      }
+    }
+  }
+  return { edge, count };
+}
+function dilate(edge, edgeCount, width, height, radius) {
+  if (radius <= 0) {
+    const positions2 = new Int32Array(edgeCount);
+    let n2 = 0;
+    for (let i = 0; i < edge.length; i++) if (edge[i] === 1) positions2[n2++] = i;
+    return { map: edge, positions: positions2, count: n2 };
+  }
+  const total = width * height;
+  const tmp = new Uint8Array(total);
+  for (let y = 0; y < height; y++) {
+    const row = y * width;
+    for (let x = 0; x < width; x++) {
+      if (edge[row + x] !== 1) continue;
+      const from = x - radius < 0 ? 0 : x - radius;
+      const to = x + radius > width - 1 ? width : x + radius + 1;
+      tmp.fill(1, row + from, row + to);
+    }
+  }
+  const map2 = new Uint8Array(total);
+  const useWords = width % 4 === 0 && (tmp.byteOffset & 3) === 0;
+  if (useWords) {
+    const tmp32 = new Uint32Array(tmp.buffer);
+    const map32 = new Uint32Array(map2.buffer);
+    const w32 = width >> 2;
+    for (let y = 0; y < height; y++) {
+      const dst = y * w32;
+      map32.set(tmp32.subarray(dst, dst + w32), dst);
+      for (let k = 1; k <= radius; k++) {
+        if (y - k >= 0) {
+          const src = (y - k) * w32;
+          for (let x = 0; x < w32; x++) map32[dst + x] = map32[dst + x] | tmp32[src + x];
+        }
+        if (y + k < height) {
+          const src = (y + k) * w32;
+          for (let x = 0; x < w32; x++) map32[dst + x] = map32[dst + x] | tmp32[src + x];
+        }
+      }
+    }
+  } else {
+    for (let y = 0; y < height; y++) {
+      const dst = y * width;
+      map2.set(tmp.subarray(dst, dst + width), dst);
+      for (let k = 1; k <= radius; k++) {
+        if (y - k >= 0) {
+          const src = (y - k) * width;
+          for (let x = 0; x < width; x++) if (tmp[src + x] === 1) map2[dst + x] = 1;
+        }
+        if (y + k < height) {
+          const src = (y + k) * width;
+          for (let x = 0; x < width; x++) if (tmp[src + x] === 1) map2[dst + x] = 1;
+        }
+      }
+    }
+  }
+  let count = 0;
+  for (let i = 0; i < total; i++) if (map2[i] === 1) count++;
+  const positions = new Int32Array(count);
+  let n = 0;
+  for (let i = 0; i < total; i++) if (map2[i] === 1) positions[n++] = i;
+  return { map: map2, positions, count };
+}
+function labelComponents(map2, positions, positionCount, width, height) {
+  if (positionCount === 0) return [];
+  const labels = new Int32Array(width * height).fill(-1);
+  const equivalences = [];
+  let nextLabel = 0;
+  for (let p = 0; p < positionCount; p++) {
+    const i = positions[p];
+    const x = i % width;
+    const y = i / width | 0;
+    let best = -1;
+    if (x > 0) {
+      const l = labels[i - 1];
+      if (l >= 0) best = l;
+    }
+    if (y > 0) {
+      const up = labels[i - width];
+      if (up >= 0) {
+        if (best < 0) best = up;
+        else if (up !== best) equivalences.push([best, up]);
+      }
+      if (x > 0) {
+        const ul = labels[i - width - 1];
+        if (ul >= 0) {
+          if (best < 0) best = ul;
+          else if (ul !== best) equivalences.push([best, ul]);
+        }
+      }
+      if (x < width - 1) {
+        const ur = labels[i - width + 1];
+        if (ur >= 0) {
+          if (best < 0) best = ur;
+          else if (ur !== best) equivalences.push([best, ur]);
+        }
+      }
+    }
+    labels[i] = best < 0 ? nextLabel++ : best;
+  }
+  if (nextLabel === 0) return [];
+  const dsu = new DisjointSet(nextLabel);
+  for (const [a, b] of equivalences) dsu.union(a, b);
+  const minX = new Int32Array(nextLabel).fill(width);
+  const minY = new Int32Array(nextLabel).fill(height);
+  const maxX = new Int32Array(nextLabel).fill(-1);
+  const maxY = new Int32Array(nextLabel).fill(-1);
+  const count = new Int32Array(nextLabel);
+  for (let p = 0; p < positionCount; p++) {
+    const i = positions[p];
+    const r = dsu.find(labels[i]);
+    const x = i % width;
+    const y = i / width | 0;
+    count[r] = count[r] + 1;
+    if (x < minX[r]) minX[r] = x;
+    if (x > maxX[r]) maxX[r] = x;
+    if (y < minY[r]) minY[r] = y;
+    if (y > maxY[r]) maxY[r] = y;
+  }
+  const out = [];
+  for (let r = 0; r < nextLabel; r++) {
+    if (count[r] === 0 || maxX[r] < 0) continue;
+    out.push({ minX: minX[r], minY: minY[r], maxX: maxX[r], maxY: maxY[r], pixels: count[r] });
+  }
+  return out;
+}
+function perimeterEdgeDensity(edge, width, s) {
+  let hits = 0;
+  let total = 0;
+  for (let x = s.minX; x <= s.maxX; x++) {
+    total += 2;
+    if (edge[s.minY * width + x] === 1) hits++;
+    if (edge[s.maxY * width + x] === 1) hits++;
+  }
+  for (let y = s.minY + 1; y < s.maxY; y++) {
+    total += 2;
+    if (edge[y * width + s.minX] === 1) hits++;
+    if (edge[y * width + s.maxX] === 1) hits++;
+  }
+  return total === 0 ? 0 : hits / total;
+}
+function boxLuminance(gray, width, height, x0, y0, x1, y1) {
+  const xa = Math.max(0, x0);
+  const ya = Math.max(0, y0);
+  const xb = Math.min(width - 1, x1);
+  const yb = Math.min(height - 1, y1);
+  if (xb < xa || yb < ya) return { mean: 0, stddev: 0 };
+  let sum = 0;
+  let sumSq = 0;
+  let n = 0;
+  for (let y = ya; y <= yb; y++) {
+    const row = y * width;
+    for (let x = xa; x <= xb; x++) {
+      const v = gray[row + x];
+      sum += v;
+      sumSq += v * v;
+      n++;
+    }
+  }
+  if (n === 0) return { mean: 0, stddev: 0 };
+  const mean = sum / n;
+  return { mean, stddev: Math.sqrt(Math.max(0, sumSq / n - mean * mean)) };
+}
+function surroundLuminance(gray, width, height, s) {
+  const pad = 3;
+  const x0 = Math.max(0, s.minX - pad);
+  const x1 = Math.min(width - 1, s.maxX + pad);
+  const y0 = Math.max(0, s.minY - pad);
+  const y1 = Math.min(height - 1, s.maxY + pad);
+  const ix0 = Math.max(0, s.minX);
+  const ix1 = Math.min(width - 1, s.maxX);
+  const iy0 = Math.max(0, s.minY);
+  const iy1 = Math.min(height - 1, s.maxY);
+  if (x1 <= x0 || y1 <= y0) return null;
+  let sum = 0;
+  let n = 0;
+  const accumulateSpan = (y, from, to) => {
+    if (y < 0 || y >= height || to < from) return;
+    const row = y * width;
+    for (let x = from; x <= to; x++) {
+      sum += gray[row + x];
+      n++;
+    }
   };
+  for (let y = y0; y < iy0; y++) accumulateSpan(y, x0, x1);
+  for (let y = iy1 + 1; y <= y1; y++) accumulateSpan(y, x0, x1);
+  for (let y = iy0; y <= iy1; y++) {
+    accumulateSpan(y, x0, ix0 - 1);
+    accumulateSpan(y, ix1 + 1, x1);
+  }
+  return n === 0 ? null : sum / n;
+}
+function clamp01(v) {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+function classifyKind(widthLogical, heightLogical, solidity, stddev) {
+  const aspect = widthLogical / Math.max(1, heightLogical);
+  const area = widthLogical * heightLogical;
+  if (heightLogical <= 28 && aspect >= 2) return "text";
+  if (widthLogical <= 60 && heightLogical <= 60 && aspect >= 0.5 && aspect <= 2) return "icon";
+  if (heightLogical <= 120 && area <= 9e4) return "control";
+  if (heightLogical <= 200 && solidity >= 0.75 && stddev < 45) return "control";
+  return "region";
+}
+function intersectionOverUnion(a, b) {
+  const x1 = Math.max(a.x, b.x);
+  const y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.width, b.x + b.width);
+  const y2 = Math.min(a.y + a.height, b.y + b.height);
+  if (x2 <= x1 || y2 <= y1) return 0;
+  const inter = (x2 - x1) * (y2 - y1);
+  const union2 = a.width * a.height + b.width * b.height - inter;
+  return union2 <= 0 ? 0 : inter / union2;
+}
+function containmentRatio(inner, outer) {
+  const x1 = Math.max(inner.x, outer.x);
+  const y1 = Math.max(inner.y, outer.y);
+  const x2 = Math.min(inner.x + inner.width, outer.x + outer.width);
+  const y2 = Math.min(inner.y + inner.height, outer.y + outer.height);
+  if (x2 <= x1 || y2 <= y1) return 0;
+  const area = inner.width * inner.height;
+  return area <= 0 ? 0 : (x2 - x1) * (y2 - y1) / area;
+}
+function sameElement(a, b) {
+  const x1 = Math.max(a.x, b.x);
+  const y1 = Math.max(a.y, b.y);
+  const x2 = Math.min(a.x + a.width, b.x + b.width);
+  const y2 = Math.min(a.y + a.height, b.y + b.height);
+  if (x2 <= x1 || y2 <= y1) return false;
+  const inter = (x2 - x1) * (y2 - y1);
+  return inter / Math.max(1, a.width * a.height) > 0.8 && inter / Math.max(1, b.width * b.height) > 0.8;
+}
+function mergeTextLines(items, width) {
+  const maxHeight = Math.max(6, Math.round(width * 0.03));
+  const textIndices = [];
+  for (let i = 0; i < items.length; i++) {
+    const s = items[i];
+    const h = s.maxY - s.minY + 1;
+    const w = s.maxX - s.minX + 1;
+    if (h <= maxHeight && w / h >= 0.3) textIndices.push(i);
+  }
+  if (textIndices.length < 2) return items;
+  const textLike = textIndices.map((i) => items[i]);
+  const order = textLike.map((s, i) => i).sort((a, b) => textLike[a].minY - textLike[b].minY || textLike[a].minX - textLike[b].minX);
+  const sorted = order.map((i) => textLike[i]);
+  const isText = new Set(textIndices);
+  const used = new Uint8Array(sorted.length);
+  const merged = [];
+  for (let si = 0; si < sorted.length; si++) {
+    if (used[si] === 1) continue;
+    used[si] = 1;
+    const seed = sorted[si];
+    let box = { ...seed };
+    let grew = true;
+    while (grew) {
+      grew = false;
+      const boxH = box.maxY - box.minY + 1;
+      const gapLimit = Math.max(3, Math.round(boxH * 0.9));
+      const yTolerance = Math.max(2, Math.round(boxH * 0.6));
+      for (let oi = si + 1; oi < sorted.length; oi++) {
+        if (used[oi] === 1) continue;
+        const other = sorted[oi];
+        if (other.minY > box.maxY + yTolerance) break;
+        const otherH = other.maxY - other.minY + 1;
+        const vertOverlap = Math.min(box.maxY, other.maxY) - Math.max(box.minY, other.minY) + 1;
+        if (vertOverlap < Math.min(boxH, otherH) * 0.55) continue;
+        const gap = other.minX > box.maxX ? other.minX - box.maxX : box.minX > other.maxX ? box.minX - other.maxX : 0;
+        if (gap > gapLimit) continue;
+        box = {
+          minX: Math.min(box.minX, other.minX),
+          minY: Math.min(box.minY, other.minY),
+          maxX: Math.max(box.maxX, other.maxX),
+          maxY: Math.max(box.maxY, other.maxY),
+          pixels: box.pixels + other.pixels
+        };
+        used[oi] = 1;
+        grew = true;
+      }
+    }
+    merged.push(box);
+  }
+  const rest = [];
+  for (let i = 0; i < items.length; i++) {
+    if (!isText.has(i)) rest.push(items[i]);
+  }
+  return [...rest, ...merged];
+}
+function chooseWorkSize(cropW, cropH) {
+  if (cropW * cropH <= MAX_WORK_PIXELS) return { width: cropW, height: cropH };
+  for (let k = 2; k <= 8; k++) {
+    if (cropW % k === 0 && cropH % k === 0 && cropW / k * (cropH / k) <= MAX_WORK_PIXELS) {
+      return { width: cropW / k, height: cropH / k };
+    }
+  }
+  const s = Math.sqrt(MAX_WORK_PIXELS / (cropW * cropH));
+  return { width: Math.max(8, Math.round(cropW * s)), height: Math.max(8, Math.round(cropH * s)) };
+}
+function detectUiElements(frame, options = {}) {
+  const maxMarks = Math.max(1, Math.min(200, options.maxMarks ?? 40));
+  const minArea = Math.max(1, options.minArea ?? 144);
+  const maxAreaFraction = Math.min(1, Math.max(0.02, options.maxAreaFraction ?? 0.55));
+  const minScore = Math.min(1, Math.max(0, options.minScore ?? 0.3));
+  const edgeThreshold = Math.max(2, Math.min(255, options.edgeThreshold ?? 30));
+  const dilateRadius = Math.max(0, Math.min(6, options.dilateRadius ?? 2));
+  const mergeText = options.mergeTextLines ?? true;
+  const kindFilter = options.kinds && options.kinds.length > 0 ? new Set(options.kinds) : null;
+  if (frame.width <= 0 || frame.height <= 0 || frame.data.length < frame.width * frame.height * 4) {
+    return [];
+  }
+  const sr = options.searchRegion;
+  let cropX = 0;
+  let cropY = 0;
+  let cropW = frame.width;
+  let cropH = frame.height;
+  if (sr) {
+    cropX = Math.max(0, Math.min(frame.width - 1, Math.round(sr.x)));
+    cropY = Math.max(0, Math.min(frame.height - 1, Math.round(sr.y)));
+    cropW = Math.max(1, Math.min(frame.width - cropX, Math.round(sr.width)));
+    cropH = Math.max(1, Math.min(frame.height - cropY, Math.round(sr.height)));
+  }
+  const cropped = cropW === frame.width && cropH === frame.height ? null : cropRgba(frame.data, frame.width, frame.height, cropX, cropY, cropW, cropH);
+  const srcRgba = cropped ? cropped.data : frame.data;
+  const srcW = cropped ? cropped.width : frame.width;
+  const srcH = cropped ? cropped.height : frame.height;
+  cropX = cropped ? cropped.x : cropX;
+  cropY = cropped ? cropped.y : cropY;
+  const target = chooseWorkSize(srcW, srcH);
+  const workW = target.width;
+  const workH = target.height;
+  const work = workW === srcW && workH === srcH ? srcRgba : resizeRgba(srcRgba, srcW, srcH, workW, workH);
+  const gray = toGrayscale(work, workW * workH);
+  const { edge, count } = buildEdgeMap(gray, workW, workH, edgeThreshold);
+  const workPixels = workW * workH;
+  if (count > workPixels * MAX_EDGE_DENSITY) return [];
+  const grown = dilate(edge, count, workW, workH, dilateRadius);
+  let components = labelComponents(grown.map, grown.positions, grown.count, workW, workH);
+  if (components.length === 0) return [];
+  if (mergeText) components = mergeTextLines(components, workW);
+  const pxToLogicalX = (wx) => frame.originX + (cropX + wx * (srcW / workW)) / Math.max(1, frame.width) * frame.logicalWidth;
+  const pxToLogicalY = (wy) => frame.originY + (cropY + wy * (srcH / workH)) / Math.max(1, frame.height) * frame.logicalHeight;
+  const frameLogicalArea = Math.max(1, frame.logicalWidth * frame.logicalHeight);
+  const candidates = [];
+  for (const s of components) {
+    const bw = s.maxX - s.minX + 1;
+    const bh = s.maxY - s.minY + 1;
+    if (bw < 4 || bh < 4) continue;
+    const lx = pxToLogicalX(s.minX);
+    const ly = pxToLogicalY(s.minY);
+    const lw = Math.max(1, pxToLogicalX(s.maxX + 1) - lx);
+    const lh = Math.max(1, pxToLogicalY(s.maxY + 1) - ly);
+    const logicalArea = lw * lh;
+    if (logicalArea < minArea || logicalArea > frameLogicalArea * maxAreaFraction) continue;
+    const aspect = lw / lh;
+    if (aspect > 24 || aspect < 1 / 24) continue;
+    const solidity = clamp01(s.pixels / (bw * bh));
+    const rect = perimeterEdgeDensity(grown.map, workW, s);
+    const inner = boxLuminance(gray, workW, workH, s.minX + 2, s.minY + 2, s.maxX - 2, s.maxY - 2);
+    const surround = surroundLuminance(gray, workW, workH, s);
+    const rectScore = clamp01(rect * 1.3);
+    const solidityScore = clamp01(solidity * 1.5);
+    const flatnessScore = clamp01(1 - inner.stddev / 85);
+    const contrastScore = surround === null ? 0 : clamp01(Math.abs(inner.mean - surround) / 70);
+    const aspectScore = aspect >= 0.8 && aspect <= 8 ? 1 : aspect > 8 ? clamp01(1 - (aspect - 8) / 16) : clamp01(aspect / 0.8);
+    const heightScore = lh >= 14 && lh <= 110 ? 1 : lh < 14 ? clamp01(lh / 14) : clamp01(1 - (lh - 110) / 400);
+    const areaScore = logicalArea >= 600 && logicalArea <= 6e4 ? 1 : logicalArea < 600 ? clamp01(logicalArea / 600) : clamp01(1 - (logicalArea - 6e4) / 24e4);
+    const raw = 0.24 * rectScore + 0.2 * contrastScore + 0.14 * flatnessScore + 0.12 * solidityScore + 0.12 * aspectScore + 0.1 * heightScore + 0.08 * areaScore;
+    const kind = classifyKind(lw, lh, solidity, inner.stddev);
+    if (kindFilter && !kindFilter.has(kind)) continue;
+    const score = Math.round(clamp01(kind === "text" ? raw * 0.86 : raw) * 1e3) / 1e3;
+    if (score < minScore) continue;
+    candidates.push({
+      index: 0,
+      x: Math.round(lx),
+      y: Math.round(ly),
+      width: Math.round(lw),
+      height: Math.round(lh),
+      centerX: Math.round(lx + lw / 2),
+      centerY: Math.round(ly + lh / 2),
+      score,
+      kind
+    });
+  }
+  if (candidates.length === 0) return [];
+  candidates.sort((a, b) => b.score - a.score || a.y - b.y || a.x - b.x);
+  const dedupCap = maxMarks * 4;
+  const deduped = [];
+  for (const c of candidates) {
+    if (deduped.length >= dedupCap) break;
+    if (!deduped.some((k) => intersectionOverUnion(c, k) > 0.5 || sameElement(c, k))) deduped.push(c);
+  }
+  const kept = deduped.filter(
+    (c) => c.kind === "control" || c.kind === "region" || !deduped.some((k) => k !== c && k.kind === "control" && containmentRatio(c, k) >= 0.8)
+  );
+  const numbered = kept.slice(0, maxMarks);
+  numbered.sort((a, b) => a.y - b.y || a.x - b.x);
+  for (let i = 0; i < numbered.length; i++) numbered[i].index = i + 1;
+  return numbered;
+}
+function resolveMarkCenter(elements, index) {
+  const found = elements.find((e) => e.index === index);
+  if (!found) {
+    const available = elements.map((e) => e.index).join(", ");
+    throw new Error(
+      `Mark #${index} is not available. Call handy_see with marks: true again and use one of: ${available || "(none detected)"}.`
+    );
+  }
+  return { x: found.centerX, y: found.centerY };
 }
 
 // src/overlay.ts
@@ -31552,6 +32525,32 @@ function chooseGridStep(logicalWidth, logicalHeight) {
   }
   return 1e3;
 }
+var MARK_COLORS = {
+  control: {
+    line: [139, 92, 246, 235],
+    bg: [46, 16, 101, 235],
+    fg: [237, 233, 254, 255],
+    border: [167, 139, 250, 255]
+  },
+  text: {
+    line: [100, 116, 139, 205],
+    bg: [15, 23, 42, 220],
+    fg: [226, 232, 240, 255],
+    border: [148, 163, 184, 255]
+  },
+  icon: {
+    line: [236, 72, 153, 230],
+    bg: [80, 7, 36, 235],
+    fg: [252, 231, 243, 255],
+    border: [249, 168, 212, 255]
+  },
+  region: {
+    line: [148, 163, 184, 170],
+    bg: [15, 23, 42, 210],
+    fg: [203, 213, 225, 255],
+    border: [148, 163, 184, 255]
+  }
+};
 function renderScreenOverlay(rgba, imageWidth, imageHeight, options) {
   const drawGrid = options.grid ?? true;
   const drawMouse = options.showMouse ?? true;
@@ -31672,6 +32671,29 @@ function renderScreenOverlay(rgba, imageWidth, imageHeight, options) {
       padX: 3,
       padY: 2
     });
+  }
+  if (options.marks && options.marks.length > 0) {
+    for (const el of options.marks) {
+      const x1 = Math.max(0, Math.min(imageWidth - 1, toImgX(el.x)));
+      const y1 = Math.max(0, Math.min(imageHeight - 1, toImgY(el.y)));
+      const x2 = Math.max(x1 + 2, Math.min(imageWidth, toImgX(el.x + el.width)));
+      const y2 = Math.max(y1 + 2, Math.min(imageHeight, toImgY(el.y + el.height)));
+      const palette = MARK_COLORS[el.kind] ?? MARK_COLORS.control;
+      strokeRect(rgba, imageWidth, imageHeight, x1, y1, x2 - x1, y2 - y1, palette.line, 1);
+      const label = String(el.index);
+      const badgeW = measureText(label, 1).width + 6;
+      const badgeH = 11;
+      let bx = Math.min(imageWidth - badgeW - 1, Math.max(35, x1));
+      let by = y1 - badgeH - 1;
+      if (by < 16) by = Math.min(imageHeight - badgeH - 1, y1 + 1);
+      drawBadge(rgba, imageWidth, imageHeight, bx, by, label, {
+        bg: palette.bg,
+        fg: palette.fg,
+        border: palette.border,
+        padX: 3,
+        padY: 2
+      });
+    }
   }
   if (options.trail && options.trail.length > 0) {
     const amberRing = [245, 158, 11, 235];
@@ -32024,6 +33046,17 @@ function sleepAbortable(ms, signal) {
 function isTopLeftCorner(p) {
   return p.x <= 2 && p.y <= 2;
 }
+function fittsDurationMs(from, to, targetWidth = 24, a = 60, b = 110) {
+  const distance = Math.hypot(to.x - from.x, to.y - from.y);
+  if (distance < 2) return 0;
+  const width = Math.max(4, targetWidth);
+  const ms = a + b * Math.log2(distance / width + 1);
+  return Math.round(Math.max(0, Math.min(1200, ms)));
+}
+function bezier1d(p0, p1, p2, p3, t) {
+  const mt = 1 - t;
+  return mt * mt * mt * p0 + 3 * mt * mt * t * p1 + 3 * mt * t * t * p2 + t * t * t * p3;
+}
 var HandyController = class _HandyController {
   backend;
   permissions;
@@ -32032,6 +33065,7 @@ var HandyController = class _HandyController {
   queueTail = Promise.resolve();
   queuedCount = 0;
   lastSeenFrame = null;
+  lastElements = null;
   lastObservedMouse = null;
   lastCommandedTarget = null;
   static MAX_QUEUED_CHAINS = 8;
@@ -32146,7 +33180,7 @@ var HandyController = class _HandyController {
       const label = typeof query === "string" ? query : query.title ?? query.app ?? String(query.id ?? "");
       throw new Error(`No visible window with bounds matched "${label}".`);
     }
-    const disp = displays.find((d) => d.id === (displayIndex ?? 0)) ?? displays[0];
+    const disp = pickDisplay(displays, displayIndex);
     if (!disp) return match.bounds;
     const x1 = Math.max(disp.x, match.bounds.x);
     const y1 = Math.max(disp.y, match.bounds.y);
@@ -32187,6 +33221,21 @@ var HandyController = class _HandyController {
     } else {
       rgba = new Uint8Array(frame.data);
     }
+    let elements;
+    let marksError;
+    if (options.marks) {
+      try {
+        elements = detectUiElements(frame, {
+          maxMarks: options.maxMarks,
+          kinds: options.markKinds,
+          minScore: options.minMarkScore
+        });
+        this.lastElements = elements;
+      } catch (error62) {
+        this.lastElements = null;
+        marksError = error62 instanceof Error ? error62.message : String(error62);
+      }
+    }
     const overlayMeta = renderScreenOverlay(rgba, outWidth, outHeight, {
       originX: frame.originX,
       originY: frame.originY,
@@ -32197,7 +33246,8 @@ var HandyController = class _HandyController {
       gridStep: options.gridStep,
       showMouse: options.showMouse ?? true,
       trail: options.trail,
-      diffBounds: options.highlightDiff && screenDiff?.changedBounds ? screenDiff.changedBounds : null
+      diffBounds: options.highlightDiff && screenDiff?.changedBounds ? screenDiff.changedBounds : null,
+      marks: elements
     });
     const pngBuffer = encodePng(outWidth, outHeight, rgba, { compressionLevel: 3 });
     const captureMs = Math.round((performance.now() - t0) * 10) / 10;
@@ -32225,6 +33275,8 @@ var HandyController = class _HandyController {
       activeWindow,
       screenDiff,
       gridStep: overlayMeta.gridStep,
+      ...elements ? { elements } : {},
+      ...marksError ? { marksError } : {},
       coordinateSpace: "screen",
       captureMs,
       timestamp: (/* @__PURE__ */ new Date()).toISOString()
@@ -32272,6 +33324,65 @@ var HandyController = class _HandyController {
     await this.backend.moveMouse(rx, ry);
     this.lastObservedMouse = { x: rx, y: ry };
   }
+  /** Most recent Set-of-Mark elements, cleared whenever a capture runs without `marks`. */
+  get detectedElements() {
+    return this.lastElements;
+  }
+  /**
+   * Resolves a mark index to a point, detecting elements from the current screen when no marked
+   * capture has happened in this process yet.
+   *
+   * Marks live on the controller instance, and every CLI invocation is a fresh process — so
+   * without this, `handy see --marks` followed by `handy act 'click mark 5'` could never work:
+   * the second command would have nothing to resolve against. Detecting on demand makes a mark
+   * reference self-sufficient from every entry point (CLI, MCP, library) with no persisted state
+   * to go stale, and the indices then describe the screen as it is *now*, which is the only
+   * meaning they can safely have.
+   *
+   * This captures and detects directly rather than calling `see()`, skipping the overlay render
+   * and PNG encode that a detection-only pass would otherwise pay for.
+   */
+  async resolveMarkPoint(mark, displayIndex) {
+    if (!this.lastElements || this.lastElements.length === 0) {
+      let frame;
+      try {
+        frame = await this.backend.captureScreen({ display: displayIndex });
+      } catch (error62) {
+        throw new Error(
+          `Cannot resolve mark #${mark}: no elements were detected in this session and the screen could not be captured to detect them now (${error62 instanceof Error ? error62.message : String(error62)}). Pass explicit x/y coordinates instead.`
+        );
+      }
+      let detected;
+      try {
+        detected = detectUiElements(frame);
+      } catch (error62) {
+        throw new Error(
+          `Cannot resolve mark #${mark}: UI element detection failed (${error62 instanceof Error ? error62.message : String(error62)}). Pass explicit x/y coordinates instead.`
+        );
+      }
+      if (detected.length === 0) {
+        throw new Error(
+          `Cannot resolve mark #${mark}: no UI elements were detected on the current screen. Pass explicit x/y coordinates, or capture a window/region first so detection has a denser, higher-resolution frame to work with.`
+        );
+      }
+      this.lastElements = detected;
+    }
+    return resolveMarkCenter(this.lastElements, mark);
+  }
+  /**
+   * Resolves where a pointer step should go: an explicit `mark`, then explicit coordinates, then
+   * "wherever the cursor already is". `via` lets receipts record which route was taken.
+   */
+  async resolveStepTarget(step, displayIndex, cachedDisplays) {
+    if (step.mark !== void 0) {
+      return { point: await this.resolveMarkPoint(step.mark, displayIndex), displays: cachedDisplays, via: "mark" };
+    }
+    if (step.x !== void 0 && step.y !== void 0) {
+      const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, displayIndex, cachedDisplays);
+      return { point: res.point, displays: res.displays, via: "coords" };
+    }
+    return { point: null, displays: cachedDisplays, via: null };
+  }
   async resolvePoint(x, y, space, displayIndex, cachedDisplays) {
     if (!space || space === "screen") {
       return { point: { x: Math.round(x), y: Math.round(y) }, displays: cachedDisplays };
@@ -32293,7 +33404,7 @@ var HandyController = class _HandyController {
       };
     }
     const displays = cachedDisplays ?? await this.backend.getDisplays();
-    const disp = displays.find((d) => d.id === (displayIndex ?? 0)) ?? displays[0];
+    const disp = pickDisplay(displays, displayIndex);
     if (!disp) {
       throw new Error("No display found for normalized coordinate conversion.");
     }
@@ -32307,9 +33418,16 @@ var HandyController = class _HandyController {
       displays
     };
   }
-  async interpolateMove(from, to, durationMs, steps, failsafe, signal) {
-    const count = steps ?? Math.max(2, Math.min(60, Math.round(durationMs / 10)));
+  async interpolateMove(from, to, durationMs, steps, failsafe, signal, motion = "ease") {
+    const count = steps ?? Math.max(2, Math.min(motion === "human" ? 90 : 60, Math.round(durationMs / 10)));
     const interval = durationMs / count;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const distance = Math.hypot(dx, dy);
+    const arc = motion === "human" ? Math.min(14, distance * 0.035) : 0;
+    const sign = (Math.round(from.x + from.y) & 1) === 0 ? 1 : -1;
+    const perpX = distance > 0 ? -dy / distance * arc * sign : 0;
+    const perpY = distance > 0 ? dx / distance * arc * sign : 0;
     for (let i = 1; i <= count; i++) {
       this.permissions.assertCanControl();
       if (signal?.aborted) throw new Error("Action chain aborted.");
@@ -32317,9 +33435,21 @@ var HandyController = class _HandyController {
         await this.checkFailsafe(failsafe);
       }
       const t = i / count;
-      const eased = 1 - (1 - t) * (1 - t);
-      const nx = Math.round(from.x + (to.x - from.x) * eased);
-      const ny = Math.round(from.y + (to.y - from.y) * eased);
+      let nx;
+      let ny;
+      if (motion === "linear") {
+        nx = Math.round(from.x + dx * t);
+        ny = Math.round(from.y + dy * t);
+      } else if (motion === "human") {
+        const eased = bezier1d(0, 0.42, 0.58, 1, t);
+        const bow = Math.sin(Math.PI * t);
+        nx = Math.round(from.x + dx * eased + perpX * bow);
+        ny = Math.round(from.y + dy * eased + perpY * bow);
+      } else {
+        const eased = 1 - (1 - t) * (1 - t);
+        nx = Math.round(from.x + dx * eased);
+        ny = Math.round(from.y + dy * eased);
+      }
       await this.commandMoveMouse(nx, ny);
       if (i < count && interval >= 1) {
         await sleepAbortable(interval, signal);
@@ -32335,7 +33465,7 @@ var HandyController = class _HandyController {
     try {
       for (let c = 1; c <= count; c++) {
         this.permissions.assertCanControl();
-        if (this.backend instanceof DarwinBackend) {
+        if (this.backend.nativeClickCount) {
           await this.backend.mouseDown(button, c, resolvedMods);
           this.heldButtons.add(button);
           await this.backend.mouseUp(button, c, resolvedMods);
@@ -32367,6 +33497,14 @@ var HandyController = class _HandyController {
     const screenshots = [];
     const trail = [];
     let cachedDisplays = null;
+    let verifyBaseline = null;
+    if (options.verifyChange) {
+      try {
+        verifyBaseline = await this.backend.captureScreen({ display: options.display });
+      } catch {
+        verifyBaseline = null;
+      }
+    }
     try {
       await this.checkFailsafe(failsafeEnabled);
       for (let i = 0; i < options.actions.length; i++) {
@@ -32387,21 +33525,39 @@ var HandyController = class _HandyController {
         switch (step.type) {
           case "move": {
             let target;
+            let via = "coords";
             if (step.relative) {
+              if (step.x === void 0 || step.y === void 0) {
+                throw new Error("A relative move step requires both x and y deltas.");
+              }
               const cur = await this.backend.getMousePosition();
               target = { x: Math.round(cur.x + step.x), y: Math.round(cur.y + step.y) };
+              via = "relative";
             } else {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
+              const res = await this.resolveStepTarget(step, options.display, cachedDisplays);
               cachedDisplays = res.displays;
+              if (!res.point) {
+                throw new Error("A move step requires either { x, y } or { mark }.");
+              }
               target = res.point;
+              via = res.via ?? "coords";
             }
-            if (step.durationMs && step.durationMs > 0) {
-              const startPos = await this.backend.getMousePosition();
-              await this.interpolateMove(startPos, target, step.durationMs, step.steps, failsafeEnabled, options.signal);
+            const startPos = await this.backend.getMousePosition();
+            const durationMs = step.durationMs ?? (step.motion === "human" ? fittsDurationMs(startPos, target) : 0);
+            if (durationMs > 0) {
+              await this.interpolateMove(
+                startPos,
+                target,
+                durationMs,
+                step.steps,
+                failsafeEnabled,
+                options.signal,
+                step.motion
+              );
             } else {
               await this.commandMoveMouse(target.x, target.y);
             }
-            detail = `moved to (${target.x},${target.y})`;
+            detail = via === "mark" ? `moved to mark #${step.mark} at (${target.x},${target.y})` : `moved to (${target.x},${target.y})`;
             break;
           }
           case "click":
@@ -32409,10 +33565,12 @@ var HandyController = class _HandyController {
           case "triple_click":
           case "right_click": {
             let clickPos;
-            if (step.x !== void 0 && step.y !== void 0) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
-              clickPos = res.point;
+            let clickVia = null;
+            const clickTarget = await this.resolveStepTarget(step, options.display, cachedDisplays);
+            cachedDisplays = clickTarget.displays;
+            if (clickTarget.point) {
+              clickPos = clickTarget.point;
+              clickVia = clickTarget.via;
               await this.commandMoveMouse(clickPos.x, clickPos.y);
               await sleepAbortable(6, options.signal);
             } else {
@@ -32427,13 +33585,13 @@ var HandyController = class _HandyController {
               x: clickPos.x,
               y: clickPos.y
             });
-            detail = `${button} click x${count} at (${clickPos.x},${clickPos.y})`;
+            detail = `${button} click x${count} at (${clickPos.x},${clickPos.y})${clickVia === "mark" ? ` (mark #${step.mark})` : ""}`;
             break;
           }
           case "mouse_down": {
-            if (step.x !== void 0 && step.y !== void 0) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
+            const res = await this.resolveStepTarget(step, options.display, cachedDisplays);
+            cachedDisplays = res.displays;
+            if (res.point) {
               await this.commandMoveMouse(res.point.x, res.point.y);
             }
             const btn = step.button ?? "left";
@@ -32443,9 +33601,9 @@ var HandyController = class _HandyController {
             break;
           }
           case "mouse_up": {
-            if (step.x !== void 0 && step.y !== void 0) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
+            const res = await this.resolveStepTarget(step, options.display, cachedDisplays);
+            cachedDisplays = res.displays;
+            if (res.point) {
               await this.commandMoveMouse(res.point.x, res.point.y);
             }
             const btn = step.button ?? "left";
@@ -32456,7 +33614,13 @@ var HandyController = class _HandyController {
           }
           case "drag": {
             let startPos;
-            if (step.fromX !== void 0 && step.fromY !== void 0) {
+            let dragFrom;
+            if (step.fromMark !== void 0) {
+              startPos = await this.resolveMarkPoint(step.fromMark, options.display);
+              dragFrom = `mark #${step.fromMark}`;
+              await this.commandMoveMouse(startPos.x, startPos.y);
+              await sleepAbortable(8, options.signal);
+            } else if (step.fromX !== void 0 && step.fromY !== void 0) {
               const fromRes = await this.resolvePoint(
                 step.fromX,
                 step.fromY,
@@ -32466,30 +33630,45 @@ var HandyController = class _HandyController {
               );
               cachedDisplays = fromRes.displays;
               startPos = fromRes.point;
+              dragFrom = `(${startPos.x},${startPos.y})`;
               await this.commandMoveMouse(startPos.x, startPos.y);
               await sleepAbortable(8, options.signal);
             } else {
               startPos = await this.backend.getMousePosition();
+              dragFrom = `current (${startPos.x},${startPos.y})`;
             }
-            const toRes = await this.resolvePoint(
-              step.toX,
-              step.toY,
-              step.coordinateSpace,
-              options.display,
-              cachedDisplays
-            );
-            cachedDisplays = toRes.displays;
+            let endPos;
+            let dragTo;
+            if (step.toMark !== void 0) {
+              endPos = await this.resolveMarkPoint(step.toMark, options.display);
+              dragTo = `mark #${step.toMark}`;
+            } else if (step.toX !== void 0 && step.toY !== void 0) {
+              const toRes = await this.resolvePoint(
+                step.toX,
+                step.toY,
+                step.coordinateSpace,
+                options.display,
+                cachedDisplays
+              );
+              cachedDisplays = toRes.displays;
+              endPos = toRes.point;
+              dragTo = `(${endPos.x},${endPos.y})`;
+            } else {
+              throw new Error("A drag step requires either { toX, toY } or { toMark }.");
+            }
             const btn = step.button ?? "left";
+            const dragDurationMs = step.durationMs ?? (step.motion === "human" ? Math.max(160, fittsDurationMs(startPos, endPos)) : 160);
             await this.backend.mouseDown(btn);
             this.heldButtons.add(btn);
             try {
               await this.interpolateMove(
                 startPos,
-                toRes.point,
-                step.durationMs ?? 160,
+                endPos,
+                dragDurationMs,
                 step.steps ?? 16,
                 failsafeEnabled,
-                options.signal
+                options.signal,
+                step.motion
               );
             } finally {
               await this.backend.mouseUp(btn);
@@ -32505,17 +33684,17 @@ var HandyController = class _HandyController {
               {
                 stepNumber: i + 1,
                 kind: "drag_end",
-                x: toRes.point.x,
-                y: toRes.point.y
+                x: endPos.x,
+                y: endPos.y
               }
             );
-            detail = `dragged (${startPos.x},${startPos.y}) -> (${toRes.point.x},${toRes.point.y})`;
+            detail = `dragged ${dragFrom} -> ${dragTo}`;
             break;
           }
           case "scroll": {
-            if (step.x !== void 0 && step.y !== void 0) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
+            const res = await this.resolveStepTarget(step, options.display, cachedDisplays);
+            cachedDisplays = res.displays;
+            if (res.point) {
               await this.commandMoveMouse(res.point.x, res.point.y);
             }
             const amount = step.amount ?? 3;
@@ -32526,7 +33705,8 @@ var HandyController = class _HandyController {
             else if (step.direction === "left") dx -= amount;
             else if (step.direction === "right") dx += amount;
             await this.backend.scroll(dx, dy);
-            detail = `scrolled dx=${dx} dy=${dy}`;
+            const scrollAt = res.point ? res.via === "mark" ? ` at mark #${step.mark} (${res.point.x},${res.point.y})` : ` at (${res.point.x},${res.point.y})` : " at the cursor";
+            detail = `scrolled dx=${dx} dy=${dy}${scrollAt}`;
             break;
           }
           case "type": {
@@ -32644,7 +33824,10 @@ var HandyController = class _HandyController {
             });
             const deadline = performance.now() + timeoutMs;
             let maxObserved = 0;
-            let matchedDiff = null;
+            let matched = false;
+            let matchedPercent = threshold;
+            let matchedPartial = false;
+            const pollOptions = { earlyExitPercent: threshold, computeBounds: false };
             while (performance.now() < deadline) {
               await sleepAbortable(pollMs, options.signal);
               this.permissions.assertCanControl();
@@ -32653,21 +33836,23 @@ var HandyController = class _HandyController {
                 display: options.display,
                 region: step.region
               });
-              const diff = computeFrameDiff(baseline, next);
+              const diff = computeFrameDiff(baseline, next, pollOptions);
               if (diff) {
-                if (diff.changedPercent > maxObserved) maxObserved = diff.changedPercent;
-                if (diff.changedPercent >= threshold) {
-                  matchedDiff = diff;
+                if (diff.partial || diff.changedPercent >= threshold) {
+                  matched = true;
+                  matchedPercent = Math.max(diff.changedPercent, threshold);
+                  matchedPartial = Boolean(diff.partial);
                   break;
                 }
+                if (diff.changedPercent > maxObserved) maxObserved = diff.changedPercent;
               }
             }
-            if (!matchedDiff) {
+            if (!matched) {
               throw new Error(
                 `Timed out after ${timeoutMs}ms waiting for screen change >= ${threshold}% (max observed: ${maxObserved}%).`
               );
             }
-            detail = `detected ${matchedDiff.changedPercent}% visual change`;
+            detail = matchedPartial ? `detected >= ${matchedPercent}% visual change` : `detected ${matchedPercent}% visual change`;
             break;
           }
           case "wait_for_settled": {
@@ -32682,6 +33867,7 @@ var HandyController = class _HandyController {
             const deadline = performance.now() + timeoutMs;
             let quietSince = performance.now();
             let settled = false;
+            const pollOptions = { earlyExitPercent: threshold, computeBounds: false };
             while (performance.now() < deadline) {
               await sleepAbortable(pollMs, options.signal);
               this.permissions.assertCanControl();
@@ -32690,9 +33876,9 @@ var HandyController = class _HandyController {
                 display: options.display,
                 region: step.region
               });
-              const diff = computeFrameDiff(prev, curr);
+              const diff = computeFrameDiff(prev, curr, pollOptions);
               prev = curr;
-              if (!diff || diff.changedPercent <= threshold) {
+              if (!diff || !diff.partial && diff.changedPercent < threshold) {
                 if (performance.now() - quietSince >= quietMs) {
                   settled = true;
                   break;
@@ -32716,7 +33902,7 @@ var HandyController = class _HandyController {
               cachedDisplays
             );
             cachedDisplays = resolved.displays ?? await this.backend.getDisplays();
-            const disp = cachedDisplays.find((d) => d.id === (options.display ?? 0)) ?? cachedDisplays[0];
+            const disp = pickDisplay(cachedDisplays, options.display);
             let sampleRegion;
             if (disp) {
               const rx1 = Math.max(disp.x, resolved.point.x - 1);
@@ -32766,7 +33952,11 @@ var HandyController = class _HandyController {
               showMouse: step.showMouse ?? options.showMouse ?? true,
               maxWidth: step.maxWidth ?? options.maxWidth,
               highlightDiff: step.highlightDiff ?? options.highlightDiff,
-              trail: showTrail && trail.length > 0 ? trail : void 0
+              trail: showTrail && trail.length > 0 ? trail : void 0,
+              marks: step.marks ?? options.marks,
+              maxMarks: step.maxMarks ?? options.maxMarks,
+              markKinds: options.markKinds,
+              minMarkScore: options.minMarkScore
             });
             if (step.label) shot.label = step.label;
             screenshots.push(shot);
@@ -32796,7 +33986,11 @@ var HandyController = class _HandyController {
           showMouse: options.showMouse ?? true,
           maxWidth: options.maxWidth,
           highlightDiff: options.highlightDiff,
-          trail: showTrail && trail.length > 0 ? trail : void 0
+          trail: showTrail && trail.length > 0 ? trail : void 0,
+          marks: options.marks,
+          maxMarks: options.maxMarks,
+          markKinds: options.markKinds,
+          minMarkScore: options.minMarkScore
         });
         postShot.label = "after";
         screenshots.push(postShot);
@@ -32806,6 +34000,15 @@ var HandyController = class _HandyController {
         this.backend.getActiveWindow ? this.backend.getActiveWindow().catch(() => null) : Promise.resolve(null)
       ]);
       this.lastObservedMouse = { ...finalMouse };
+      let change = null;
+      if (verifyBaseline) {
+        try {
+          const after = await this.backend.captureScreen({ display: options.display });
+          change = computeFrameDiff(verifyBaseline, after);
+        } catch {
+          change = null;
+        }
+      }
       const totalDurationMs = Math.round((performance.now() - chainStart) * 10) / 10;
       return {
         ok: true,
@@ -32814,7 +34017,8 @@ var HandyController = class _HandyController {
         mouse: finalMouse,
         activeWindow,
         receipts,
-        screenshots
+        screenshots,
+        ...verifyBaseline ? { change, changed: change !== null && change.changedPixels > 0 } : {}
       };
     } catch (err) {
       await this.releaseHeldInputs();
@@ -32924,56 +34128,111 @@ function parseChainInput(input2) {
       }
       return null;
     };
+    const takeTarget = (pos) => {
+      const tok = tokens[pos.i];
+      if (tok === void 0) return null;
+      const hash2 = /^#(\d+)$/.exec(tok);
+      if (hash2) {
+        pos.i += 1;
+        return { mark: Number(hash2[1]) };
+      }
+      const keyword = tok.toLowerCase();
+      if (keyword === "mark" || keyword === "m" || keyword === "#") {
+        const raw = tokens[pos.i + 1];
+        const index = raw === void 0 ? Number.NaN : Number(raw);
+        if (!Number.isInteger(index) || index < 1) {
+          throw new Error(
+            `Invalid mark reference in "${seg}". Expected a mark index of 1 or more after "${tok}", e.g. "${cmd} mark 5". Run handy_see with marks:true (or "handy see --marks") to list the available marks.`
+          );
+        }
+        pos.i += 2;
+        return { mark: index };
+      }
+      const comma = parseCoords(tok, void 0);
+      if (comma) {
+        pos.i += 1;
+        return { x: comma[0], y: comma[1] };
+      }
+      const pair = parseCoords(tok, tokens[pos.i + 1]);
+      if (pair) {
+        pos.i += 2;
+        return { x: pair[0], y: pair[1] };
+      }
+      return null;
+    };
+    const requireTarget = (stepName, allowBare) => {
+      const pos = { i: 1 };
+      const target = takeTarget(pos);
+      if (!target) {
+        if (allowBare && tokens.length === 1) return null;
+        throw new Error(
+          `Invalid ${stepName} step "${seg}". Expected "${stepName} <x> <y>", "${stepName} mark <n>",` + (allowBare ? ` or "${stepName}" to act at the current cursor position.` : ` or "${stepName} <x> <y>".`)
+        );
+      }
+      if (pos.i !== tokens.length) {
+        throw new Error(`Unexpected trailing argument "${tokens[pos.i]}" in ${stepName} step "${seg}".`);
+      }
+      return target;
+    };
     switch (cmd) {
       case "move": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        if (!coords) throw new Error(`Invalid move step "${seg}". Expected: move <x> <y>`);
-        return { type: "move", x: coords[0], y: coords[1] };
+        const target = requireTarget("move", false);
+        return { type: "move", ...target };
       }
       case "click": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "click", x: coords[0], y: coords[1] } : { type: "click" };
+        const target = requireTarget("click", true);
+        return target ? { type: "click", ...target } : { type: "click" };
       }
       case "double_click":
       case "doubleclick":
       case "dblclick": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "double_click", x: coords[0], y: coords[1] } : { type: "double_click" };
+        const target = requireTarget("double_click", true);
+        return target ? { type: "double_click", ...target } : { type: "double_click" };
       }
       case "triple_click":
       case "tripleclick": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "triple_click", x: coords[0], y: coords[1] } : { type: "triple_click" };
+        const target = requireTarget("triple_click", true);
+        return target ? { type: "triple_click", ...target } : { type: "triple_click" };
       }
       case "right_click":
       case "rightclick":
       case "rclick": {
-        const coords = parseCoords(tokens[1], tokens[2]);
-        return coords ? { type: "right_click", x: coords[0], y: coords[1] } : { type: "right_click" };
+        const target = requireTarget("right_click", true);
+        return target ? { type: "right_click", ...target } : { type: "right_click" };
       }
       case "drag": {
-        if (tokens.length >= 5) {
-          return {
-            type: "drag",
-            fromX: Number(tokens[1]),
-            fromY: Number(tokens[2]),
-            toX: Number(tokens[3]),
-            toY: Number(tokens[4])
-          };
+        const usage = `Invalid drag step "${seg}". Expected "drag <toX> <toY>", "drag <fromX> <fromY> <toX> <toY>", or the mark forms "drag mark <n>" / "drag mark <n> mark <m>".`;
+        const pos = { i: 1 };
+        const targets = [];
+        while (pos.i < tokens.length) {
+          const target = takeTarget(pos);
+          if (!target) throw new Error(usage);
+          targets.push(target);
         }
-        const coords = parseCoords(tokens[1], tokens[2]);
-        if (!coords) throw new Error(`Invalid drag step "${seg}". Expected: drag [fromX fromY] <toX> <toY>`);
-        return { type: "drag", toX: coords[0], toY: coords[1] };
+        if (targets.length === 0 || targets.length > 2) throw new Error(usage);
+        const asFrom = (t) => "mark" in t ? { fromMark: t.mark } : { fromX: t.x, fromY: t.y };
+        const asTo = (t) => "mark" in t ? { toMark: t.mark } : { toX: t.x, toY: t.y };
+        if (targets.length === 1) return { type: "drag", ...asTo(targets[0]) };
+        return { type: "drag", ...asFrom(targets[0]), ...asTo(targets[1]) };
       }
       case "scroll": {
         const dir = tokens[1]?.toLowerCase();
         if (dir === "up" || dir === "down" || dir === "left" || dir === "right") {
-          const amount = tokens[2] ? Number(tokens[2]) : 3;
-          return { type: "scroll", direction: dir, amount };
+          const amountToken = tokens[2];
+          const hasAmount = amountToken !== void 0 && !Number.isNaN(Number(amountToken));
+          const amount = hasAmount ? Number(amountToken) : 3;
+          const pos = { i: hasAmount ? 3 : 2 };
+          const at = takeTarget(pos);
+          if (pos.i !== tokens.length) {
+            throw new Error(`Unexpected trailing argument "${tokens[pos.i]}" in scroll step "${seg}".`);
+          }
+          return { type: "scroll", direction: dir, amount, ...at ?? {} };
         }
         const coords = parseCoords(tokens[1], tokens[2]);
         if (coords) return { type: "scroll", deltaX: coords[0], deltaY: coords[1] };
-        throw new Error(`Invalid scroll step "${seg}". Expected: scroll <up|down|left|right> [amount]`);
+        throw new Error(
+          `Invalid scroll step "${seg}". Expected: scroll <up|down|left|right> [amount] [<x> <y> | mark <n>]`
+        );
       }
       case "type": {
         const rawAfterCmd = seg.replace(/^type\s+/i, "");
@@ -33080,14 +34339,31 @@ function buildHandyMcpEntry(platform = process.platform) {
   };
 }
 function readJsonObject(filePath) {
-  if (!existsSync3(filePath)) return {};
-  const raw = readFileSync5(filePath, "utf8").trim();
-  if (!raw) return {};
-  const parsed = JSON.parse(raw);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`Expected JSON object in ${filePath}`);
+  if (!existsSync3(filePath)) return { doc: {} };
+  let raw;
+  try {
+    raw = readFileSync5(filePath, "utf8").trim();
+  } catch (error62) {
+    return { error: `Could not read ${filePath}: ${error62 instanceof Error ? error62.message : String(error62)}` };
   }
-  return parsed;
+  if (!raw) return { doc: {} };
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error62) {
+    return {
+      error: `${filePath} is not valid JSON (${error62 instanceof Error ? error62.message : String(error62)}). Fix or remove the file, then re-run; Handy left it untouched.`
+    };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: `Expected a JSON object in ${filePath}` };
+  }
+  return { doc: parsed };
+}
+function backupOnce(configPath) {
+  const backupPath = `${configPath}.handy.bak`;
+  if (!existsSync3(backupPath)) copyFileSync(configPath, backupPath);
+  return backupPath;
 }
 function atomicWriteJson(filePath, data) {
   const dir = dirname(filePath);
@@ -33117,7 +34393,12 @@ function installHandyToHosts(target = "all", env = {}) {
       continue;
     }
     const fileExisted = existsSync3(configPath);
-    const doc = readJsonObject(configPath);
+    const read = readJsonObject(configPath);
+    if ("error" in read) {
+      results.push({ host, configPath, action: "skipped", dryRun, detail: read.error });
+      continue;
+    }
+    const doc = read.doc;
     const servers = doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers) ? { ...doc.mcpServers } : {};
     const prev = JSON.stringify(servers.handy ?? null);
     const next = JSON.stringify(entry);
@@ -33135,10 +34416,7 @@ function installHandyToHosts(target = "all", env = {}) {
     const updatedDoc = { ...doc, mcpServers: servers };
     let backupPath;
     if (!dryRun) {
-      if (fileExisted) {
-        backupPath = `${configPath}.handy.bak`;
-        copyFileSync(configPath, backupPath);
-      }
+      if (fileExisted) backupPath = backupOnce(configPath);
       atomicWriteJson(configPath, updatedDoc);
     }
     results.push({
@@ -33168,7 +34446,12 @@ function uninstallHandyFromHosts(target = "all", env = {}) {
       });
       continue;
     }
-    const doc = readJsonObject(configPath);
+    const read = readJsonObject(configPath);
+    if ("error" in read) {
+      results.push({ host, configPath, action: "skipped", dryRun, detail: read.error });
+      continue;
+    }
+    const doc = read.doc;
     const servers = doc.mcpServers && typeof doc.mcpServers === "object" && !Array.isArray(doc.mcpServers) ? { ...doc.mcpServers } : {};
     if (!("handy" in servers)) {
       results.push({
@@ -33184,8 +34467,7 @@ function uninstallHandyFromHosts(target = "all", env = {}) {
     const updatedDoc = { ...doc, mcpServers: servers };
     let backupPath;
     if (!dryRun) {
-      backupPath = `${configPath}.handy.bak`;
-      copyFileSync(configPath, backupPath);
+      backupPath = backupOnce(configPath);
       atomicWriteJson(configPath, updatedDoc);
     }
     results.push({
@@ -42882,189 +44164,8 @@ var StdioServerTransport = class {
   }
 };
 
-// src/types.ts
-var MouseButtonSchema = external_exports.enum(["left", "right", "middle"]);
-var ModifierKeySchema = external_exports.enum(["ctrl", "alt", "shift", "meta", "mod"]);
-var CoordinateSpaceSchema = external_exports.enum(["screen", "normalized", "window"]);
-var RegionSchema = external_exports.object({
-  x: external_exports.number().int().describe("Left X coordinate in screen pixels"),
-  y: external_exports.number().int().describe("Top Y coordinate in screen pixels"),
-  width: external_exports.number().int().min(1).max(16384).describe("Region width in screen pixels"),
-  height: external_exports.number().int().min(1).max(16384).describe("Region height in screen pixels")
-});
-var MoveStepSchema = external_exports.object({
-  type: external_exports.literal("move"),
-  x: external_exports.number().describe("Target X coordinate (or delta X when relative=true)"),
-  y: external_exports.number().describe("Target Y coordinate (or delta Y when relative=true)"),
-  relative: external_exports.boolean().optional().describe("Move relative to current mouse position"),
-  durationMs: external_exports.number().min(0).max(1e4).optional().describe("Smooth movement duration in ms (0 = instant)"),
-  steps: external_exports.number().int().min(1).max(200).optional().describe("Interpolation steps when durationMs > 0"),
-  coordinateSpace: CoordinateSpaceSchema.optional().describe("screen (default) or normalized (0..1000)")
-});
-var ClickStepSchema = external_exports.object({
-  type: external_exports.literal("click"),
-  x: external_exports.number().optional().describe("Optional X coordinate to move to before clicking"),
-  y: external_exports.number().optional().describe("Optional Y coordinate to move to before clicking"),
-  button: MouseButtonSchema.optional().describe("Mouse button: left (default), right, or middle"),
-  count: external_exports.number().int().min(1).max(5).optional().describe("Click count (1 = single, 2 = double, 3 = triple)"),
-  modifiers: external_exports.array(ModifierKeySchema).optional().describe("Modifier keys held during click"),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var DoubleClickStepSchema = external_exports.object({
-  type: external_exports.literal("double_click"),
-  x: external_exports.number().optional().describe("Optional X coordinate to move to before double-clicking"),
-  y: external_exports.number().optional().describe("Optional Y coordinate to move to before double-clicking"),
-  button: MouseButtonSchema.optional(),
-  modifiers: external_exports.array(ModifierKeySchema).optional(),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var TripleClickStepSchema = external_exports.object({
-  type: external_exports.literal("triple_click"),
-  x: external_exports.number().optional().describe("Optional X coordinate to move to before triple-clicking"),
-  y: external_exports.number().optional().describe("Optional Y coordinate to move to before triple-clicking"),
-  modifiers: external_exports.array(ModifierKeySchema).optional(),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var RightClickStepSchema = external_exports.object({
-  type: external_exports.literal("right_click"),
-  x: external_exports.number().optional().describe("Optional X coordinate to move to before right-clicking"),
-  y: external_exports.number().optional().describe("Optional Y coordinate to move to before right-clicking"),
-  modifiers: external_exports.array(ModifierKeySchema).optional(),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var MouseDownStepSchema = external_exports.object({
-  type: external_exports.literal("mouse_down"),
-  x: external_exports.number().optional(),
-  y: external_exports.number().optional(),
-  button: MouseButtonSchema.optional(),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var MouseUpStepSchema = external_exports.object({
-  type: external_exports.literal("mouse_up"),
-  x: external_exports.number().optional(),
-  y: external_exports.number().optional(),
-  button: MouseButtonSchema.optional(),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var DragStepSchema = external_exports.object({
-  type: external_exports.literal("drag"),
-  fromX: external_exports.number().optional().describe("Start X (defaults to current mouse X)"),
-  fromY: external_exports.number().optional().describe("Start Y (defaults to current mouse Y)"),
-  toX: external_exports.number().describe("Destination X coordinate"),
-  toY: external_exports.number().describe("Destination Y coordinate"),
-  button: MouseButtonSchema.optional(),
-  durationMs: external_exports.number().min(0).max(1e4).optional().describe("Drag duration in ms (default 160)"),
-  steps: external_exports.number().int().min(2).max(200).optional().describe("Interpolation steps along drag path"),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var ScrollStepSchema = external_exports.object({
-  type: external_exports.literal("scroll"),
-  x: external_exports.number().optional().describe("Optional X to position cursor over before scrolling"),
-  y: external_exports.number().optional().describe("Optional Y to position cursor over before scrolling"),
-  deltaX: external_exports.number().optional().describe("Horizontal wheel ticks (+ right, - left)"),
-  deltaY: external_exports.number().optional().describe("Vertical wheel ticks (+ down, - up)"),
-  direction: external_exports.enum(["up", "down", "left", "right"]).optional().describe("Named scroll direction"),
-  amount: external_exports.number().min(1).max(100).optional().describe("Wheel ticks when using direction (default 3)"),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var TypeStepSchema = external_exports.object({
-  type: external_exports.literal("type"),
-  text: external_exports.string().max(1e4).describe("Text to type natively (supports Unicode and newlines)"),
-  delayMs: external_exports.number().min(0).max(1e3).optional().describe("Optional delay between characters in ms"),
-  submit: external_exports.boolean().optional().describe("Press Enter immediately after typing")
-});
-var PasteStepSchema = external_exports.object({
-  type: external_exports.literal("paste"),
-  text: external_exports.string().max(1e5).describe("Text to paste instantly via OS clipboard + mod+v (ideal for long text, URLs, or code)"),
-  restoreClipboard: external_exports.boolean().optional().describe("Restore previous clipboard text after pasting (default: true)"),
-  submit: external_exports.boolean().optional().describe("Press Enter immediately after pasting")
-});
-var KeyStepSchema = external_exports.object({
-  type: external_exports.literal("key"),
-  key: external_exports.string().min(1).max(100).describe(
-    "Key or chord, e.g. 'Enter', 'Tab', 'Escape', 'Backspace', 'ArrowDown', 'ctrl+c', 'mod+a', 'cmd+shift+p'"
-  ),
-  modifiers: external_exports.array(ModifierKeySchema).optional().describe("Optional modifiers held while pressing key"),
-  count: external_exports.number().int().min(1).max(50).optional().describe("Repeat count (default 1)")
-});
-var KeyDownStepSchema = external_exports.object({
-  type: external_exports.literal("key_down"),
-  key: external_exports.string().min(1).max(64).describe("Key to press and hold down")
-});
-var KeyUpStepSchema = external_exports.object({
-  type: external_exports.literal("key_up"),
-  key: external_exports.string().min(1).max(64).describe("Key to release")
-});
-var FocusWindowStepSchema = external_exports.object({
-  type: external_exports.literal("focus_window"),
-  title: external_exports.string().min(1).max(256).optional().describe("Case-insensitive substring of window title to focus"),
-  app: external_exports.string().min(1).max(256).optional().describe("Case-insensitive application/process name to focus"),
-  id: external_exports.union([external_exports.string(), external_exports.number()]).optional().describe("Exact window ID from handy_windows")
-});
-var WaitStepSchema = external_exports.object({
-  type: external_exports.literal("wait"),
-  ms: external_exports.number().min(0).max(3e4).describe("Milliseconds to wait (0..30000)")
-});
-var WaitForChangeStepSchema = external_exports.object({
-  type: external_exports.literal("wait_for_change"),
-  region: RegionSchema.optional().describe("Optional screen region to watch for visual change"),
-  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 3000)"),
-  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 60)"),
-  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Minimum changed pixel percentage to trigger completion (default: 0.05)")
-});
-var WaitForSettledStepSchema = external_exports.object({
-  type: external_exports.literal("wait_for_settled"),
-  region: RegionSchema.optional().describe("Optional screen region to wait until animations stop"),
-  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 3000)"),
-  quietMs: external_exports.number().min(30).max(2e3).optional().describe("Required visually quiet window in ms (default: 120)"),
-  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
-  threshold: external_exports.number().min(1e-3).max(100).optional().describe("Max changed pixel percentage treated as settled (default: 0.05)")
-});
-var WaitForColorStepSchema = external_exports.object({
-  type: external_exports.literal("wait_for_color"),
-  x: external_exports.number().int().describe("Target X coordinate of pixel to inspect"),
-  y: external_exports.number().int().describe("Target Y coordinate of pixel to inspect"),
-  color: external_exports.string().regex(/^#?(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/).describe("Expected hex color (#rrggbb or #rgb)"),
-  tolerance: external_exports.number().min(0).max(442).optional().describe("Allowed Euclidean RGB distance 0..442 (default: 24)"),
-  timeoutMs: external_exports.number().min(50).max(15e3).optional().describe("Max time to wait in ms (default: 5000)"),
-  pollMs: external_exports.number().min(20).max(1e3).optional().describe("Polling interval in ms (default: 80)"),
-  coordinateSpace: CoordinateSpaceSchema.optional()
-});
-var ScreenshotStepSchema = external_exports.object({
-  type: external_exports.literal("screenshot"),
-  region: RegionSchema.optional(),
-  window: external_exports.string().max(256).optional().describe("Optional window title substring to capture at 1:1 resolution"),
-  grid: external_exports.boolean().optional(),
-  showMouse: external_exports.boolean().optional(),
-  highlightDiff: external_exports.boolean().optional(),
-  maxWidth: external_exports.number().int().min(320).max(3840).optional(),
-  label: external_exports.string().max(120).optional().describe("Optional label identifying this mid-chain capture")
-});
-var ActionStepSchema = external_exports.discriminatedUnion("type", [
-  MoveStepSchema,
-  ClickStepSchema,
-  DoubleClickStepSchema,
-  TripleClickStepSchema,
-  RightClickStepSchema,
-  MouseDownStepSchema,
-  MouseUpStepSchema,
-  DragStepSchema,
-  ScrollStepSchema,
-  TypeStepSchema,
-  PasteStepSchema,
-  KeyStepSchema,
-  KeyDownStepSchema,
-  KeyUpStepSchema,
-  FocusWindowStepSchema,
-  WaitStepSchema,
-  WaitForChangeStepSchema,
-  WaitForSettledStepSchema,
-  WaitForColorStepSchema,
-  ScreenshotStepSchema
-]);
-
 // src/version.ts
-var HANDY_VERSION = "1.2.0";
+var HANDY_VERSION = "1.3.0";
 var HANDY_NAME = "handy";
 var HANDY_PACKAGE_NAME = "@miisodev/handy";
 
@@ -43136,7 +44237,7 @@ function createHandyMcpServer(options = {}) {
     "handy_see",
     {
       title: "See Computer Screen (Mapped Coordinates + Window Zoom + Diff)",
-      description: "Capture the computer screen (or a single desktop window via `window`) in real-time with mapped (x, y) coordinate rulers, dual-contrast grid labels, live mouse reticle, hex color under cursor, active window info, and visual diff since the previous capture (`changedPercent`, `changedBounds`). Use `region` or `window` to zoom into dense UI areas at 1:1 resolution while preserving global screen coordinates, and set `highlightDiff: true` to outline changed pixels.",
+      description: 'Capture the computer screen (or a single desktop window via `window`) in real-time with mapped (x, y) coordinate rulers, dual-contrast grid labels, live mouse reticle, hex color under cursor, active window info, and visual diff since the previous capture (`changedPercent`, `changedBounds`). Use `region` or `window` to zoom into dense UI areas at 1:1 resolution while preserving global screen coordinates, and set `highlightDiff: true` to outline changed pixels. Set `marks: true` to run Set-of-Mark UI element detection: Handy outlines and numbers every detected button, field, icon, text line, and panel, and returns their exact bounds and click centres in `elements` \u2014 then act on one with `{ "type": "click", "mark": 3 }` instead of estimating coordinates.',
       inputSchema: {
         display: external_exports.number().int().min(0).max(16).optional().describe("Monitor index (default: 0 primary)"),
         region: RegionSchema.optional().describe("Optional screen rectangle { x, y, width, height } to zoom into"),
@@ -43145,7 +44246,13 @@ function createHandyMcpServer(options = {}) {
         gridStep: external_exports.number().int().min(10).max(2e3).optional().describe("Custom major grid spacing in screen pixels"),
         showMouse: external_exports.boolean().optional().describe("Overlay live mouse reticle and (x, y) badge (default: true)"),
         highlightDiff: external_exports.boolean().optional().describe("Draw an emerald CHANGED bounding box around pixels that changed since the previous capture"),
-        maxWidth: external_exports.number().int().min(320).max(3840).optional().describe("Max output image width in pixels (default: 1280); drawn coordinates remain exact screen pixels")
+        maxWidth: external_exports.number().int().min(320).max(3840).optional().describe("Max output image width in pixels (default: 1280); drawn coordinates remain exact screen pixels"),
+        marks: external_exports.boolean().optional().describe(
+          "Run Set-of-Mark UI element detection: outline and number detected controls/fields/icons/text/panels on the image and return their exact bounds and click centres in `elements` (default: false)"
+        ),
+        maxMarks: external_exports.number().int().min(1).max(200).optional().describe("Maximum number of element marks to return when `marks` is true (default: 40)"),
+        markKinds: external_exports.array(UiElementKindSchema).optional().describe("Restrict marks to specific kinds: control, text, icon, region (default: all)"),
+        minMarkScore: external_exports.number().min(0).max(1).optional().describe("Minimum detection confidence 0..1 for a mark to be kept (default: 0.3)")
       },
       annotations: {
         title: "See Screen",
@@ -43166,7 +44273,11 @@ function createHandyMcpServer(options = {}) {
           gridStep: args.gridStep,
           showMouse: args.showMouse,
           highlightDiff: args.highlightDiff,
-          maxWidth: args.maxWidth
+          maxWidth: args.maxWidth,
+          marks: args.marks,
+          maxMarks: args.maxMarks,
+          markKinds: args.markKinds,
+          minMarkScore: args.minMarkScore
         });
         const metadata = {
           ok: true,
@@ -43180,7 +44291,19 @@ function createHandyMcpServer(options = {}) {
           gridStep: shot.gridStep,
           coordinateSpace: shot.coordinateSpace,
           captureMs: shot.captureMs,
-          timestamp: shot.timestamp
+          timestamp: shot.timestamp,
+          ...shot.elements ? {
+            elementCount: shot.elements.length,
+            elements: shot.elements,
+            elementHint: 'Click any element by index without restating coordinates, e.g. { "type": "click", "mark": 3 }. Marks are only valid until the screen changes; re-run handy_see with marks: true after any interaction that mutates the UI.'
+          } : {},
+          // Detection degrades rather than fails the capture, so say why and what to do instead
+          // — otherwise an agent sees no `elements` and cannot tell "nothing detected" from
+          // "detection broke", nor know that `mark` references are unavailable this round.
+          ...shot.marksError ? {
+            marksError: shot.marksError,
+            marksHint: "UI element detection failed, so this capture has no marks and any earlier marks were cleared. The screenshot is still valid: read (x, y) from the coordinate rulers and pass explicit coordinates. A later `mark` reference re-detects from the live screen rather than reusing stale indices, so it will resolve if that failure was transient \u2014 retry `handy_see` with marks: true to confirm."
+          } : {}
         };
         logAudit(auditEnabled, {
           tool: "handy_see",
@@ -43218,7 +44341,7 @@ function createHandyMcpServer(options = {}) {
     "handy_act",
     {
       title: "Control Mouse & Keyboard (Single or Chained)",
-      description: 'Execute native mouse, keyboard, clipboard-paste, window-focus, and smart visual-wait controls in real-time. Supports chaining multiple steps sequentially in one call \u2014 e.g. [{ "type": "focus_window", "title": "Code" }, { "type": "click", "x": 420, "y": 260 }, { "type": "paste", "text": "Hello!" }, { "type": "wait_for_settled" }]. Steps support `coordinateSpace: "screen" | "normalized" | "window"`. Set `screenshotAfter: true` to receive an updated coordinate-mapped screenshot with numbered action-trail markers.',
+      description: 'Execute native mouse, keyboard, clipboard-paste, window-focus, and smart visual-wait controls in real-time. Supports chaining multiple steps sequentially in one call \u2014 e.g. [{ "type": "focus_window", "title": "Code" }, { "type": "click", "x": 420, "y": 260 }, { "type": "paste", "text": "Hello!" }, { "type": "wait_for_settled" }]. Steps support `coordinateSpace: "screen" | "normalized" | "window"`, and any pointer step accepts `mark: N` to target a detected UI element from the last `handy_see({ marks: true })` instead of raw x/y. Set `screenshotAfter: true` to receive an updated coordinate-mapped screenshot with numbered action-trail markers, or `verifyChange: true` for a cheap did-anything-happen diff.',
       inputSchema: {
         actions: external_exports.array(ActionStepSchema).min(1).max(100).describe(
           "Ordered array of steps (move, click, double_click, triple_click, right_click, drag, scroll, type, paste, key, focus_window, wait, wait_for_change, wait_for_settled, wait_for_color, screenshot)"
@@ -43232,7 +44355,12 @@ function createHandyMcpServer(options = {}) {
         display: external_exports.number().int().min(0).max(16).optional().describe("Target display index for normalized coordinates or screenshotAfter"),
         maxWidth: external_exports.number().int().min(320).max(3840).optional(),
         grid: external_exports.boolean().optional(),
-        showMouse: external_exports.boolean().optional()
+        showMouse: external_exports.boolean().optional(),
+        marks: external_exports.boolean().optional().describe("Run Set-of-Mark element detection on post-chain/mid-chain screenshots and return `elements`"),
+        maxMarks: external_exports.number().int().min(1).max(200).optional().describe("Max marks when `marks` is true (default: 40)"),
+        verifyChange: external_exports.boolean().optional().describe(
+          "Capture before and after the chain and report `change`/`changed` so you learn whether anything visually moved without requesting an image (default: false)"
+        )
       },
       annotations: {
         title: "Execute Mouse & Keyboard Actions",
@@ -43257,6 +44385,9 @@ function createHandyMcpServer(options = {}) {
           maxWidth: args.maxWidth,
           grid: args.grid,
           showMouse: args.showMouse,
+          marks: args.marks,
+          maxMarks: args.maxMarks,
+          verifyChange: args.verifyChange,
           signal: extra.signal
         });
         const summary = {
@@ -43265,7 +44396,14 @@ function createHandyMcpServer(options = {}) {
           totalDurationMs: result.totalDurationMs,
           mouse: result.mouse,
           activeWindow: result.activeWindow,
-          receipts: result.receipts
+          receipts: result.receipts,
+          ...result.change !== void 0 || result.changed !== void 0 ? {
+            changed: result.changed,
+            change: result.change,
+            ...result.changed === false ? {
+              hint: "No visual change was detected. Verify the target coordinates/mark, that the intended window was focused, and that the control is enabled."
+            } : {}
+          } : {}
         };
         logAudit(auditEnabled, {
           tool: "handy_act",
@@ -43842,6 +44980,9 @@ function renderHtml(token) {
           <label style="margin-left:10px;font-size:13px;cursor:pointer;">
             <input type="checkbox" id="diffToggle" checked onchange="refreshScreen()" /> Highlight Diff
           </label>
+          <label style="margin-left:10px;font-size:13px;cursor:pointer;" title="Detect and number interactive UI elements; clicking one inserts a mark reference instead of raw coordinates">
+            <input type="checkbox" id="marksToggle" onchange="refreshScreen()" /> Detect Marks
+          </label>
         </div>
         <div class="muted" id="hoverCoords">Hover image to inspect (x, y)</div>
       </div>
@@ -43859,7 +45000,16 @@ function renderHtml(token) {
         <div class="meta-row"><span>Pixel Hex</span><span id="mPixel">-</span></div>
         <div class="meta-row"><span>Active Window</span><span id="mWin">-</span></div>
         <div class="meta-row"><span>Frame Diff</span><span id="mDiff">-</span></div>
+        <div class="meta-row"><span>UI Elements</span><span id="mMarks">-</span></div>
         <div class="meta-row"><span>Capture Latency</span><span id="mLatency">-</span></div>
+      </div>
+
+      <div class="card" id="marksCard" style="display:none;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <span style="font-weight:700;">Detected Marks</span>
+          <span class="muted" style="font-size:11px;">click to chain</span>
+        </div>
+        <div id="markList" class="win-list"></div>
       </div>
 
       <div class="card">
@@ -43932,7 +45082,8 @@ function renderHtml(token) {
 
     async function refreshScreen() {
       const hi = document.getElementById("diffToggle")?.checked ? "1" : "0";
-      const data = await api("/api/see?highlightDiff=" + hi);
+      const mk = document.getElementById("marksToggle")?.checked ? "1" : "0";
+      const data = await api("/api/see?highlightDiff=" + hi + "&marks=" + mk);
       if (!data.ok) {
         document.getElementById("screenPlaceholder").style.display = "block";
         document.getElementById("screenPlaceholder").textContent = data.error || "Unable to capture screen";
@@ -43949,6 +45100,48 @@ function renderHtml(token) {
       document.getElementById("mWin").textContent = (data.activeWindow && data.activeWindow.title) || "-";
       document.getElementById("mDiff").textContent = data.screenDiff ? (data.screenDiff.changedPercent + "%") : "baseline";
       document.getElementById("mLatency").textContent = data.captureMs + " ms";
+      renderMarks(data.elements);
+    }
+
+    function renderMarks(elements) {
+      const card = document.getElementById("marksCard");
+      const count = document.getElementById("mMarks");
+      if (!elements || !elements.length) {
+        card.style.display = "none";
+        count.textContent = elements ? "0" : "-";
+        return;
+      }
+      count.textContent = String(elements.length);
+      card.style.display = "block";
+      const list = document.getElementById("markList");
+      list.innerHTML = "";
+      for (const el of elements) {
+        const row = document.createElement("div");
+        row.className = "win-item";
+        row.style.cursor = "pointer";
+        row.title = "Bounds " + el.x + "," + el.y + " " + el.width + "x" + el.height + " \u2014 score " + el.score.toFixed(2);
+        row.textContent = "#" + el.index + " " + el.kind + " (" + el.centerX + "," + el.centerY + ")";
+        row.onclick = () => appendChain("click mark " + el.index);
+        list.appendChild(row);
+      }
+    }
+
+    function appendChain(fragment) {
+      const inp = document.getElementById("chainInput");
+      inp.value = inp.value ? (inp.value + " -> " + fragment) : fragment;
+      inp.focus();
+    }
+
+    // Smallest detected element containing the point, so nested controls resolve to the tightest target.
+    function markAt(elements, sx, sy) {
+      if (!elements) return null;
+      let best = null;
+      for (const el of elements) {
+        if (sx < el.x || sy < el.y || sx > el.x + el.width || sy > el.y + el.height) continue;
+        const area = el.width * el.height;
+        if (!best || area < best.area) best = { index: el.index, kind: el.kind, area };
+      }
+      return best;
     }
 
     function toggleLive() {
@@ -43967,7 +45160,10 @@ function renderHtml(token) {
       const ry = (ev.clientY - rect.top) / Math.max(1, rect.height);
       const sx = Math.round(screenMeta.region.x + rx * screenMeta.region.width);
       const sy = Math.round(screenMeta.region.y + ry * screenMeta.region.height);
-      document.getElementById("hoverCoords").textContent = "Screen (" + sx + ", " + sy + ") \u2014 click to insert into chain";
+      const hit = markAt(screenMeta.elements, sx, sy);
+      document.getElementById("hoverCoords").textContent = hit
+        ? "Screen (" + sx + ", " + sy + ") \u2014 mark #" + hit.index + " (" + hit.kind + ") \u2014 click to chain"
+        : "Screen (" + sx + ", " + sy + ") \u2014 click to insert into chain";
     });
 
     document.getElementById("screenImg").addEventListener("click", (ev) => {
@@ -43977,8 +45173,8 @@ function renderHtml(token) {
       const ry = (ev.clientY - rect.top) / Math.max(1, rect.height);
       const sx = Math.round(screenMeta.region.x + rx * screenMeta.region.width);
       const sy = Math.round(screenMeta.region.y + ry * screenMeta.region.height);
-      const inp = document.getElementById("chainInput");
-      inp.value = inp.value ? (inp.value + " -> click " + sx + " " + sy) : ("click " + sx + " " + sy);
+      const hit = markAt(screenMeta.elements, sx, sy);
+      appendChain(hit ? ("click mark " + hit.index) : ("click " + sx + " " + sy));
     });
 
     async function runChain() {
@@ -44123,11 +45319,13 @@ data: ${JSON.stringify(initial)}
       }
       if (req.method === "GET" && url3.pathname === "/api/see") {
         const highlightDiff = url3.searchParams.get("highlightDiff") === "1";
+        const marks = url3.searchParams.get("marks") === "1";
         const windowQuery = url3.searchParams.get("window") ?? void 0;
         const shot = await controller.see({
           grid: true,
           showMouse: true,
           highlightDiff,
+          marks,
           window: windowQuery || void 0
         });
         sendJson(res, 200, {
@@ -44138,7 +45336,8 @@ data: ${JSON.stringify(initial)}
           activeWindow: shot.activeWindow,
           screenDiff: shot.screenDiff,
           region: shot.region,
-          captureMs: shot.captureMs
+          captureMs: shot.captureMs,
+          elements: shot.elements ?? null
         });
         return;
       }
@@ -44253,6 +45452,8 @@ Options for 'see':
   --region <x,y,w,h>     Zoom into a rectangular screen region (keeps global coordinates)
   --window <title>       Capture a specific visible window by title/app substring
   --highlight-diff       Outline changed pixels since the previous capture
+  --marks                Detect & number UI elements (Set-of-Mark); prints their bounds/centres
+  --max-marks <n>        Max element marks to return with --marks (default: 40)
   --display <index>      Target monitor index (default: 0)
   --max-width <px>       Max output image width (default: 1280)
   --grid-step <px>       Custom major coordinate grid spacing
@@ -44650,6 +45851,8 @@ Press Ctrl+C to stop.
         const grid = flags.get("no-grid") === true ? false : true;
         const showMouse = flags.get("no-mouse") === true ? false : true;
         const highlightDiff2 = flags.get("highlight-diff") === true;
+        const marks = flags.get("marks") === true;
+        const maxMarks = typeof flags.get("max-marks") === "string" ? Number(flags.get("max-marks")) : void 0;
         const shot = await controller.see({
           display,
           region,
@@ -44658,7 +45861,9 @@ Press Ctrl+C to stop.
           gridStep,
           grid,
           showMouse,
-          highlightDiff: highlightDiff2
+          highlightDiff: highlightDiff2,
+          marks,
+          maxMarks
         });
         writeFileSync4(outPath, shot.pngBuffer);
         const payload = {
@@ -44672,7 +45877,9 @@ Press Ctrl+C to stop.
           region: shot.region,
           imageSize: { width: shot.imageWidth, height: shot.imageHeight },
           gridStep: shot.gridStep,
-          captureMs: shot.captureMs
+          captureMs: shot.captureMs,
+          ...shot.elements ? { elementCount: shot.elements.length, elements: shot.elements } : {},
+          ...shot.marksError ? { marksError: shot.marksError } : {}
         };
         if (jsonOut) {
           process.stdout.write(`${JSON.stringify(payload, null, 2)}
@@ -44680,7 +45887,11 @@ Press Ctrl+C to stop.
         } else {
           process.stdout.write(
             `Saved ${shot.imageWidth}x${shot.imageHeight} screenshot -> ${outPath} (mouse=${shot.mouse.x},${shot.mouse.y}${shot.pixelUnderMouse ? ` ${shot.pixelUnderMouse}` : ""}, ${shot.captureMs}ms)
-`
+` + (shot.marksError ? `Mark detection failed (screenshot is still valid; use ruler coordinates): ${shot.marksError}
+` : "") + (shot.elements ? `Detected ${shot.elements.length} UI element mark(s):
+` + shot.elements.map(
+              (e) => `  #${String(e.index).padStart(2)} ${e.kind.padEnd(7)} (${e.centerX},${e.centerY})  ${e.width}x${e.height} @ ${e.x},${e.y}  score=${e.score.toFixed(2)}`
+            ).join("\n") + "\n" : "")
           );
         }
         return EXIT_OK;

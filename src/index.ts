@@ -7,8 +7,9 @@ export {
   Win32Backend,
   type BackendKind,
 } from "./backends/index.js";
-export { HandyController, parseChainInput } from "./controller.js";
+export { fittsDurationMs, HandyController, parseChainInput } from "./controller.js";
 export { computeFrameDiff, hexColorDistance, parseHexRgb, samplePixelHex } from "./diff.js";
+export { detectUiElements, resolveMarkCenter, type DetectElementsOptions } from "./marks.js";
 export {
   buildHandyMcpEntry,
   installHandyToHosts,
@@ -29,7 +30,7 @@ export {
   resolveConfigDir,
   type PermissionStoreOptions,
 } from "./permissions.js";
-export { cropRgba, decodePng, encodePng, resizeRgba } from "./png.js";
+export { cropRgba, decodePng, encodePng, resizeRgba, type PngFilterStrategy, type ResizeFilter } from "./png.js";
 export {
   ActionStepSchema,
   ClickStepSchema,
@@ -40,7 +41,9 @@ export {
   KeyDownStepSchema,
   KeyStepSchema,
   KeyUpStepSchema,
+  MarkRefSchema,
   ModifierKeySchema,
+  MotionProfileSchema,
   MouseButtonSchema,
   MouseDownStepSchema,
   MouseUpStepSchema,
@@ -52,6 +55,7 @@ export {
   ScrollStepSchema,
   TripleClickStepSchema,
   TypeStepSchema,
+  UiElementKindSchema,
   WaitForChangeStepSchema,
   WaitForColorStepSchema,
   WaitForSettledStepSchema,
@@ -64,7 +68,9 @@ export {
   type DisplayInfo,
   type DoctorCheck,
   type FrameDiff,
+  type FrameDiffOptions,
   type ModifierKey,
+  type MotionProfile,
   type MouseButton,
   type PermissionMode,
   type PermissionState,
@@ -75,6 +81,8 @@ export {
   type SeeResult,
   type StepReceipt,
   type TrailMarker,
+  type UiElement,
+  type UiElementKind,
   type WindowInfo,
 } from "./types.js";
 export { startControlPanel, type RunningControlPanel, type StartControlPanelOptions } from "./ui.js";

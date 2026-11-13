@@ -190,7 +190,10 @@ export class VirtualDesktopBackend implements DesktopBackend {
     }
   }
 
-  async mouseDown(button: MouseButton): Promise<void> {
+  // The optional clickCount/modifiers mirror DesktopBackend so the class stays assignable to it
+  // and tests can spy on the full signature. Double-clicks here are detected by timing and
+  // proximity below, so the count itself is not needed.
+  async mouseDown(button: MouseButton, _clickCount?: number): Promise<void> {
     this.heldButtons.add(button);
     this.state.lastButton = button;
 
@@ -262,7 +265,7 @@ export class VirtualDesktopBackend implements DesktopBackend {
     }
   }
 
-  async mouseUp(button: MouseButton): Promise<void> {
+  async mouseUp(button: MouseButton, _clickCount?: number): Promise<void> {
     this.heldButtons.delete(button);
     if (button === "left" && this.state.draggingCard) {
       this.state.draggingCard = false;
