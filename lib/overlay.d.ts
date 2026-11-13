@@ -1,4 +1,4 @@
-import type { Point, Region, TrailMarker } from "./types.js";
+import type { Point, Region, TrailMarker, UiElement } from "./types.js";
 export declare function chooseGridStep(logicalWidth: number, logicalHeight: number): number;
 export interface OverlayOptions {
     /** Global logical X of top-left pixel */
@@ -21,6 +21,8 @@ export interface OverlayOptions {
     trail?: TrailMarker[];
     /** Optional visual diff bounding box in global logical coordinates to highlight */
     diffBounds?: Region | null;
+    /** Optional detected Set-of-Mark UI elements to outline and number */
+    marks?: UiElement[];
 }
 export declare function renderScreenOverlay(rgba: Uint8Array, imageWidth: number, imageHeight: number, options: OverlayOptions): {
     gridStep: number | null;

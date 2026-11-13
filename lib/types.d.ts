@@ -31,12 +31,46 @@ export interface FrameDiff {
     changedPercent: number;
     changedPixels: number;
     changedBounds: Region | null;
+    /**
+     * Present (and `true`) only when the scan stopped early via `earlyExitPercent`. In that case
+     * `changedPercent` / `changedPixels` are lower bounds and `changedBounds` may be incomplete.
+     */
+    partial?: boolean;
+}
+export interface FrameDiffOptions {
+    /** Per-channel delta (0..255) above which a pixel counts as changed. Default: 14 */
+    channelDeltaThreshold?: number;
+    /** Compute the changed-pixel bounding box. Disable in hot wait loops that only need the percent. Default: true */
+    computeBounds?: boolean;
+    /** Stop scanning once this percentage of pixels has changed (values become lower bounds). */
+    earlyExitPercent?: number;
 }
 export interface TrailMarker {
     stepNumber: number;
     kind: "click" | "drag_start" | "drag_end";
     x: number;
     y: number;
+}
+/** Coarse classification of a detected UI element, used to filter and to guide the agent. */
+export type UiElementKind = "control" | "text" | "icon" | "region";
+export declare const UiElementKindSchema: z.ZodEnum<{
+    control: "control";
+    icon: "icon";
+    region: "region";
+    text: "text";
+}>;
+/**
+ * A Set-of-Mark candidate element detected on screen. All coordinates are in global logical screen
+ * space, so `centerX`/`centerY` can be clicked directly (or via `mark: index` on an action step).
+ */
+export interface UiElement extends Region {
+    /** 1-based mark number, matching the badge drawn on the annotated screenshot. */
+    index: number;
+    centerX: number;
+    centerY: number;
+    /** Confidence (0..1) that this is a genuine interactive element. */
+    score: number;
+    kind: UiElementKind;
 }
 export interface RawFrame {
     width: number;
@@ -57,20 +91,33 @@ export type ModifierKey = "ctrl" | "alt" | "shift" | "meta" | "mod";
 export type CoordinateSpace = "screen" | "normalized" | "window";
 export declare const MouseButtonSchema: z.ZodEnum<{
     left: "left";
-    right: "right";
     middle: "middle";
+    right: "right";
 }>;
 export declare const ModifierKeySchema: z.ZodEnum<{
-    ctrl: "ctrl";
     alt: "alt";
-    shift: "shift";
+    ctrl: "ctrl";
     meta: "meta";
     mod: "mod";
+    shift: "shift";
 }>;
 export declare const CoordinateSpaceSchema: z.ZodEnum<{
-    screen: "screen";
     normalized: "normalized";
+    screen: "screen";
     window: "window";
+}>;
+/**
+ * Interpolation curve for pointer travel.
+ * - `linear`: constant velocity.
+ * - `ease`: quadratic ease-out (default) — fast start, gentle arrival.
+ * - `human`: cubic Bezier with a perpendicular arc and Fitts's-law-scaled duration, which mimics
+ *   real pointer ballistics so apps that filter synthetic straight-line motion behave normally.
+ */
+export type MotionProfile = "linear" | "ease" | "human";
+export declare const MotionProfileSchema: z.ZodEnum<{
+    ease: "ease";
+    human: "human";
+    linear: "linear";
 }>;
 export declare const RegionSchema: z.ZodObject<{
     x: z.ZodNumber;
@@ -78,16 +125,27 @@ export declare const RegionSchema: z.ZodObject<{
     width: z.ZodNumber;
     height: z.ZodNumber;
 }, z.core.$strip>;
+/**
+ * Reference to a detected Set-of-Mark element. Lets an action step target a verified element box
+ * (by the number drawn on the last marked screenshot) instead of estimating raw pixel coordinates.
+ */
+export declare const MarkRefSchema: z.ZodOptional<z.ZodNumber>;
 export declare const MoveStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"move">;
-    x: z.ZodNumber;
-    y: z.ZodNumber;
+    x: z.ZodOptional<z.ZodNumber>;
+    y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     relative: z.ZodOptional<z.ZodBoolean>;
     durationMs: z.ZodOptional<z.ZodNumber>;
     steps: z.ZodOptional<z.ZodNumber>;
+    motion: z.ZodOptional<z.ZodEnum<{
+        ease: "ease";
+        human: "human";
+        linear: "linear";
+    }>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>;
@@ -95,22 +153,23 @@ export declare const ClickStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"click">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     button: z.ZodOptional<z.ZodEnum<{
         left: "left";
-        right: "right";
         middle: "middle";
+        right: "right";
     }>>;
     count: z.ZodOptional<z.ZodNumber>;
     modifiers: z.ZodOptional<z.ZodArray<z.ZodEnum<{
-        ctrl: "ctrl";
         alt: "alt";
-        shift: "shift";
+        ctrl: "ctrl";
         meta: "meta";
         mod: "mod";
+        shift: "shift";
     }>>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>;
@@ -118,21 +177,22 @@ export declare const DoubleClickStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"double_click">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     button: z.ZodOptional<z.ZodEnum<{
         left: "left";
-        right: "right";
         middle: "middle";
+        right: "right";
     }>>;
     modifiers: z.ZodOptional<z.ZodArray<z.ZodEnum<{
-        ctrl: "ctrl";
         alt: "alt";
-        shift: "shift";
+        ctrl: "ctrl";
         meta: "meta";
         mod: "mod";
+        shift: "shift";
     }>>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>;
@@ -140,16 +200,17 @@ export declare const TripleClickStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"triple_click">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     modifiers: z.ZodOptional<z.ZodArray<z.ZodEnum<{
-        ctrl: "ctrl";
         alt: "alt";
-        shift: "shift";
+        ctrl: "ctrl";
         meta: "meta";
         mod: "mod";
+        shift: "shift";
     }>>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>;
@@ -157,16 +218,17 @@ export declare const RightClickStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"right_click">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     modifiers: z.ZodOptional<z.ZodArray<z.ZodEnum<{
-        ctrl: "ctrl";
         alt: "alt";
-        shift: "shift";
+        ctrl: "ctrl";
         meta: "meta";
         mod: "mod";
+        shift: "shift";
     }>>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>;
@@ -174,14 +236,15 @@ export declare const MouseDownStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"mouse_down">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     button: z.ZodOptional<z.ZodEnum<{
         left: "left";
-        right: "right";
         middle: "middle";
+        right: "right";
     }>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>;
@@ -189,14 +252,15 @@ export declare const MouseUpStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"mouse_up">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     button: z.ZodOptional<z.ZodEnum<{
         left: "left";
-        right: "right";
         middle: "middle";
+        right: "right";
     }>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>;
@@ -204,18 +268,25 @@ export declare const DragStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"drag">;
     fromX: z.ZodOptional<z.ZodNumber>;
     fromY: z.ZodOptional<z.ZodNumber>;
-    toX: z.ZodNumber;
-    toY: z.ZodNumber;
+    fromMark: z.ZodOptional<z.ZodNumber>;
+    toX: z.ZodOptional<z.ZodNumber>;
+    toY: z.ZodOptional<z.ZodNumber>;
+    toMark: z.ZodOptional<z.ZodNumber>;
     button: z.ZodOptional<z.ZodEnum<{
         left: "left";
-        right: "right";
         middle: "middle";
+        right: "right";
     }>>;
     durationMs: z.ZodOptional<z.ZodNumber>;
     steps: z.ZodOptional<z.ZodNumber>;
+    motion: z.ZodOptional<z.ZodEnum<{
+        ease: "ease";
+        human: "human";
+        linear: "linear";
+    }>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>;
@@ -223,18 +294,19 @@ export declare const ScrollStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"scroll">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     deltaX: z.ZodOptional<z.ZodNumber>;
     deltaY: z.ZodOptional<z.ZodNumber>;
     direction: z.ZodOptional<z.ZodEnum<{
+        down: "down";
         left: "left";
         right: "right";
         up: "up";
-        down: "down";
     }>>;
     amount: z.ZodOptional<z.ZodNumber>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>;
@@ -254,11 +326,11 @@ export declare const KeyStepSchema: z.ZodObject<{
     type: z.ZodLiteral<"key">;
     key: z.ZodString;
     modifiers: z.ZodOptional<z.ZodArray<z.ZodEnum<{
-        ctrl: "ctrl";
         alt: "alt";
-        shift: "shift";
+        ctrl: "ctrl";
         meta: "meta";
         mod: "mod";
+        shift: "shift";
     }>>>;
     count: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
@@ -314,8 +386,8 @@ export declare const WaitForColorStepSchema: z.ZodObject<{
     timeoutMs: z.ZodOptional<z.ZodNumber>;
     pollMs: z.ZodOptional<z.ZodNumber>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>;
@@ -332,157 +404,179 @@ export declare const ScreenshotStepSchema: z.ZodObject<{
     showMouse: z.ZodOptional<z.ZodBoolean>;
     highlightDiff: z.ZodOptional<z.ZodBoolean>;
     maxWidth: z.ZodOptional<z.ZodNumber>;
+    marks: z.ZodOptional<z.ZodBoolean>;
+    maxMarks: z.ZodOptional<z.ZodNumber>;
     label: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"move">;
-    x: z.ZodNumber;
-    y: z.ZodNumber;
+    x: z.ZodOptional<z.ZodNumber>;
+    y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     relative: z.ZodOptional<z.ZodBoolean>;
     durationMs: z.ZodOptional<z.ZodNumber>;
     steps: z.ZodOptional<z.ZodNumber>;
+    motion: z.ZodOptional<z.ZodEnum<{
+        ease: "ease";
+        human: "human";
+        linear: "linear";
+    }>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"click">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     button: z.ZodOptional<z.ZodEnum<{
         left: "left";
-        right: "right";
         middle: "middle";
+        right: "right";
     }>>;
     count: z.ZodOptional<z.ZodNumber>;
     modifiers: z.ZodOptional<z.ZodArray<z.ZodEnum<{
-        ctrl: "ctrl";
         alt: "alt";
-        shift: "shift";
+        ctrl: "ctrl";
         meta: "meta";
         mod: "mod";
+        shift: "shift";
     }>>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"double_click">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     button: z.ZodOptional<z.ZodEnum<{
         left: "left";
-        right: "right";
         middle: "middle";
+        right: "right";
     }>>;
     modifiers: z.ZodOptional<z.ZodArray<z.ZodEnum<{
-        ctrl: "ctrl";
         alt: "alt";
-        shift: "shift";
+        ctrl: "ctrl";
         meta: "meta";
         mod: "mod";
+        shift: "shift";
     }>>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"triple_click">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     modifiers: z.ZodOptional<z.ZodArray<z.ZodEnum<{
-        ctrl: "ctrl";
         alt: "alt";
-        shift: "shift";
+        ctrl: "ctrl";
         meta: "meta";
         mod: "mod";
+        shift: "shift";
     }>>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"right_click">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     modifiers: z.ZodOptional<z.ZodArray<z.ZodEnum<{
-        ctrl: "ctrl";
         alt: "alt";
-        shift: "shift";
+        ctrl: "ctrl";
         meta: "meta";
         mod: "mod";
+        shift: "shift";
     }>>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"mouse_down">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     button: z.ZodOptional<z.ZodEnum<{
         left: "left";
-        right: "right";
         middle: "middle";
+        right: "right";
     }>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"mouse_up">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     button: z.ZodOptional<z.ZodEnum<{
         left: "left";
-        right: "right";
         middle: "middle";
+        right: "right";
     }>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"drag">;
     fromX: z.ZodOptional<z.ZodNumber>;
     fromY: z.ZodOptional<z.ZodNumber>;
-    toX: z.ZodNumber;
-    toY: z.ZodNumber;
+    fromMark: z.ZodOptional<z.ZodNumber>;
+    toX: z.ZodOptional<z.ZodNumber>;
+    toY: z.ZodOptional<z.ZodNumber>;
+    toMark: z.ZodOptional<z.ZodNumber>;
     button: z.ZodOptional<z.ZodEnum<{
         left: "left";
-        right: "right";
         middle: "middle";
+        right: "right";
     }>>;
     durationMs: z.ZodOptional<z.ZodNumber>;
     steps: z.ZodOptional<z.ZodNumber>;
+    motion: z.ZodOptional<z.ZodEnum<{
+        ease: "ease";
+        human: "human";
+        linear: "linear";
+    }>>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"scroll">;
     x: z.ZodOptional<z.ZodNumber>;
     y: z.ZodOptional<z.ZodNumber>;
+    mark: z.ZodOptional<z.ZodNumber>;
     deltaX: z.ZodOptional<z.ZodNumber>;
     deltaY: z.ZodOptional<z.ZodNumber>;
     direction: z.ZodOptional<z.ZodEnum<{
+        down: "down";
         left: "left";
         right: "right";
         up: "up";
-        down: "down";
     }>>;
     amount: z.ZodOptional<z.ZodNumber>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
@@ -499,11 +593,11 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"key">;
     key: z.ZodString;
     modifiers: z.ZodOptional<z.ZodArray<z.ZodEnum<{
-        ctrl: "ctrl";
         alt: "alt";
-        shift: "shift";
+        ctrl: "ctrl";
         meta: "meta";
         mod: "mod";
+        shift: "shift";
     }>>>;
     count: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>, z.ZodObject<{
@@ -552,8 +646,8 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     timeoutMs: z.ZodOptional<z.ZodNumber>;
     pollMs: z.ZodOptional<z.ZodNumber>;
     coordinateSpace: z.ZodOptional<z.ZodEnum<{
-        screen: "screen";
         normalized: "normalized";
+        screen: "screen";
         window: "window";
     }>>;
 }, z.core.$strip>, z.ZodObject<{
@@ -569,6 +663,8 @@ export declare const ActionStepSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     showMouse: z.ZodOptional<z.ZodBoolean>;
     highlightDiff: z.ZodOptional<z.ZodBoolean>;
     maxWidth: z.ZodOptional<z.ZodNumber>;
+    marks: z.ZodOptional<z.ZodBoolean>;
+    maxMarks: z.ZodOptional<z.ZodNumber>;
     label: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>], "type">;
 export type ActionStep = z.infer<typeof ActionStepSchema>;
@@ -586,6 +682,14 @@ export interface SeeOptions {
     highlightDiff?: boolean;
     maxWidth?: number;
     trail?: TrailMarker[];
+    /** Run Set-of-Mark UI element detection and number the elements on the overlay. */
+    marks?: boolean;
+    /** Maximum number of marks to detect when `marks` is enabled. Default: 40 */
+    maxMarks?: number;
+    /** Restrict detected mark kinds. Default: all */
+    markKinds?: UiElementKind[];
+    /** Minimum detection confidence (0..1) for a mark to be kept. Default: 0.3 */
+    minMarkScore?: number;
 }
 export interface SeeResult {
     pngBuffer: Buffer;
@@ -606,6 +710,8 @@ export interface SeeResult {
     activeWindow: WindowInfo | null;
     screenDiff: FrameDiff | null;
     gridStep: number | null;
+    /** Detected Set-of-Mark UI elements (present when `marks: true`), in global logical screen coords. */
+    elements?: UiElement[];
     coordinateSpace: "screen";
     captureMs: number;
     timestamp: string;
@@ -622,6 +728,16 @@ export interface ActOptions {
     maxWidth?: number;
     grid?: boolean;
     showMouse?: boolean;
+    /** Run Set-of-Mark detection on post-chain and mid-chain screenshots. */
+    marks?: boolean;
+    maxMarks?: number;
+    markKinds?: UiElementKind[];
+    minMarkScore?: number;
+    /**
+     * Capture before and after the chain and report the visual difference, so the agent learns
+     * whether its actions actually changed anything without spending a round-trip on an image.
+     */
+    verifyChange?: boolean;
     failsafe?: boolean;
     signal?: AbortSignal;
 }
@@ -640,6 +756,10 @@ export interface ActResult {
     activeWindow?: WindowInfo | null;
     receipts: StepReceipt[];
     screenshots: SeeResult[];
+    /** Present when `verifyChange` was requested: visual difference between pre- and post-chain. */
+    change?: FrameDiff | null;
+    /** True when `change` shows any meaningful visual difference. */
+    changed?: boolean;
 }
 export type PermissionMode = "full" | "view_only";
 export interface PermissionState {

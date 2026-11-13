@@ -4,7 +4,12 @@ import { z } from "zod";
 import { createBackend, type BackendKind } from "./backends/index.js";
 import { HandyController } from "./controller.js";
 import { HandyPermissionError, PermissionStore } from "./permissions.js";
-import { ActionStepSchema, RegionSchema, type DesktopBackend } from "./types.js";
+import {
+  ActionStepSchema,
+  RegionSchema,
+  UiElementKindSchema,
+  type DesktopBackend,
+} from "./types.js";
 import { HANDY_NAME, HANDY_VERSION } from "./version.js";
 
 export interface CreateHandyMcpOptions {
@@ -98,7 +103,7 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
     {
       title: "See Computer Screen (Mapped Coordinates + Window Zoom + Diff)",
       description:
-        "Capture the computer screen (or a single desktop window via `window`) in real-time with mapped (x, y) coordinate rulers, dual-contrast grid labels, live mouse reticle, hex color under cursor, active window info, and visual diff since the previous capture (`changedPercent`, `changedBounds`). Use `region` or `window` to zoom into dense UI areas at 1:1 resolution while preserving global screen coordinates, and set `highlightDiff: true` to outline changed pixels.",
+        "Capture the computer screen (or a single desktop window via `window`) in real-time with mapped (x, y) coordinate rulers, dual-contrast grid labels, live mouse reticle, hex color under cursor, active window info, and visual diff since the previous capture (`changedPercent`, `changedBounds`). Use `region` or `window` to zoom into dense UI areas at 1:1 resolution while preserving global screen coordinates, and set `highlightDiff: true` to outline changed pixels. Set `marks: true` to run Set-of-Mark UI element detection: Handy outlines and numbers every detected button, field, icon, text line, and panel, and returns their exact bounds and click centres in `elements` — then act on one with `{ \"type\": \"click\", \"mark\": 3 }` instead of estimating coordinates.",
       inputSchema: {
         display: z.number().int().min(0).max(16).optional().describe("Monitor index (default: 0 primary)"),
         region: RegionSchema.optional().describe("Optional screen rectangle { x, y, width, height } to zoom into"),
@@ -128,6 +133,29 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
           .max(3840)
           .optional()
           .describe("Max output image width in pixels (default: 1280); drawn coordinates remain exact screen pixels"),
+        marks: z
+          .boolean()
+          .optional()
+          .describe(
+            "Run Set-of-Mark UI element detection: outline and number detected controls/fields/icons/text/panels on the image and return their exact bounds and click centres in `elements` (default: false)",
+          ),
+        maxMarks: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .optional()
+          .describe("Maximum number of element marks to return when `marks` is true (default: 40)"),
+        markKinds: z
+          .array(UiElementKindSchema)
+          .optional()
+          .describe("Restrict marks to specific kinds: control, text, icon, region (default: all)"),
+        minMarkScore: z
+          .number()
+          .min(0)
+          .max(1)
+          .optional()
+          .describe("Minimum detection confidence 0..1 for a mark to be kept (default: 0.3)"),
       },
       annotations: {
         title: "See Screen",
@@ -149,6 +177,10 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
           showMouse: args.showMouse,
           highlightDiff: args.highlightDiff,
           maxWidth: args.maxWidth,
+          marks: args.marks,
+          maxMarks: args.maxMarks,
+          markKinds: args.markKinds,
+          minMarkScore: args.minMarkScore,
         });
 
         const metadata = {
@@ -164,6 +196,14 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
           coordinateSpace: shot.coordinateSpace,
           captureMs: shot.captureMs,
           timestamp: shot.timestamp,
+          ...(shot.elements
+            ? {
+                elementCount: shot.elements.length,
+                elements: shot.elements,
+                elementHint:
+                  "Click any element by index without restating coordinates, e.g. { \"type\": \"click\", \"mark\": 3 }. Marks are only valid until the screen changes; re-run handy_see with marks: true after any interaction that mutates the UI.",
+              }
+            : {}),
         };
 
         logAudit(auditEnabled, {
@@ -206,7 +246,7 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
     {
       title: "Control Mouse & Keyboard (Single or Chained)",
       description:
-        'Execute native mouse, keyboard, clipboard-paste, window-focus, and smart visual-wait controls in real-time. Supports chaining multiple steps sequentially in one call — e.g. [{ "type": "focus_window", "title": "Code" }, { "type": "click", "x": 420, "y": 260 }, { "type": "paste", "text": "Hello!" }, { "type": "wait_for_settled" }]. Steps support `coordinateSpace: "screen" | "normalized" | "window"`. Set `screenshotAfter: true` to receive an updated coordinate-mapped screenshot with numbered action-trail markers.',
+        'Execute native mouse, keyboard, clipboard-paste, window-focus, and smart visual-wait controls in real-time. Supports chaining multiple steps sequentially in one call — e.g. [{ "type": "focus_window", "title": "Code" }, { "type": "click", "x": 420, "y": 260 }, { "type": "paste", "text": "Hello!" }, { "type": "wait_for_settled" }]. Steps support `coordinateSpace: "screen" | "normalized" | "window"`, and any pointer step accepts `mark: N` to target a detected UI element from the last `handy_see({ marks: true })` instead of raw x/y. Set `screenshotAfter: true` to receive an updated coordinate-mapped screenshot with numbered action-trail markers, or `verifyChange: true` for a cheap did-anything-happen diff.',
       inputSchema: {
         actions: z
           .array(ActionStepSchema)
@@ -253,6 +293,17 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
         maxWidth: z.number().int().min(320).max(3840).optional(),
         grid: z.boolean().optional(),
         showMouse: z.boolean().optional(),
+        marks: z
+          .boolean()
+          .optional()
+          .describe("Run Set-of-Mark element detection on post-chain/mid-chain screenshots and return `elements`"),
+        maxMarks: z.number().int().min(1).max(200).optional().describe("Max marks when `marks` is true (default: 40)"),
+        verifyChange: z
+          .boolean()
+          .optional()
+          .describe(
+            "Capture before and after the chain and report `change`/`changed` so you learn whether anything visually moved without requesting an image (default: false)",
+          ),
       },
       annotations: {
         title: "Execute Mouse & Keyboard Actions",
@@ -277,6 +328,9 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
           maxWidth: args.maxWidth,
           grid: args.grid,
           showMouse: args.showMouse,
+          marks: args.marks,
+          maxMarks: args.maxMarks,
+          verifyChange: args.verifyChange,
           signal: extra.signal,
         });
 
@@ -287,6 +341,17 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
           mouse: result.mouse,
           activeWindow: result.activeWindow,
           receipts: result.receipts,
+          ...(result.change !== undefined || result.changed !== undefined
+            ? {
+                changed: result.changed,
+                change: result.change,
+                ...(result.changed === false
+                  ? {
+                      hint: "No visual change was detected. Verify the target coordinates/mark, that the intended window was focused, and that the control is enabled.",
+                    }
+                  : {}),
+              }
+            : {}),
         };
 
         logAudit(auditEnabled, {

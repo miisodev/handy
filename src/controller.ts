@@ -1,6 +1,7 @@
 import { DarwinBackend } from "./backends/darwin.js";
 import { computeFrameDiff, hexColorDistance, samplePixelHex } from "./diff.js";
 import { parseKeyChord, resolveModifier } from "./keys.js";
+import { detectUiElements, resolveMarkCenter } from "./marks.js";
 import { renderScreenOverlay } from "./overlay.js";
 import { PermissionStore } from "./permissions.js";
 import { encodePng, resizeRgba } from "./png.js";
@@ -13,6 +14,7 @@ import type {
   DisplayInfo,
   DoctorCheck,
   FrameDiff,
+  MotionProfile,
   MouseButton,
   Point,
   RawFrame,
@@ -21,6 +23,7 @@ import type {
   SeeResult,
   StepReceipt,
   TrailMarker,
+  UiElement,
   WindowInfo,
 } from "./types.js";
 
@@ -47,6 +50,27 @@ function isTopLeftCorner(p: Point): boolean {
   return p.x <= 2 && p.y <= 2;
 }
 
+/**
+ * Fitts's-law pointer travel time: `a + b * log2(D/W + 1)`.
+ *
+ * Real users take longer to reach small, distant targets. Using that curve for `motion: "human"`
+ * produces plausible velocities instead of a constant-speed teleport, which matters for apps that
+ * gate behaviour on pointer dynamics (hover intent, drag thresholds, gesture recognisers).
+ */
+export function fittsDurationMs(from: Point, to: Point, targetWidth = 24, a = 60, b = 110): number {
+  const distance = Math.hypot(to.x - from.x, to.y - from.y);
+  if (distance < 2) return 0;
+  const width = Math.max(4, targetWidth);
+  const ms = a + b * Math.log2(distance / width + 1);
+  return Math.round(Math.max(0, Math.min(1200, ms)));
+}
+
+/** Cubic Bezier control-point evaluation for human-like pointer arcs. */
+function bezier1d(p0: number, p1: number, p2: number, p3: number, t: number): number {
+  const mt = 1 - t;
+  return mt * mt * mt * p0 + 3 * mt * mt * t * p1 + 3 * mt * t * t * p2 + t * t * t * p3;
+}
+
 export class HandyController {
   readonly backend: DesktopBackend;
   readonly permissions: PermissionStore;
@@ -56,6 +80,7 @@ export class HandyController {
   private queueTail: Promise<unknown> = Promise.resolve();
   private queuedCount = 0;
   private lastSeenFrame: RawFrame | null = null;
+  private lastElements: UiElement[] | null = null;
   private lastObservedMouse: Point | null = null;
   private lastCommandedTarget: Point | null = null;
   private static readonly MAX_QUEUED_CHAINS = 8;
@@ -271,6 +296,18 @@ export class HandyController {
       rgba = new Uint8Array(frame.data);
     }
 
+    // Set-of-Mark detection runs on the raw, unannotated frame so overlay chrome never influences
+    // the result, and coordinates come back in global logical screen space.
+    let elements: UiElement[] | undefined;
+    if (options.marks) {
+      elements = detectUiElements(frame, {
+        maxMarks: options.maxMarks,
+        kinds: options.markKinds,
+        minScore: options.minMarkScore,
+      });
+      this.lastElements = elements;
+    }
+
     const overlayMeta = renderScreenOverlay(rgba, outWidth, outHeight, {
       originX: frame.originX,
       originY: frame.originY,
@@ -282,6 +319,7 @@ export class HandyController {
       showMouse: options.showMouse ?? true,
       trail: options.trail,
       diffBounds: options.highlightDiff && screenDiff?.changedBounds ? screenDiff.changedBounds : null,
+      marks: elements,
     });
 
     const pngBuffer = encodePng(outWidth, outHeight, rgba, { compressionLevel: 3 });
@@ -311,6 +349,7 @@ export class HandyController {
       activeWindow,
       screenDiff,
       gridStep: overlayMeta.gridStep,
+      ...(elements ? { elements } : {}),
       coordinateSpace: "screen",
       captureMs,
       timestamp: new Date().toISOString(),
@@ -370,6 +409,39 @@ export class HandyController {
     this.lastObservedMouse = { x: rx, y: ry };
   }
 
+  /** Most recent Set-of-Mark elements, cleared whenever a capture runs without `marks`. */
+  get detectedElements(): UiElement[] | null {
+    return this.lastElements;
+  }
+
+  private resolveMarkPoint(mark: number): Point {
+    if (!this.lastElements || this.lastElements.length === 0) {
+      throw new Error(
+        `Cannot resolve mark #${mark}: no detected UI elements are available. Call handy_see with { marks: true } first — marks are refreshed on every marked capture.`,
+      );
+    }
+    return resolveMarkCenter(this.lastElements, mark);
+  }
+
+  /**
+   * Resolves where a pointer step should go: an explicit `mark`, then explicit coordinates, then
+   * "wherever the cursor already is". `via` lets receipts record which route was taken.
+   */
+  private async resolveStepTarget(
+    step: { x?: number; y?: number; mark?: number; coordinateSpace?: CoordinateSpace },
+    displayIndex: number | undefined,
+    cachedDisplays: DisplayInfo[] | null,
+  ): Promise<{ point: Point | null; displays: DisplayInfo[] | null; via: "mark" | "coords" | null }> {
+    if (step.mark !== undefined) {
+      return { point: this.resolveMarkPoint(step.mark), displays: cachedDisplays, via: "mark" };
+    }
+    if (step.x !== undefined && step.y !== undefined) {
+      const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, displayIndex, cachedDisplays);
+      return { point: res.point, displays: res.displays, via: "coords" };
+    }
+    return { point: null, displays: cachedDisplays, via: null };
+  }
+
   private async resolvePoint(
     x: number,
     y: number,
@@ -421,19 +493,47 @@ export class HandyController {
     steps: number | undefined,
     failsafe: boolean,
     signal?: AbortSignal,
+    motion: MotionProfile = "ease",
   ): Promise<void> {
-    const count = steps ?? Math.max(2, Math.min(60, Math.round(durationMs / 10)));
+    const count = steps ?? Math.max(2, Math.min(motion === "human" ? 90 : 60, Math.round(durationMs / 10)));
     const interval = durationMs / count;
+
+    // Human motion follows a shallow arc rather than a mathematically straight line.
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const distance = Math.hypot(dx, dy);
+    const arc = motion === "human" ? Math.min(14, distance * 0.035) : 0;
+    // Deterministic per-move perpendicular direction so a repeated drag is reproducible.
+    const sign = (Math.round(from.x + from.y) & 1) === 0 ? 1 : -1;
+    const perpX = distance > 0 ? (-dy / distance) * arc * sign : 0;
+    const perpY = distance > 0 ? (dx / distance) * arc * sign : 0;
+
     for (let i = 1; i <= count; i++) {
       this.permissions.assertCanControl();
       if (signal?.aborted) throw new Error("Action chain aborted.");
       if (i > 1 && i % 4 === 0) {
         await this.checkFailsafe(failsafe);
       }
+
       const t = i / count;
-      const eased = 1 - (1 - t) * (1 - t);
-      const nx = Math.round(from.x + (to.x - from.x) * eased);
-      const ny = Math.round(from.y + (to.y - from.y) * eased);
+      let nx: number;
+      let ny: number;
+
+      if (motion === "linear") {
+        nx = Math.round(from.x + dx * t);
+        ny = Math.round(from.y + dy * t);
+      } else if (motion === "human") {
+        // Ease-in-out along a quadratic Bezier bowed perpendicular to the travel direction.
+        const eased = bezier1d(0, 0.42, 0.58, 1, t);
+        const bow = Math.sin(Math.PI * t);
+        nx = Math.round(from.x + dx * eased + perpX * bow);
+        ny = Math.round(from.y + dy * eased + perpY * bow);
+      } else {
+        const eased = 1 - (1 - t) * (1 - t);
+        nx = Math.round(from.x + dx * eased);
+        ny = Math.round(from.y + dy * eased);
+      }
+
       await this.commandMoveMouse(nx, ny);
       if (i < count && interval >= 1) {
         await sleepAbortable(interval, signal);
@@ -492,6 +592,16 @@ export class HandyController {
     const trail: TrailMarker[] = [];
     let cachedDisplays: DisplayInfo[] | null = null;
 
+    // Optional pre-chain baseline so `verifyChange` can report whether anything actually moved.
+    let verifyBaseline: RawFrame | null = null;
+    if (options.verifyChange) {
+      try {
+        verifyBaseline = await this.backend.captureScreen({ display: options.display });
+      } catch {
+        verifyBaseline = null;
+      }
+    }
+
     try {
       await this.checkFailsafe(failsafeEnabled);
 
@@ -518,22 +628,44 @@ export class HandyController {
         switch (step.type) {
           case "move": {
             let target: Point;
+            let via: "mark" | "coords" | "relative" = "coords";
             if (step.relative) {
+              if (step.x === undefined || step.y === undefined) {
+                throw new Error("A relative move step requires both x and y deltas.");
+              }
               const cur = await this.backend.getMousePosition();
               target = { x: Math.round(cur.x + step.x), y: Math.round(cur.y + step.y) };
+              via = "relative";
             } else {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
+              const res = await this.resolveStepTarget(step, options.display, cachedDisplays);
               cachedDisplays = res.displays;
+              if (!res.point) {
+                throw new Error('A move step requires either { x, y } or { mark }.');
+              }
               target = res.point;
+              via = res.via ?? "coords";
             }
 
-            if (step.durationMs && step.durationMs > 0) {
-              const startPos = await this.backend.getMousePosition();
-              await this.interpolateMove(startPos, target, step.durationMs, step.steps, failsafeEnabled, options.signal);
+            const startPos = await this.backend.getMousePosition();
+            const durationMs =
+              step.durationMs ?? (step.motion === "human" ? fittsDurationMs(startPos, target) : 0);
+            if (durationMs > 0) {
+              await this.interpolateMove(
+                startPos,
+                target,
+                durationMs,
+                step.steps,
+                failsafeEnabled,
+                options.signal,
+                step.motion,
+              );
             } else {
               await this.commandMoveMouse(target.x, target.y);
             }
-            detail = `moved to (${target.x},${target.y})`;
+            detail =
+              via === "mark"
+                ? `moved to mark #${step.mark} at (${target.x},${target.y})`
+                : `moved to (${target.x},${target.y})`;
             break;
           }
 
@@ -542,10 +674,12 @@ export class HandyController {
           case "triple_click":
           case "right_click": {
             let clickPos: Point;
-            if (step.x !== undefined && step.y !== undefined) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
-              clickPos = res.point;
+            let clickVia: "mark" | "coords" | null = null;
+            const clickTarget = await this.resolveStepTarget(step, options.display, cachedDisplays);
+            cachedDisplays = clickTarget.displays;
+            if (clickTarget.point) {
+              clickPos = clickTarget.point;
+              clickVia = clickTarget.via;
               await this.commandMoveMouse(clickPos.x, clickPos.y);
               await sleepAbortable(6, options.signal);
             } else {
@@ -568,14 +702,16 @@ export class HandyController {
               x: clickPos.x,
               y: clickPos.y,
             });
-            detail = `${button} click x${count} at (${clickPos.x},${clickPos.y})`;
+            detail = `${button} click x${count} at (${clickPos.x},${clickPos.y})${
+              clickVia === "mark" ? ` (mark #${step.mark})` : ""
+            }`;
             break;
           }
 
           case "mouse_down": {
-            if (step.x !== undefined && step.y !== undefined) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
+            const res = await this.resolveStepTarget(step, options.display, cachedDisplays);
+            cachedDisplays = res.displays;
+            if (res.point) {
               await this.commandMoveMouse(res.point.x, res.point.y);
             }
             const btn = step.button ?? "left";
@@ -586,9 +722,9 @@ export class HandyController {
           }
 
           case "mouse_up": {
-            if (step.x !== undefined && step.y !== undefined) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
+            const res = await this.resolveStepTarget(step, options.display, cachedDisplays);
+            cachedDisplays = res.displays;
+            if (res.point) {
               await this.commandMoveMouse(res.point.x, res.point.y);
             }
             const btn = step.button ?? "left";
@@ -600,7 +736,13 @@ export class HandyController {
 
           case "drag": {
             let startPos: Point;
-            if (step.fromX !== undefined && step.fromY !== undefined) {
+            let dragFrom: string;
+            if (step.fromMark !== undefined) {
+              startPos = this.resolveMarkPoint(step.fromMark);
+              dragFrom = `mark #${step.fromMark}`;
+              await this.commandMoveMouse(startPos.x, startPos.y);
+              await sleepAbortable(8, options.signal);
+            } else if (step.fromX !== undefined && step.fromY !== undefined) {
               const fromRes = await this.resolvePoint(
                 step.fromX,
                 step.fromY,
@@ -610,32 +752,49 @@ export class HandyController {
               );
               cachedDisplays = fromRes.displays;
               startPos = fromRes.point;
+              dragFrom = `(${startPos.x},${startPos.y})`;
               await this.commandMoveMouse(startPos.x, startPos.y);
               await sleepAbortable(8, options.signal);
             } else {
               startPos = await this.backend.getMousePosition();
+              dragFrom = `current (${startPos.x},${startPos.y})`;
             }
 
-            const toRes = await this.resolvePoint(
-              step.toX,
-              step.toY,
-              step.coordinateSpace,
-              options.display,
-              cachedDisplays,
-            );
-            cachedDisplays = toRes.displays;
+            let endPos: Point;
+            let dragTo: string;
+            if (step.toMark !== undefined) {
+              endPos = this.resolveMarkPoint(step.toMark);
+              dragTo = `mark #${step.toMark}`;
+            } else if (step.toX !== undefined && step.toY !== undefined) {
+              const toRes = await this.resolvePoint(
+                step.toX,
+                step.toY,
+                step.coordinateSpace,
+                options.display,
+                cachedDisplays,
+              );
+              cachedDisplays = toRes.displays;
+              endPos = toRes.point;
+              dragTo = `(${endPos.x},${endPos.y})`;
+            } else {
+              throw new Error("A drag step requires either { toX, toY } or { toMark }.");
+            }
+
             const btn = step.button ?? "left";
+            const dragDurationMs =
+              step.durationMs ?? (step.motion === "human" ? Math.max(160, fittsDurationMs(startPos, endPos)) : 160);
 
             await this.backend.mouseDown(btn);
             this.heldButtons.add(btn);
             try {
               await this.interpolateMove(
                 startPos,
-                toRes.point,
-                step.durationMs ?? 160,
+                endPos,
+                dragDurationMs,
                 step.steps ?? 16,
                 failsafeEnabled,
                 options.signal,
+                step.motion,
               );
             } finally {
               await this.backend.mouseUp(btn);
@@ -651,18 +810,18 @@ export class HandyController {
               {
                 stepNumber: i + 1,
                 kind: "drag_end",
-                x: toRes.point.x,
-                y: toRes.point.y,
+                x: endPos.x,
+                y: endPos.y,
               },
             );
-            detail = `dragged (${startPos.x},${startPos.y}) -> (${toRes.point.x},${toRes.point.y})`;
+            detail = `dragged ${dragFrom} -> ${dragTo}`;
             break;
           }
 
           case "scroll": {
-            if (step.x !== undefined && step.y !== undefined) {
-              const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, options.display, cachedDisplays);
-              cachedDisplays = res.displays;
+            const res = await this.resolveStepTarget(step, options.display, cachedDisplays);
+            cachedDisplays = res.displays;
+            if (res.point) {
               await this.commandMoveMouse(res.point.x, res.point.y);
             }
             const amount = step.amount ?? 3;
@@ -945,6 +1104,10 @@ export class HandyController {
               maxWidth: step.maxWidth ?? options.maxWidth,
               highlightDiff: step.highlightDiff ?? options.highlightDiff,
               trail: showTrail && trail.length > 0 ? trail : undefined,
+              marks: step.marks ?? options.marks,
+              maxMarks: step.maxMarks ?? options.maxMarks,
+              markKinds: options.markKinds,
+              minMarkScore: options.minMarkScore,
             });
             if (step.label) shot.label = step.label;
             screenshots.push(shot);
@@ -986,6 +1149,10 @@ export class HandyController {
           maxWidth: options.maxWidth,
           highlightDiff: options.highlightDiff,
           trail: showTrail && trail.length > 0 ? trail : undefined,
+          marks: options.marks,
+          maxMarks: options.maxMarks,
+          markKinds: options.markKinds,
+          minMarkScore: options.minMarkScore,
         });
         postShot.label = "after";
         screenshots.push(postShot);
@@ -996,6 +1163,17 @@ export class HandyController {
         this.backend.getActiveWindow ? this.backend.getActiveWindow().catch(() => null) : Promise.resolve(null),
       ]);
       this.lastObservedMouse = { ...finalMouse };
+
+      let change: FrameDiff | null = null;
+      if (verifyBaseline) {
+        try {
+          const after = await this.backend.captureScreen({ display: options.display });
+          change = computeFrameDiff(verifyBaseline, after);
+        } catch {
+          change = null;
+        }
+      }
+
       const totalDurationMs = Math.round((performance.now() - chainStart) * 10) / 10;
 
       return {
@@ -1006,6 +1184,9 @@ export class HandyController {
         activeWindow,
         receipts,
         screenshots,
+        ...(verifyBaseline
+          ? { change, changed: change !== null && change.changedPixels > 0 }
+          : {}),
       };
     } catch (err) {
       await this.releaseHeldInputs();
