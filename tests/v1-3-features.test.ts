@@ -9,7 +9,7 @@ import { detectUiElements, resolveMarkCenter } from "../src/marks.js";
 import { PermissionStore } from "../src/permissions.js";
 import { decodePng, encodePng, resizeRgba, type PngFilterStrategy } from "../src/png.js";
 import { renderScreenOverlay } from "../src/overlay.js";
-import { pickDisplay, type DisplayInfo, type RawFrame, type UiElement } from "../src/types.js";
+import { pickDisplay, type DisplayInfo, type MouseButton, type RawFrame, type UiElement } from "../src/types.js";
 import { startControlPanel } from "../src/ui.js";
 
 function makeFrame(
@@ -329,7 +329,7 @@ describe("Handy v1.3.0 — Set-of-Mark UI element detection", () => {
 
   it("honours maxMarks, kind filtering, minScore, and searchRegion", () => {
     const frame = makeFrame(640, 400, (x, y) => {
-      const boxes = [
+      const boxes: Array<[number, number, number, number]> = [
         [40, 40, 160, 90],
         [40, 200, 160, 250],
         [400, 40, 520, 90],
@@ -700,9 +700,9 @@ describe("Handy v1.3.0 — Backend capability detection & display resolution", (
     const innerDown = backend.mouseDown.bind(backend);
     // A plain (non-Darwin) backend that nonetheless advertises native click-count support.
     (backend as unknown as { nativeClickCount: boolean }).nativeClickCount = true;
-    backend.mouseDown = async (button, clickCount) => {
+    backend.mouseDown = async (button: MouseButton, clickCount?: number) => {
       seen.push({ button, clickCount });
-      await innerDown(button);
+      await innerDown(button, clickCount);
     };
 
     const controller = new HandyController({ backend, permissions: new PermissionStore({ configDir }) });

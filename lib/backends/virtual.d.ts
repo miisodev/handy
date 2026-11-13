@@ -112,8 +112,8 @@ export declare class VirtualDesktopBackend implements DesktopBackend {
     moveMouse(x: number, y: number): Promise<void>;
     private hitRect;
     private pushEvent;
-    mouseDown(button: MouseButton): Promise<void>;
-    mouseUp(button: MouseButton): Promise<void>;
+    mouseDown(button: MouseButton, _clickCount?: number): Promise<void>;
+    mouseUp(button: MouseButton, _clickCount?: number): Promise<void>;
     scroll(deltaX: number, deltaY: number): Promise<void>;
     keyDown(key: string): Promise<void>;
     keyUp(key: string): Promise<void>;

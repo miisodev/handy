@@ -30696,7 +30696,10 @@ var VirtualDesktopBackend = class _VirtualDesktopBackend {
       this.state.events.length = 25;
     }
   }
-  async mouseDown(button) {
+  // The optional clickCount/modifiers mirror DesktopBackend so the class stays assignable to it
+  // and tests can spy on the full signature. Double-clicks here are detected by timing and
+  // proximity below, so the count itself is not needed.
+  async mouseDown(button, _clickCount) {
     this.heldButtons.add(button);
     this.state.lastButton = button;
     const now = Date.now();
@@ -30762,7 +30765,7 @@ var VirtualDesktopBackend = class _VirtualDesktopBackend {
       this.pushEvent(`${button} click at (${this.mouse.x},${this.mouse.y})`);
     }
   }
-  async mouseUp(button) {
+  async mouseUp(button, _clickCount) {
     this.heldButtons.delete(button);
     if (button === "left" && this.state.draggingCard) {
       this.state.draggingCard = false;
@@ -32265,10 +32268,11 @@ function clamp01(v) {
 }
 function classifyKind(widthLogical, heightLogical, solidity, stddev) {
   const aspect = widthLogical / Math.max(1, heightLogical);
+  const area = widthLogical * heightLogical;
   if (heightLogical <= 28 && aspect >= 2) return "text";
   if (widthLogical <= 60 && heightLogical <= 60 && aspect >= 0.5 && aspect <= 2) return "icon";
-  if (widthLogical * heightLogical > 48e3 && solidity < 0.3) return "region";
-  if (stddev < 70) return "control";
+  if (heightLogical <= 120 && area <= 9e4) return "control";
+  if (heightLogical <= 200 && solidity >= 0.75 && stddev < 45) return "control";
   return "region";
 }
 function intersectionOverUnion(a, b) {
@@ -32280,6 +32284,15 @@ function intersectionOverUnion(a, b) {
   const inter = (x2 - x1) * (y2 - y1);
   const union2 = a.width * a.height + b.width * b.height - inter;
   return union2 <= 0 ? 0 : inter / union2;
+}
+function containmentRatio(inner, outer) {
+  const x1 = Math.max(inner.x, outer.x);
+  const y1 = Math.max(inner.y, outer.y);
+  const x2 = Math.min(inner.x + inner.width, outer.x + outer.width);
+  const y2 = Math.min(inner.y + inner.height, outer.y + outer.height);
+  if (x2 <= x1 || y2 <= y1) return 0;
+  const area = inner.width * inner.height;
+  return area <= 0 ? 0 : (x2 - x1) * (y2 - y1) / area;
 }
 function sameElement(a, b) {
   const x1 = Math.max(a.x, b.x);
@@ -32442,14 +32455,19 @@ function detectUiElements(frame, options = {}) {
   }
   if (candidates.length === 0) return [];
   candidates.sort((a, b) => b.score - a.score || a.y - b.y || a.x - b.x);
-  const kept = [];
+  const dedupCap = maxMarks * 4;
+  const deduped = [];
   for (const c of candidates) {
-    if (kept.length >= maxMarks) break;
-    if (!kept.some((k) => intersectionOverUnion(c, k) > 0.5 || sameElement(c, k))) kept.push(c);
+    if (deduped.length >= dedupCap) break;
+    if (!deduped.some((k) => intersectionOverUnion(c, k) > 0.5 || sameElement(c, k))) deduped.push(c);
   }
-  kept.sort((a, b) => a.y - b.y || a.x - b.x);
-  for (let i = 0; i < kept.length; i++) kept[i].index = i + 1;
-  return kept;
+  const kept = deduped.filter(
+    (c) => c.kind === "control" || c.kind === "region" || !deduped.some((k) => k !== c && k.kind === "control" && containmentRatio(c, k) >= 0.8)
+  );
+  const numbered = kept.slice(0, maxMarks);
+  numbered.sort((a, b) => a.y - b.y || a.x - b.x);
+  for (let i = 0; i < numbered.length; i++) numbered[i].index = i + 1;
+  return numbered;
 }
 function resolveMarkCenter(elements, index) {
   const found = elements.find((e) => e.index === index);

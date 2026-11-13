@@ -388,12 +388,25 @@ function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
+/**
+ * Classifies a detected component by shape.
+ *
+ * Height is the primary control/region discriminator, not interior variance. Buttons, fields,
+ * chips, and menu items are short; panels, cards, and windows are tall containers. An interior
+ * stddev gate gets this wrong on the most common button style in modern UIs — a gradient-filled
+ * CTA carrying a white label has a bimodal, high-variance interior, exactly like a panel full of
+ * text, so `stddev < 70 ? "control" : "region"` misfiled those as regions and cost the agent the
+ * signal that the thing was clickable.
+ */
 function classifyKind(widthLogical: number, heightLogical: number, solidity: number, stddev: number): UiElementKind {
   const aspect = widthLogical / Math.max(1, heightLogical);
+  const area = widthLogical * heightLogical;
   if (heightLogical <= 28 && aspect >= 2.0) return "text";
   if (widthLogical <= 60 && heightLogical <= 60 && aspect >= 0.5 && aspect <= 2) return "icon";
-  if (widthLogical * heightLogical > 48_000 && solidity < 0.3) return "region";
-  if (stddev < 70) return "control";
+  if (heightLogical <= 120 && area <= 90_000) return "control";
+  // Ambiguous band: a calm, densely filled interior still reads as an oversized control (a tile
+  // or hero button), whereas a sparse or busy one is a container holding other elements.
+  if (heightLogical <= 200 && solidity >= 0.75 && stddev < 45) return "control";
   return "region";
 }
 
@@ -406,6 +419,18 @@ function intersectionOverUnion(a: Region, b: Region): number {
   const inter = (x2 - x1) * (y2 - y1);
   const union = a.width * a.height + b.width * b.height - inter;
   return union <= 0 ? 0 : inter / union;
+}
+
+/** Fraction (0..1) of `inner`'s area that lies inside `outer`. Unlike IoU this stays high when a
+ * small box sits wholly inside a much larger one, which is exactly the label-in-a-button case. */
+function containmentRatio(inner: Region, outer: Region): number {
+  const x1 = Math.max(inner.x, outer.x);
+  const y1 = Math.max(inner.y, outer.y);
+  const x2 = Math.min(inner.x + inner.width, outer.x + outer.width);
+  const y2 = Math.min(inner.y + inner.height, outer.y + outer.height);
+  if (x2 <= x1 || y2 <= y1) return 0;
+  const area = inner.width * inner.height;
+  return area <= 0 ? 0 : ((x2 - x1) * (y2 - y1)) / area;
 }
 
 /** True when the two boxes are essentially the same element detected at two tightness levels. */
@@ -655,16 +680,42 @@ export function detectUiElements(frame: RawFrame, options: DetectElementsOptions
   if (candidates.length === 0) return [];
 
   candidates.sort((a, b) => b.score - a.score || a.y - b.y || a.x - b.x);
-  const kept: UiElement[] = [];
+
+  // Dedup first, without the mark cap: caption suppression below needs to see every surviving
+  // control before deciding which labels to drop. The cap is generous but bounded so a busy
+  // screen cannot turn this into an open-ended O(n^2) pass.
+  const dedupCap = maxMarks * 4;
+  const deduped: UiElement[] = [];
   for (const c of candidates) {
-    if (kept.length >= maxMarks) break;
-    if (!kept.some((k) => intersectionOverUnion(c, k) > 0.5 || sameElement(c, k))) kept.push(c);
+    if (deduped.length >= dedupCap) break;
+    if (!deduped.some((k) => intersectionOverUnion(c, k) > 0.5 || sameElement(c, k))) deduped.push(c);
   }
 
+  // A text label or icon sitting inside a control IS that control's caption: the control's own
+  // centre is the better click target, and the extra mark only spends budget while inviting a
+  // click on the label rather than the button. IoU dedup cannot catch this — a 171x19 label in a
+  // 226x54 button has IoU ~0.27 — so containment is measured separately.
+  //
+  // This is deliberately a post-pass over the whole list rather than an inline check during
+  // selection: a caption can out-score the control it belongs to (anti-aliased glyphs are very
+  // high-contrast), and score-ordered selection would then keep the label and be unable to
+  // remove it once the button arrived.
+  //
+  // Controls and regions are never suppressed by containment. Nested controls are real (a
+  // checkbox in a list row, a button in a card), and a panel legitimately holds many independent
+  // text lines worth marking in their own right.
+  const kept = deduped.filter(
+    (c) =>
+      c.kind === "control" ||
+      c.kind === "region" ||
+      !deduped.some((k) => k !== c && k.kind === "control" && containmentRatio(c, k) >= 0.8),
+  );
+
   // Number marks in reading order so overlay badges read naturally top-to-bottom, left-to-right.
-  kept.sort((a, b) => a.y - b.y || a.x - b.x);
-  for (let i = 0; i < kept.length; i++) kept[i]!.index = i + 1;
-  return kept;
+  const numbered = kept.slice(0, maxMarks);
+  numbered.sort((a, b) => a.y - b.y || a.x - b.x);
+  for (let i = 0; i < numbered.length; i++) numbered[i]!.index = i + 1;
+  return numbered;
 }
 
 /** Resolves a 1-based mark index to its click centre, with a helpful error when it is out of range. */

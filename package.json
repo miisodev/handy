@@ -69,7 +69,9 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "typecheck:src": "tsc --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "validate": "node --import tsx scripts/validate-release.ts",
