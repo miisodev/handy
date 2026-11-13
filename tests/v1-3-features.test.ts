@@ -547,9 +547,42 @@ describe("Handy v1.3.0 — Acting on detected marks", () => {
     await expect(controller.act({ actions: [{ type: "click", mark: 9999 }] })).rejects.toThrow(/not available/);
   });
 
-  it("rejects a mark when no marked capture has been taken yet", async () => {
+  it("resolves a mark with no prior marked capture by detecting from the live screen", async () => {
+    // Every CLI invocation is a fresh process, so `handy see --marks` followed by
+    // `handy act "click mark N"` can never carry marks between commands. A mark reference has to
+    // be self-sufficient: with nothing cached, act detects from the current screen on demand.
+    const fresh = new HandyController({ backend, permissions: new PermissionStore({ configDir }) });
+    await fresh.init();
+    try {
+      expect(fresh.detectedElements).toBeNull();
+
+      const res = await fresh.act({ actions: [{ type: "click", mark: 1 }], stepDelayMs: 2 });
+      expect(res.stepsCompleted).toBe(1);
+      expect(res.receipts[0]!.detail).toMatch(/mark #1/);
+
+      // The click landed on the element that detection reported, not on the cursor's old position.
+      const detected = fresh.detectedElements!;
+      expect(detected.length).toBeGreaterThan(0);
+      expect(res.mouse).toEqual({ x: detected[0]!.centerX, y: detected[0]!.centerY });
+    } finally {
+      await fresh.close();
+    }
+  });
+
+  it("rejects a mark when detection finds nothing to click", async () => {
+    // A blank screen yields no elements, so there is no mark #1 to resolve — the error must name
+    // the situation and point at coordinates rather than failing opaquely.
+    const blank = {
+      width: 64,
+      height: 64,
+      data: new Uint8Array(64 * 64 * 4).fill(128),
+      scale: 1,
+      originX: 0,
+      originY: 0,
+    };
+    backend.captureScreen = async () => blank as never;
     await expect(controller.act({ actions: [{ type: "click", mark: 1 }] })).rejects.toThrow(
-      /no detected UI elements are available/i,
+      /no UI elements were detected/i,
     );
   });
 

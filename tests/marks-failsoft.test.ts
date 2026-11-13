@@ -113,8 +113,12 @@ describe("Marks — detection failure degrades instead of failing the capture", 
     expect(failed.elements).toBeUndefined();
     expect(controller.detectedElements).toBeNull();
 
+    // Clearing the cache is what makes the next mark reference re-detect against the *current*
+    // screen instead of silently clicking a coordinate from an earlier one. Detection is still
+    // broken, so that re-detection must fail loudly rather than reuse the stale index.
     await expect(controller.act({ actions: [{ type: "click", mark: 1 }] })).rejects.toThrow(
-      /no detected UI elements are available/i,
+      /UI element detection failed/i,
     );
+    expect(controller.detectedElements).toBeNull();
   });
 });

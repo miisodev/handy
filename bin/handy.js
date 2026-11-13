@@ -33328,11 +33328,44 @@ var HandyController = class _HandyController {
   get detectedElements() {
     return this.lastElements;
   }
-  resolveMarkPoint(mark) {
+  /**
+   * Resolves a mark index to a point, detecting elements from the current screen when no marked
+   * capture has happened in this process yet.
+   *
+   * Marks live on the controller instance, and every CLI invocation is a fresh process — so
+   * without this, `handy see --marks` followed by `handy act 'click mark 5'` could never work:
+   * the second command would have nothing to resolve against. Detecting on demand makes a mark
+   * reference self-sufficient from every entry point (CLI, MCP, library) with no persisted state
+   * to go stale, and the indices then describe the screen as it is *now*, which is the only
+   * meaning they can safely have.
+   *
+   * This captures and detects directly rather than calling `see()`, skipping the overlay render
+   * and PNG encode that a detection-only pass would otherwise pay for.
+   */
+  async resolveMarkPoint(mark, displayIndex) {
     if (!this.lastElements || this.lastElements.length === 0) {
-      throw new Error(
-        `Cannot resolve mark #${mark}: no detected UI elements are available. Call handy_see with { marks: true } first \u2014 marks are refreshed on every marked capture.`
-      );
+      let frame;
+      try {
+        frame = await this.backend.captureScreen({ display: displayIndex });
+      } catch (error62) {
+        throw new Error(
+          `Cannot resolve mark #${mark}: no elements were detected in this session and the screen could not be captured to detect them now (${error62 instanceof Error ? error62.message : String(error62)}). Pass explicit x/y coordinates instead.`
+        );
+      }
+      let detected;
+      try {
+        detected = detectUiElements(frame);
+      } catch (error62) {
+        throw new Error(
+          `Cannot resolve mark #${mark}: UI element detection failed (${error62 instanceof Error ? error62.message : String(error62)}). Pass explicit x/y coordinates instead.`
+        );
+      }
+      if (detected.length === 0) {
+        throw new Error(
+          `Cannot resolve mark #${mark}: no UI elements were detected on the current screen. Pass explicit x/y coordinates, or capture a window/region first so detection has a denser, higher-resolution frame to work with.`
+        );
+      }
+      this.lastElements = detected;
     }
     return resolveMarkCenter(this.lastElements, mark);
   }
@@ -33342,7 +33375,7 @@ var HandyController = class _HandyController {
    */
   async resolveStepTarget(step, displayIndex, cachedDisplays) {
     if (step.mark !== void 0) {
-      return { point: this.resolveMarkPoint(step.mark), displays: cachedDisplays, via: "mark" };
+      return { point: await this.resolveMarkPoint(step.mark, displayIndex), displays: cachedDisplays, via: "mark" };
     }
     if (step.x !== void 0 && step.y !== void 0) {
       const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, displayIndex, cachedDisplays);
@@ -33583,7 +33616,7 @@ var HandyController = class _HandyController {
             let startPos;
             let dragFrom;
             if (step.fromMark !== void 0) {
-              startPos = this.resolveMarkPoint(step.fromMark);
+              startPos = await this.resolveMarkPoint(step.fromMark, options.display);
               dragFrom = `mark #${step.fromMark}`;
               await this.commandMoveMouse(startPos.x, startPos.y);
               await sleepAbortable(8, options.signal);
@@ -33607,7 +33640,7 @@ var HandyController = class _HandyController {
             let endPos;
             let dragTo;
             if (step.toMark !== void 0) {
-              endPos = this.resolveMarkPoint(step.toMark);
+              endPos = await this.resolveMarkPoint(step.toMark, options.display);
               dragTo = `mark #${step.toMark}`;
             } else if (step.toX !== void 0 && step.toY !== void 0) {
               const toRes = await this.resolvePoint(
@@ -33672,7 +33705,8 @@ var HandyController = class _HandyController {
             else if (step.direction === "left") dx -= amount;
             else if (step.direction === "right") dx += amount;
             await this.backend.scroll(dx, dy);
-            detail = `scrolled dx=${dx} dy=${dy}`;
+            const scrollAt = res.point ? res.via === "mark" ? ` at mark #${step.mark} (${res.point.x},${res.point.y})` : ` at (${res.point.x},${res.point.y})` : " at the cursor";
+            detail = `scrolled dx=${dx} dy=${dy}${scrollAt}`;
             break;
           }
           case "type": {
@@ -44268,7 +44302,7 @@ function createHandyMcpServer(options = {}) {
           // "detection broke", nor know that `mark` references are unavailable this round.
           ...shot.marksError ? {
             marksError: shot.marksError,
-            marksHint: "UI element detection failed, so this capture has no marks and `mark` references will be rejected. The screenshot is still valid: read (x, y) from the coordinate rulers and pass explicit coordinates instead."
+            marksHint: "UI element detection failed, so this capture has no marks and any earlier marks were cleared. The screenshot is still valid: read (x, y) from the coordinate rulers and pass explicit coordinates. A later `mark` reference re-detects from the live screen rather than reusing stale indices, so it will resolve if that failure was transient \u2014 retry `handy_see` with marks: true to confirm."
           } : {}
         };
         logAudit(auditEnabled, {

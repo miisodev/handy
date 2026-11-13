@@ -425,11 +425,51 @@ export class HandyController {
     return this.lastElements;
   }
 
-  private resolveMarkPoint(mark: number): Point {
+  /**
+   * Resolves a mark index to a point, detecting elements from the current screen when no marked
+   * capture has happened in this process yet.
+   *
+   * Marks live on the controller instance, and every CLI invocation is a fresh process — so
+   * without this, `handy see --marks` followed by `handy act 'click mark 5'` could never work:
+   * the second command would have nothing to resolve against. Detecting on demand makes a mark
+   * reference self-sufficient from every entry point (CLI, MCP, library) with no persisted state
+   * to go stale, and the indices then describe the screen as it is *now*, which is the only
+   * meaning they can safely have.
+   *
+   * This captures and detects directly rather than calling `see()`, skipping the overlay render
+   * and PNG encode that a detection-only pass would otherwise pay for.
+   */
+  private async resolveMarkPoint(mark: number, displayIndex?: number): Promise<Point> {
     if (!this.lastElements || this.lastElements.length === 0) {
-      throw new Error(
-        `Cannot resolve mark #${mark}: no detected UI elements are available. Call handy_see with { marks: true } first — marks are refreshed on every marked capture.`,
-      );
+      let frame;
+      try {
+        frame = await this.backend.captureScreen({ display: displayIndex });
+      } catch (error) {
+        throw new Error(
+          `Cannot resolve mark #${mark}: no elements were detected in this session and the screen ` +
+            `could not be captured to detect them now (${error instanceof Error ? error.message : String(error)}). ` +
+            `Pass explicit x/y coordinates instead.`,
+        );
+      }
+
+      let detected: UiElement[];
+      try {
+        detected = detectUiElements(frame);
+      } catch (error) {
+        throw new Error(
+          `Cannot resolve mark #${mark}: UI element detection failed ` +
+            `(${error instanceof Error ? error.message : String(error)}). Pass explicit x/y coordinates instead.`,
+        );
+      }
+
+      if (detected.length === 0) {
+        throw new Error(
+          `Cannot resolve mark #${mark}: no UI elements were detected on the current screen. ` +
+            `Pass explicit x/y coordinates, or capture a window/region first so detection has a ` +
+            `denser, higher-resolution frame to work with.`,
+        );
+      }
+      this.lastElements = detected;
     }
     return resolveMarkCenter(this.lastElements, mark);
   }
@@ -444,7 +484,7 @@ export class HandyController {
     cachedDisplays: DisplayInfo[] | null,
   ): Promise<{ point: Point | null; displays: DisplayInfo[] | null; via: "mark" | "coords" | null }> {
     if (step.mark !== undefined) {
-      return { point: this.resolveMarkPoint(step.mark), displays: cachedDisplays, via: "mark" };
+      return { point: await this.resolveMarkPoint(step.mark, displayIndex), displays: cachedDisplays, via: "mark" };
     }
     if (step.x !== undefined && step.y !== undefined) {
       const res = await this.resolvePoint(step.x, step.y, step.coordinateSpace, displayIndex, cachedDisplays);
@@ -751,7 +791,7 @@ export class HandyController {
             let startPos: Point;
             let dragFrom: string;
             if (step.fromMark !== undefined) {
-              startPos = this.resolveMarkPoint(step.fromMark);
+              startPos = await this.resolveMarkPoint(step.fromMark, options.display);
               dragFrom = `mark #${step.fromMark}`;
               await this.commandMoveMouse(startPos.x, startPos.y);
               await sleepAbortable(8, options.signal);
@@ -776,7 +816,7 @@ export class HandyController {
             let endPos: Point;
             let dragTo: string;
             if (step.toMark !== undefined) {
-              endPos = this.resolveMarkPoint(step.toMark);
+              endPos = await this.resolveMarkPoint(step.toMark, options.display);
               dragTo = `mark #${step.toMark}`;
             } else if (step.toX !== undefined && step.toY !== undefined) {
               const toRes = await this.resolvePoint(
@@ -845,7 +885,15 @@ export class HandyController {
             else if (step.direction === "left") dx -= amount;
             else if (step.direction === "right") dx += amount;
             await this.backend.scroll(dx, dy);
-            detail = `scrolled dx=${dx} dy=${dy}`;
+            // Recording *where* the scroll happened matters: scrolling at the cursor and scrolling
+            // inside an element are different actions, and an agent replaying a chain needs to
+            // tell whether the intended target was hit.
+            const scrollAt = res.point
+              ? res.via === "mark"
+                ? ` at mark #${step.mark} (${res.point.x},${res.point.y})`
+                : ` at (${res.point.x},${res.point.y})`
+              : " at the cursor";
+            detail = `scrolled dx=${dx} dy=${dy}${scrollAt}`;
             break;
           }
 

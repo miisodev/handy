@@ -211,7 +211,7 @@ export function createHandyMcpServer(options: CreateHandyMcpOptions = {}): {
             ? {
                 marksError: shot.marksError,
                 marksHint:
-                  "UI element detection failed, so this capture has no marks and `mark` references will be rejected. The screenshot is still valid: read (x, y) from the coordinate rulers and pass explicit coordinates instead.",
+                  "UI element detection failed, so this capture has no marks and any earlier marks were cleared. The screenshot is still valid: read (x, y) from the coordinate rulers and pass explicit coordinates. A later `mark` reference re-detects from the live screen rather than reusing stale indices, so it will resolve if that failure was transient — retry `handy_see` with marks: true to confirm.",
               }
             : {}),
         };

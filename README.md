@@ -136,7 +136,7 @@ Two calls, no coordinate arithmetic. Ask for a marked capture, pick the element 
 }
 ```
 
-`handy_see` returns each element's `index`, `kind`, bounds, `centerX`/`centerY`, and a `score`, and the marks stay valid for subsequent `handy_act` calls until the next marked capture. `verifyChange: true` adds a before/after frame diff so the receipt reports whether the screen actually changed — a cheap post-condition check that catches clicks which landed but did nothing.
+`handy_see` returns each element's `index`, `kind`, bounds, `centerX`/`centerY`, and a `score`, and the marks stay valid for subsequent `handy_act` calls until the next marked capture. In the CLI, where every command is a separate process, a mark reference detects elements from the live screen on demand instead — detection is deterministic for an unchanged screen, so `see --marks` and a later `act` agree on the numbering. To guarantee the indices cannot drift (if the screen may change between commands), do both in one chain: `handy act '[{"type":"screenshot","marks":true},{"type":"click","mark":5}]'`. `verifyChange: true` adds a before/after frame diff so the receipt reports whether the screen actually changed — a cheap post-condition check that catches clicks which landed but did nothing.
 
 The equivalent chain-DSL form works everywhere a chain is accepted:
 

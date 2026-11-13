@@ -72,7 +72,8 @@ Mark indices are assigned per capture, so `mark 5` after a re-capture may be a d
 Marks fail loudly, never silently:
 
 - **Out-of-range index** — the error names the requested mark and lists what *is* available.
-- **No prior marked capture** — the error tells you to call `handy_see({ marks: true })` first. This also applies to a fresh controller that has never run detection.
+- **No prior marked capture** — not an error. A mark reference resolves itself: with nothing cached the controller captures the current screen, runs detection, and resolves against that. This is what makes marks usable across CLI invocations, where each command is a fresh process and nothing can be carried over. Detection is deterministic for an unchanged screen, so `handy see --marks` and a later `handy act "click mark 5"` agree on the numbering. If the screen may change in between, keep both in one chain (`[{"type":"screenshot","marks":true},{"type":"click","mark":5}]`) so the indices cannot drift, or pass explicit coordinates.
+- **Detection found nothing** — a blank or unrecognisable screen yields no elements, so there is no mark to resolve. The error says so and points at explicit coordinates; it also reports a capture or detection failure separately rather than failing opaquely. A warm cache is never re-detected, so a marked chain does not pay for capture and detection per step, and indices stay stable across every step in that chain.
 - **Malformed chain text** — `click mark` with no number, `click mark 0`, or `click 12` (one coordinate) all throw, quoting the offending segment. A malformed pointer step never degrades into "click wherever the cursor happens to be".
 
 ## Chain DSL Forms

@@ -65,6 +65,20 @@ export declare class HandyController {
     private commandMoveMouse;
     /** Most recent Set-of-Mark elements, cleared whenever a capture runs without `marks`. */
     get detectedElements(): UiElement[] | null;
+    /**
+     * Resolves a mark index to a point, detecting elements from the current screen when no marked
+     * capture has happened in this process yet.
+     *
+     * Marks live on the controller instance, and every CLI invocation is a fresh process — so
+     * without this, `handy see --marks` followed by `handy act 'click mark 5'` could never work:
+     * the second command would have nothing to resolve against. Detecting on demand makes a mark
+     * reference self-sufficient from every entry point (CLI, MCP, library) with no persisted state
+     * to go stale, and the indices then describe the screen as it is *now*, which is the only
+     * meaning they can safely have.
+     *
+     * This captures and detects directly rather than calling `see()`, skipping the overlay render
+     * and PNG encode that a detection-only pass would otherwise pay for.
+     */
     private resolveMarkPoint;
     /**
      * Resolves where a pointer step should go: an explicit `mark`, then explicit coordinates, then
